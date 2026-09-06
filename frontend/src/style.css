@@ -1,0 +1,7 @@
+@import "tailwindcss";
+body { margin: 0; min-width: 320px; background: #f4f6f8; color: #17202a; font-family: Inter, system-ui, sans-serif; }
+main { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.card { width: min(760px, 100%); min-height: 620px; display: flex; flex-direction: column; gap: 16px; background: white; border: 1px solid #d9e0e7; border-radius: 16px; padding: 24px; box-shadow: 0 10px 30px #17202a12; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #edf0f2; padding-bottom: 16px; } h1 { margin: 0; font-size: 22px; } header span { color: #64748b; font-size: 13px; }
+.messages { flex: 1; display: flex; flex-direction: column; gap: 12px; overflow: auto; } .message { max-width: 80%; padding: 12px 16px; border-radius: 12px; } .message p { margin: 6px 0 0; white-space: pre-wrap; } .user { align-self: flex-end; background: #dbeafe; } .assistant { align-self: flex-start; background: #f1f5f9; }
+.composer { display: flex; gap: 8px; } input { flex: 1; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; font: inherit; } button { border: 0; border-radius: 8px; background: #2563eb; color: white; padding: 0 20px; cursor: pointer; } small { color: #94a3b8; }
