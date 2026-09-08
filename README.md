@@ -11,7 +11,7 @@
 ### Backend
 
 ```powershell
-cd D:\AbelTomato_Files\Developer\Projects\Tomato-Agent\backend
+cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
@@ -23,7 +23,7 @@ API 默认地址：`http://127.0.0.1:8000`，文档：`/docs`。
 ### Frontend
 
 ```powershell
-cd D:\AbelTomato_Files\Developer\Projects\Tomato-Agent\frontend
+cd frontend
 pnpm install
 pnpm dev
 ```
