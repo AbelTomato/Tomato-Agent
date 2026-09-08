@@ -1,15 +1,5 @@
 # Tomato Agent
 
-一个由使用者手动实现 Agent Runtime 的最小 Agent 基础设施项目。
-
-## 重要边界
-
-本项目**不实现 Agent Runtime 核心 Loop**，也不内置真实 LLM API。用户需要自行实现：用户输入处理、LLM 请求、直接回答或工具调用判断、工具结果判断、多轮 Loop 和最终回答生成。项目提供 Runtime 可调用的基础设施。
-
-## 开发记录和代码审查责任
-
-每轮开发日志必须保存会话过程中用户发送的每一条 Prompt 原文，不能用摘要替代。Agent 可以执行测试和自检并列出 CR 清单，但人工 Code Review 由项目使用者执行；在收到用户反馈前，日志中的人工 CR 状态为“待用户执行”。
-
 ## 技术栈
 
 - Backend: FastAPI、Python、Pydantic、SQLite
@@ -40,13 +30,14 @@ pnpm dev
 
 ## 系统设计
 
-后端提供三类基础设施：
+后端提供 Agent Runtime 及其基础设施：
 
 1. `SessionRepository`：保存 Session、Run、Event、Checkpoint，Session 间不共享对话状态。
 2. `ContextManager`：组织系统指令、Session 摘要、Memory、未解决问题和最近消息，并在达到阈值时进行确定性压缩。
 3. `ToolRegistry`：注册和执行 `calculator`、`search`、`read_docs`。
+4. `AgentRuntime`：执行受预算约束的 LLM/工具 Loop，并持久化 Run、Event 和 Checkpoint。
 
-Runtime 应在每次 LLM 调用前调用 Context 管理器，在工具调用前通过 Registry 校验并执行工具，在关键步骤后写入 Event 和 Checkpoint。
+真实 LLM 通过 `LLMClient` 接口注入。未注入真实客户端时，HTTP Run 会返回失败结果，不会伪造模型答案。
 
 ## Memory 召回时机和放置方式
 
