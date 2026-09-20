@@ -134,3 +134,33 @@ def test_context_truncates_text_while_preserving_tool_call_structure():
     assert result[-1].tool_calls == [tool_call]
     assert len(result[-1].content) < len(message.content)
     assert manager._message_tokens(result[-1]) <= 150
+
+
+def test_context_keeps_tool_call_and_results_as_one_recent_group():
+    manager = ContextManager(max_tokens=1_000, recent_messages=1, token_counter=len)
+    tool_call = ToolCall(call_id="call-1", name="calculator", arguments={"expression": "1 + 1"})
+    messages = [
+        Message(role="user", content="old"),
+        Message(role="assistant", tool_calls=[tool_call]),
+        Message(role="tool", content='{"value": 2}', tool_call_id="call-1"),
+    ]
+
+    result = manager.build("system", ContextState(), messages)
+
+    assert [message.role for message in result[1:]] == ["assistant", "tool"]
+    assert result[-1].tool_call_id == "call-1"
+
+
+def test_context_drops_entire_tool_group_when_group_cannot_fit():
+    manager = ContextManager(max_tokens=80, recent_messages=2, token_counter=len)
+    tool_call = ToolCall(call_id="call-1", name="calculator", arguments={"expression": "1 + 1"})
+    messages = [
+        Message(role="user", content="old"),
+        Message(role="assistant", tool_calls=[tool_call], content="assistant " * 30),
+        Message(role="tool", content="result " * 30, tool_call_id="call-1"),
+    ]
+
+    result = manager.build("system", ContextState(), messages)
+
+    assert not any(message.role == "tool" for message in result)
+    assert not any(message.role == "assistant" and message.tool_calls for message in result)

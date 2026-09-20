@@ -43,6 +43,9 @@ class OpenAICompatibleClient(LLMClient):
                 self._tool_to_provider(item)
                 for item in tools
             ]
+            # Runtime executes exactly one tool call per LLM turn.
+            payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = False
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -149,7 +152,12 @@ class OpenAICompatibleClient(LLMClient):
                     "LLM provider returned invalid tool_calls"
                 )
 
-            # 当前 LLMResponse 只能承载一个 ToolCall。
+            if len(provider_tool_calls) != 1:
+                raise RuntimeError(
+                    "LLM provider returned multiple tool calls; "
+                    "parallel tool execution is not supported"
+                )
+
             provider_tool_call = provider_tool_calls[0]
             return LLMResponse(
                 kind="tool_call",

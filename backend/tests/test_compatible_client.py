@@ -58,6 +58,8 @@ async def test_complete_sends_openai_compatible_request_and_parses_final_respons
                 },
             }
         ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
     }
 
 
@@ -215,3 +217,37 @@ def test_tool_message_requires_tool_call_id():
 
     with pytest.raises(ValueError, match="tool_call_id"):
         client._message_to_provider(Message(role="tool", content="result"))
+
+@pytest.mark.asyncio
+async def test_complete_rejects_multiple_provider_tool_calls():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "function": {"name": "calculator", "arguments": "{}"},
+                                },
+                                {
+                                    "id": "call-2",
+                                    "function": {"name": "calculator", "arguments": "{}"},
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(
+        api_key="test-key",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError, match="multiple tool calls"):
+        await client.complete([], [])

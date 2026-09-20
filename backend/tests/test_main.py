@@ -72,3 +72,51 @@ async def test_create_run_uses_agent_runtime(monkeypatch, tmp_path):
 
     assert result["status"] == "completed"
     assert result["answer"] == "api answer"
+
+
+class RecordingLLM:
+    def __init__(self):
+        self.messages = []
+        self.responses = [
+            LLMResponse(kind="final", content="第一轮回答"),
+            LLMResponse(kind="final", content="第二轮回答"),
+        ]
+
+    async def complete(self, messages, tools):
+        self.messages.append(messages)
+        return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_http_runs_pass_completed_history_to_second_request(monkeypatch, tmp_path):
+    repository = main.SessionRepository(tmp_path / "api.db")
+    await repository.init()
+    llm = RecordingLLM()
+    monkeypatch.setattr(main, "repo", repository)
+    monkeypatch.setattr(main, "llm_client", llm)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        session_response = await client.post("/api/sessions", json={})
+        session_response.raise_for_status()
+        session_id = session_response.json()["session_id"]
+
+        first_response = await client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"message": "我的主题是 Redis"},
+        )
+        second_response = await client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"message": "继续讨论"},
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    second_contents = [message.content for message in llm.messages[1]]
+    assert "我的主题是 Redis" in second_contents
+    assert "第一轮回答" in second_contents
+    assert second_contents.count("继续讨论") == 1
+

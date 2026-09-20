@@ -182,3 +182,51 @@ async def test_get_run_rejects_wrong_session(tmp_path: Path):
 
     with pytest.raises(ValueError, match="does not belong"):
         await repo.get_run(run_id, another_session_id)
+
+
+@pytest.mark.asyncio
+async def test_repository_lists_only_completed_user_and_final_messages(tmp_path: Path):
+    repo = SessionRepository(tmp_path / "agent.db")
+    await repo.init()
+    session_id = await repo.create_session()
+
+    completed_run = await repo.create_run(session_id)
+    await repo.append_event(
+        session_id, completed_run, "user_message", {"content": "first question"}
+    )
+    await repo.append_event(
+        session_id,
+        completed_run,
+        "assistant_message",
+        {"content": "tool intermediate", "tool_calls": [{"call_id": "call-1"}]},
+    )
+    await repo.append_event(
+        session_id, completed_run, "tool_result", {"content": "tool result"}
+    )
+    await repo.append_event(
+        session_id, completed_run, "assistant_message", {"content": "first answer"}
+    )
+    await repo.update_run(completed_run, "completed")
+
+    failed_run = await repo.create_run(session_id)
+    await repo.append_event(
+        session_id, failed_run, "user_message", {"content": "failed question"}
+    )
+    await repo.append_event(
+        session_id, failed_run, "assistant_message", {"content": "failed answer"}
+    )
+    await repo.update_run(failed_run, "failed")
+
+    paused_run = await repo.create_run(session_id)
+    await repo.append_event(
+        session_id, paused_run, "user_message", {"content": "paused question"}
+    )
+    await repo.update_run(paused_run, "paused")
+
+    events = await repo.list_completed_turn_events(session_id)
+
+    assert [(event.event_type, event.payload["content"]) for event in events] == [
+        ("user_message", "first question"),
+        ("assistant_message", "first answer"),
+    ]
+

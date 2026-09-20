@@ -150,6 +150,43 @@ class ContextManager:
                 parts.append(section)
         return "".join(parts)
 
+    def _message_groups(self, messages: list[Message]) -> list[tuple[int, list[Message]]]:
+        groups: list[tuple[int, list[Message]]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "assistant" and message.tool_calls:
+                group = [message]
+                tool_call_ids = {item.call_id for item in message.tool_calls}
+                next_index = index + 1
+                while (
+                    next_index < len(messages)
+                    and messages[next_index].role == "tool"
+                    and messages[next_index].tool_call_id in tool_call_ids
+                ):
+                    group.append(messages[next_index])
+                    next_index += 1
+                groups.append((index, group))
+                index = next_index
+                continue
+            if message.role != "tool":
+                groups.append((index, [message]))
+            index += 1
+        return groups
+
+    def _recent_groups(self, messages: list[Message]) -> list[tuple[int, list[Message]]]:
+        if self.recent_messages == 0:
+            return []
+        groups = self._message_groups(messages)
+        selected: list[tuple[int, list[Message]]] = []
+        count = 0
+        for group in reversed(groups):
+            selected.append(group)
+            count += len(group[1])
+            if count >= self.recent_messages:
+                break
+        return list(reversed(selected))
+
     def build(
         self,
         system_instruction: str,
@@ -159,11 +196,18 @@ class ContextManager:
         prefix = self._build_system_message(system_instruction, state, self.max_tokens)
         remaining = self.max_tokens - self._tokens(prefix)
         selected: list[Message] = []
-        recent = [] if self.recent_messages == 0 else messages[-self.recent_messages :]
-        for message in reversed(recent):
+        recent_groups = self._recent_groups(messages)
+        for _, group in reversed(recent_groups):
             if remaining <= 0:
                 break
-            selected_message = self._fit_message(message, remaining)
+            if len(group) > 1:
+                group_tokens = sum(self._message_tokens(item) for item in group)
+                if group_tokens > remaining:
+                    continue
+                selected.extend(reversed(group))
+                remaining -= group_tokens
+                continue
+            selected_message = self._fit_message(group[0], remaining)
             if selected_message is None:
                 continue
             selected.append(selected_message)
@@ -172,11 +216,8 @@ class ContextManager:
         return [Message(role="system", content=prefix), *selected]
 
     def compact(self, state: ContextState, messages: list[Message]) -> ContextState:
-        target_count = (
-            len(messages)
-            if self.recent_messages == 0
-            else max(0, len(messages) - self.recent_messages)
-        )
+        recent_groups = self._recent_groups(messages)
+        target_count = recent_groups[0][0] if recent_groups else len(messages)
         start_count = min(state.compacted_message_count, target_count)
         old = messages[start_count:target_count]
         if not old:

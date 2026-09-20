@@ -70,6 +70,8 @@ class AgentRuntime:
         self,
         session_id: UUID,
         run_id: UUID,
+        *,
+        include_previous_history: bool = False,
     ) -> tuple[list[Message], ContextState, RuntimeCounters]:
         run = await self.repository.get_run(run_id, session_id)
         if run is None:
@@ -92,8 +94,15 @@ class AgentRuntime:
             }
             state = ContextState.model_validate(metadata_state)
 
-        events = await self.repository.list_events(run_id)
         messages: list[Message] = []
+        if include_previous_history:
+            previous_events = await self.repository.list_completed_turn_events(session_id)
+            for event in previous_events:
+                message = self._message_from_event(event.event_type, event.payload)
+                if message is not None:
+                    messages.append(message)
+
+        events = await self.repository.list_events(run_id)
         for event in events:
             message = self._message_from_event(event.event_type, event.payload)
             if message is not None:
@@ -397,6 +406,7 @@ class AgentRuntime:
     ) -> RunResult:
         trace_id = uuid4()
         started_at = monotonic()
+        is_new_run = run_id is None
         run_id = await self._start_or_resume_run(
             session_id=session_id,
             run_id=run_id,
@@ -405,6 +415,7 @@ class AgentRuntime:
         messages, state, counters = await self._load_runtime_state(
             session_id=session_id,
             run_id=run_id,
+            include_previous_history=is_new_run,
         )
 
         if user_message is not None:

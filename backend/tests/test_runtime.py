@@ -185,3 +185,76 @@ async def test_runtime_persists_user_message_as_content(tmp_path):
     user_event = next(event for event in events if event.event_type == "user_message")
     assert user_event.payload["content"] == "hello"
     assert "message" not in user_event.payload
+
+
+@pytest.mark.asyncio
+async def test_new_run_receives_previous_completed_turn_and_is_session_isolated(tmp_path):
+    llm = FakeLLM(
+        LLMResponse(kind="final", content="你的博客主题是 Redis。"),
+        LLMResponse(kind="final", content="可以继续讨论 Redis 持久化。"),
+        LLMResponse(kind="final", content="新的会话。"),
+    )
+    runtime, repository, session_id = await make_runtime(tmp_path, llm)
+
+    first = await runtime.run(session_id, "我的博客主题是 Redis。")
+    second = await runtime.run(session_id, "继续这个主题。")
+
+    assert first.status == "completed"
+    assert second.status == "completed"
+    contents = [message.content for message in llm.messages[1][0]]
+    assert "我的博客主题是 Redis。" in contents
+    assert "你的博客主题是 Redis。" in contents
+    assert contents.count("继续这个主题。") == 1
+
+    other_session = await repository.create_session()
+    await runtime.run(other_session, "你好。")
+    other_contents = [message.content for message in llm.messages[2][0]]
+    assert "我的博客主题是 Redis。" not in other_contents
+    assert "你的博客主题是 Redis。" not in other_contents
+
+
+@pytest.mark.asyncio
+async def test_resuming_current_run_does_not_duplicate_messages(tmp_path):
+    llm = FakeLLM(LLMResponse(kind="final", content="恢复后的回答。"))
+    runtime, repository, session_id = await make_runtime(tmp_path, llm)
+    run_id = await repository.create_run(session_id)
+    await repository.append_event(session_id, run_id, "run_started", {})
+    await repository.append_event(
+        session_id, run_id, "user_message", {"content": "当前问题"}
+    )
+    await repository.update_run(run_id, "paused")
+
+    result = await runtime.run(session_id, run_id=run_id)
+
+    assert result.status == "completed"
+    contents = [message.content for message in llm.messages[0][0]]
+    assert contents.count("当前问题") == 1
+    assert "恢复后的回答。" not in contents
+
+
+@pytest.mark.asyncio
+async def test_previous_failed_or_paused_runs_are_not_inherited(tmp_path):
+    llm = FakeLLM(LLMResponse(kind="final", content="只应看到已完成。"))
+    runtime, repository, session_id = await make_runtime(tmp_path, llm)
+
+    completed = await runtime.run(session_id, "已完成问题")
+    failed_run = await repository.create_run(session_id)
+    await repository.append_event(
+        session_id, failed_run, "user_message", {"content": "失败问题"}
+    )
+    await repository.append_event(
+        session_id, failed_run, "assistant_message", {"content": "失败回答"}
+    )
+    await repository.update_run(failed_run, "failed")
+    paused_run = await repository.create_run(session_id)
+    await repository.append_event(
+        session_id, paused_run, "user_message", {"content": "暂停问题"}
+    )
+    await repository.update_run(paused_run, "paused")
+
+    await runtime.run(session_id, "新问题")
+    contents = [message.content for message in llm.messages[1][0]]
+    assert "已完成问题" in contents
+    assert "失败问题" not in contents
+    assert "暂停问题" not in contents
+    assert completed.status == "completed"

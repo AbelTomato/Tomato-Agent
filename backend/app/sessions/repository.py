@@ -100,6 +100,47 @@ class SessionRepository:
             for row in rows
         ]
 
+    async def list_completed_turn_events(self, session_id: UUID) -> list[Event]:
+        """Return only user/final-assistant events from completed runs."""
+        if await self.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+
+        async with aiosqlite.connect(self.path) as db:
+            await self._enable_foreign_keys(db)
+            cursor = await db.execute(
+                "SELECT e.id, e.session_id, e.run_id, e.sequence, "
+                "e.event_type, e.payload, e.created_at "
+                "FROM events AS e "
+                "JOIN runs AS r ON r.id = e.run_id "
+                "WHERE e.session_id = ? AND r.status = 'completed' "
+                "ORDER BY r.created_at ASC, r.id ASC, e.sequence ASC",
+                (str(session_id),),
+            )
+            rows = await cursor.fetchall()
+
+        events: list[Event] = []
+        for row in rows:
+            payload = json.loads(row[5])
+            if row[4] == "user_message":
+                include = True
+            elif row[4] == "assistant_message":
+                include = not payload.get("tool_calls")
+            else:
+                include = False
+            if include:
+                events.append(
+                    Event(
+                        id=UUID(row[0]),
+                        session_id=UUID(row[1]),
+                        run_id=UUID(row[2]),
+                        sequence=row[3],
+                        event_type=row[4],
+                        payload=payload,
+                        created_at=parse_datetime(row[6]),
+                    )
+                )
+        return events
+
     async def create_run(self, session_id: UUID) -> UUID:
         if not await self.session_exists(session_id):
             raise ValueError(f"Session not found: {session_id}")
