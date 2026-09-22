@@ -1,0 +1,62 @@
+[
+  {
+    "name": "baseline",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 5,
+    "candidate_min_vector_similarity": 0.5,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "baseline",
+    "answerability": "baseline"
+  },
+  {
+    "name": "wide-candidate",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "baseline",
+    "answerability": "baseline"
+  },
+  {
+    "name": "wide-plus-rerank",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "fake-or-approved-provider",
+    "evidence_selection": "baseline",
+    "answerability": "baseline"
+  },
+  {
+    "name": "coverage",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "coverage-aware",
+    "answerability": "coverage-v1"
+  },
+  {
+    "name": "query-decomposition",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "conditional",
+    "rerank": "noop",
+    "evidence_selection": "coverage-aware",
+    "answerability": "coverage-v1"
+  }
+]

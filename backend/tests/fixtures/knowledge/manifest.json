@@ -1,0 +1,12 @@
+[
+  {
+    "path": "redis.md",
+    "title": "Redis 缓存实践",
+    "url": "https://example.test/blog/redis-cache"
+  },
+  {
+    "path": "cache.md",
+    "title": "Python 缓存策略",
+    "url": null
+  }
+]
