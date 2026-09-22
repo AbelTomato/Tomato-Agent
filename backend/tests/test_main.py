@@ -15,6 +15,14 @@ async def test_health_response():
 
 
 @pytest.mark.asyncio
+async def test_default_tool_registry_exposes_local_knowledge_tools():
+    payload = await main.tools()
+    names = {tool["name"] for tool in payload["tools"]}
+
+    assert {"search_knowledge", "read_knowledge"}.issubset(names)
+
+
+@pytest.mark.asyncio
 async def test_cors_preflight_allows_local_frontend_origin():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -119,4 +127,89 @@ async def test_http_runs_pass_completed_history_to_second_request(monkeypatch, t
     assert "我的主题是 Redis" in second_contents
     assert "第一轮回答" in second_contents
     assert second_contents.count("继续讨论") == 1
+
+def test_knowledge_factory_keeps_vector_modes_disabled_without_embedding_config(tmp_path):
+    config = main.Settings(embedding_model="", embedding_dimensions=0)
+
+    service = main.create_knowledge_service(
+        main.KnowledgeRepository(tmp_path / "knowledge.db"),
+        config,
+    )
+
+    assert service.query_embedder is None
+    assert service.embedding_model == ""
+    assert service.embedding_dimensions == 0
+
+
+def test_knowledge_factory_wires_configured_embedding_client(tmp_path):
+    config = main.Settings(
+        embedding_api_key="embedding-key",
+        embedding_base_url="https://embedding.example/v1",
+        embedding_model="test-embedding",
+        embedding_dimensions=3,
+    )
+
+    service = main.create_knowledge_service(
+        main.KnowledgeRepository(tmp_path / "knowledge.db"),
+        config,
+    )
+
+    assert service.query_embedder is not None
+    assert service.embedding_model == "test-embedding"
+    assert service.embedding_dimensions == 3
+    assert service.query_embedder.__self__.api_key == "embedding-key"
+    assert service.query_embedder.__self__.base_url == "https://embedding.example/v1"
+
+
+def test_knowledge_factory_keeps_pipeline_disabled_by_default(tmp_path):
+    service = main.create_knowledge_service(
+        main.KnowledgeRepository(tmp_path / "knowledge.db"),
+        main.Settings(),
+    )
+
+    assert service.pipeline is None
+
+
+def test_knowledge_factory_injects_explicit_pipeline_components(tmp_path):
+    config = main.Settings(
+        knowledge_pipeline_enabled=True,
+        knowledge_candidate_limit=17,
+    )
+
+    service = main.create_knowledge_service(
+        main.KnowledgeRepository(tmp_path / "knowledge.db"),
+        config,
+    )
+
+    assert service.pipeline is not None
+    assert service.candidate_limit == 17
+    assert isinstance(service.pipeline.reranker, main.NoopReranker)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_capabilities_only_expose_configured_modes(monkeypatch):
+    unconfigured = main.KnowledgeService(object())
+    monkeypatch.setattr(main, "knowledge_service", unconfigured)
+
+    assert await main.knowledge_capabilities() == {
+        "retrieval_modes": ["keyword"],
+        "embedding_configured": False,
+        "embedding_model": None,
+        "embedding_dimensions": None,
+    }
+
+    configured = main.KnowledgeService(
+        object(),
+        query_embedder=lambda texts: texts,
+        embedding_model="test-embedding",
+        embedding_dimensions=3,
+    )
+    monkeypatch.setattr(main, "knowledge_service", configured)
+
+    assert await main.knowledge_capabilities() == {
+        "retrieval_modes": ["keyword", "vector", "hybrid"],
+        "embedding_configured": True,
+        "embedding_model": "test-embedding",
+        "embedding_dimensions": 3,
+    }
 

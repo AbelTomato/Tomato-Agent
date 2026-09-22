@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
@@ -22,6 +22,8 @@ class RuntimeCounters:
     tool_call_count: int = 0
     elapsed_seconds: float = 0.0
     last_sequence: int = 0
+    read_chunk_ids: set[str] = field(default_factory=set)
+    read_document_versions: set[str] = field(default_factory=set)
 
 
 class AgentRuntime:
@@ -126,6 +128,8 @@ class AgentRuntime:
             tool_call_count=max(0, int(counter_data.get("tool_call_count", 0))),
             elapsed_seconds=max(0.0, float(counter_data.get("elapsed_seconds", 0.0))),
             last_sequence=max(0, int(counter_data.get("last_sequence", 0))),
+            read_chunk_ids=set(counter_data.get("read_chunk_ids", [])),
+            read_document_versions=set(counter_data.get("read_document_versions", [])),
         )
         return state, counters
 
@@ -222,15 +226,24 @@ class AgentRuntime:
         )
 
         counters.tool_call_count += 1
+        tool_context = ToolContext(
+            session_id=str(session_id),
+            run_id=str(run_id),
+            read_chunk_ids=set(counters.read_chunk_ids),
+            read_document_versions=set(counters.read_document_versions),
+        )
         try:
             result = await self.tool_registry.execute(
                 tool_call.name,
                 tool_call.arguments,
-                ToolContext(session_id=str(session_id), run_id=str(run_id)),
+                tool_context,
                 timeout=self.config.tool_timeout_seconds,
             )
         except Exception as exc:
             result = ToolResult(success=False, error=str(exc))
+
+        counters.read_chunk_ids.update(tool_context.read_chunk_ids)
+        counters.read_document_versions.update(tool_context.read_document_versions)
 
         content = self._serialize_tool_result(result)
         messages.append(
@@ -249,6 +262,8 @@ class AgentRuntime:
                 "tool_name": tool_call.name,
                 "content": content,
                 "success": result.success,
+                "read_chunk_ids": sorted(counters.read_chunk_ids),
+                "read_document_versions": sorted(counters.read_document_versions),
                 "trace_id": str(trace_id),
             },
         )
@@ -383,7 +398,10 @@ class AgentRuntime:
         state: ContextState,
         counters: RuntimeCounters,
     ) -> dict[str, Any]:
-        return {"context": state.model_dump(mode="json"), "counters": asdict(counters)}
+        checkpoint = asdict(counters)
+        checkpoint["read_chunk_ids"] = sorted(counters.read_chunk_ids)
+        checkpoint["read_document_versions"] = sorted(counters.read_document_versions)
+        return {"context": state.model_dump(mode="json"), "counters": checkpoint}
 
     async def _save_runtime_state(
         self,

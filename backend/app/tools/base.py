@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agent.models import ToolDefinition
 
@@ -9,6 +9,8 @@ from app.agent.models import ToolDefinition
 class ToolContext(BaseModel):
     session_id: str
     run_id: str
+    read_chunk_ids: set[str] = Field(default_factory=set)
+    read_document_versions: set[str] = Field(default_factory=set)
 
 
 class ToolResult(BaseModel):
