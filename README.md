@@ -63,3 +63,19 @@ Memory 放在 Context 的 `<Relevant Memory>` 区块，位于 Session Summary �
 - `backend/app/observability`：日志和 Trace
 - `backend/tests`：单元及集成测试
 - `docs/development-log`：逐轮开发记录
+
+## 知识库评测
+
+知识库导入和评测使用固定的 JSON 清单与 JSONL 问题集。评测命令要求显式提供已导入的 SQLite 知识库：
+
+```bash
+cd backend
+.venv/bin/python -m app.knowledge.evaluation \
+  --dataset /absolute/path/to/questions.jsonl \
+  --split dev \
+  --mode keyword \
+  --output /absolute/path/to/report.json \
+  --database /absolute/path/to/knowledge.db
+```
+
+`vector` 和 `hybrid` 模式还需要兼容的 Embedding 模型、维度和索引。评测只自动计算证据段 Recall@5、MRR@5 及无答案统计；模型答案质量和真实博客效果必须人工验收，不能用固定测试语料单测成绩代替。当前状态见 [`docs/评测/博客RAG基线报告.md`](docs/评测/博客RAG基线报告.md)。

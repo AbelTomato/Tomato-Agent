@@ -11,3 +11,11 @@ logs/
 *.egg-info/
 *.tsbuildinfo
 .clinerules
+
+# Keep non-secret configuration templates visible in version control.
+!.env.example
+!backend/.env.example
+
+docs/development-log/
+docs/实施计划/
+docs/实施计划
