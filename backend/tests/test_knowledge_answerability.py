@@ -75,7 +75,7 @@ def test_judge_rejects_partial_multi_evidence_even_when_candidate_pool_is_nonemp
     )
 
     assert decision.status == "insufficient"
-    assert decision.reason == "missing_required_query"
+    assert decision.reason == "partial_coverage"
     assert decision.coverage_ratio == 0.5
 
 

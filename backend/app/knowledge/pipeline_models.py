@@ -53,6 +53,7 @@ class CandidateEvidence(_ImmutableModel):
     result: SearchResult
     query_ids: tuple[str, ...] = Field(min_length=1)
     retrieval_ranks: tuple[int, ...] = Field(min_length=1)
+    retrieval_scores: tuple[float, ...] = ()
     retrieval_score_type: str = Field(min_length=1)
     rerank_score: float | None = None
 
@@ -70,6 +71,13 @@ class CandidateEvidence(_ImmutableModel):
     def validate_retrieval_ranks(cls, value: tuple[int, ...]) -> tuple[int, ...]:
         if any(rank <= 0 for rank in value):
             raise ValueError("retrieval ranks must be positive")
+        return value
+
+    @field_validator("retrieval_scores")
+    @classmethod
+    def validate_retrieval_scores(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if any(not math.isfinite(score) for score in value):
+            raise ValueError("retrieval scores must be finite")
         return value
 
     @field_validator("retrieval_score_type")
@@ -92,8 +100,28 @@ class CandidateEvidence(_ImmutableModel):
             raise ValueError("result score must be finite")
         if len(self.query_ids) != len(self.retrieval_ranks):
             raise ValueError("query_ids and retrieval_ranks must have the same length")
+        if self.retrieval_scores and len(self.query_ids) != len(self.retrieval_scores):
+            raise ValueError("query_ids and retrieval_scores must have the same length")
         if self.result.end_line < self.result.start_line:
             raise ValueError("result end_line must not precede start_line")
+        return self
+
+
+class SelectionDisposition(_ImmutableModel):
+    candidate_index: int = Field(ge=1)
+    chunk_id: str = Field(min_length=1)
+    selected: bool
+    selected_order: int | None = Field(default=None, ge=1)
+    excluded_reason: Literal[
+        "final_limit", "duplicate_chunk", "not_selected_by_selector"
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_disposition(self) -> SelectionDisposition:
+        if self.selected and (self.selected_order is None or self.excluded_reason is not None):
+            raise ValueError("selected candidates require an order and no exclusion reason")
+        if not self.selected and (self.selected_order is not None or self.excluded_reason is None):
+            raise ValueError("excluded candidates require a reason and no selection order")
         return self
 
 
@@ -102,6 +130,7 @@ class EvidenceSelection(_ImmutableModel):
     covered_query_ids: tuple[str, ...]
     covered_document_ids: tuple[str, ...]
     final_limit: int = Field(gt=0)
+    dispositions: tuple[SelectionDisposition, ...] = ()
 
     @field_validator("covered_query_ids", "covered_document_ids")
     @classmethod
@@ -139,12 +168,14 @@ class PipelineResult(_ImmutableModel):
     candidates: tuple[CandidateEvidence, ...]
     selection: EvidenceSelection
     decision: AnswerabilityDecision
+    query_planner_latency_ms: float = Field(default=0.0, ge=0.0)
     candidate_latency_ms: float = Field(ge=0.0)
     rerank_latency_ms: float = Field(ge=0.0)
     selection_latency_ms: float = Field(ge=0.0)
     judge_latency_ms: float = Field(ge=0.0)
 
     @field_validator(
+        "query_planner_latency_ms",
         "candidate_latency_ms",
         "rerank_latency_ms",
         "selection_latency_ms",

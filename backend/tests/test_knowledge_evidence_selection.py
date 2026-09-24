@@ -80,6 +80,22 @@ def test_selector_reports_partial_coverage_when_limit_is_too_small():
     assert len(selection.selected) == 1
     assert selection.covered_query_ids == ("q1",)
     assert selection.covered_document_ids == ("doc-a",)
+    assert [(item.chunk_id, item.selected, item.excluded_reason) for item in selection.dispositions] == [
+        ("q1", True, None),
+        ("q2", False, "final_limit"),
+    ]
+
+
+def test_selector_records_duplicate_chunk_exclusion_at_decision_boundary():
+    duplicated = candidate("same", "doc-a", ("q1",), 1)
+    selection = CoverageAwareEvidenceSelector().select(
+        plan("q1"), [duplicated, duplicated], final_limit=2
+    )
+
+    assert [(item.candidate_index, item.selected, item.excluded_reason) for item in selection.dispositions] == [
+        (1, True, None),
+        (2, False, "duplicate_chunk"),
+    ]
 
 
 @pytest.mark.parametrize("final_limit", [0, -1])

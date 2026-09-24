@@ -39,6 +39,34 @@ class AnswerabilityJudge(Protocol):
         ...
 
 
+class BaselineAnswerabilityJudge:
+    """Preserve retrieval-only baseline semantics behind an explicit judge."""
+
+    def judge(
+        self,
+        plan: QueryPlan,
+        selection: EvidenceSelection,
+        *,
+        config: AnswerabilityConfig,
+    ) -> AnswerabilityDecision:
+        if not selection.selected:
+            return AnswerabilityDecision(
+                status="no_results",
+                reason="no_candidates",
+                coverage_ratio=0.0,
+                confidence=None,
+            )
+        required_query_ids = {query.query_id for query in plan.queries}
+        covered_query_ids = required_query_ids.intersection(selection.covered_query_ids)
+        coverage_ratio = len(covered_query_ids) / len(required_query_ids)
+        return AnswerabilityDecision(
+            status="supported",
+            reason="non_empty_selection",
+            coverage_ratio=coverage_ratio,
+            confidence=None,
+        )
+
+
 class CoverageAnswerabilityJudge:
     def judge(
         self,
@@ -70,7 +98,12 @@ class CoverageAnswerabilityJudge:
         else:
             fully_covered = coverage_ratio >= config.min_supported_coverage
         if not fully_covered:
-            return self._insufficient("missing_required_query", coverage_ratio, confidence)
+            reason = (
+                "partial_coverage"
+                if coverage_ratio >= config.min_partial_coverage
+                else "missing_required_query"
+            )
+            return self._insufficient(reason, coverage_ratio, confidence)
         if config.min_confidence is not None and (
             confidence is None or confidence < config.min_confidence
         ):

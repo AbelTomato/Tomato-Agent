@@ -59,6 +59,41 @@ async def test_knowledge_init_migrates_index_error_on_existing_database(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_read_only_knowledge_repository_never_mutates_database(tmp_path: Path):
+    database = tmp_path / "knowledge.db"
+    writer = KnowledgeRepository(database)
+    await writer.init()
+    await writer.replace_document(
+        Document(
+            document_id="read-only-doc",
+            source_path="read-only.md",
+            source_url=None,
+            title="Read-only",
+            content_hash="v1",
+        ),
+        [],
+    )
+    original_bytes = database.read_bytes()
+
+    reader = KnowledgeRepository(database, read_only=True)
+    await reader.init()
+
+    assert await reader.get_document_by_path("read-only.md") is not None
+    with pytest.raises(aiosqlite.OperationalError):
+        await reader.replace_document(
+            Document(
+                document_id="unexpected-write",
+                source_path="unexpected.md",
+                source_url=None,
+                title="Unexpected",
+                content_hash="v2",
+            ),
+            [],
+        )
+    assert database.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
 async def test_ingest_same_manifest_twice_is_idempotent(tmp_path: Path):
     root = tmp_path / "docs"
     root.mkdir()

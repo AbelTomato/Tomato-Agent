@@ -86,6 +86,7 @@ async def test_keyword_candidate_retrieval_uses_wide_limit_and_records_bm25_rank
     assert candidates[0].retrieval_score_type == "bm25"
     assert candidates[0].query_ids == ("q1",)
     assert candidates[0].retrieval_ranks == (1,)
+    assert candidates[0].retrieval_scores == (0.1,)
     assert repository.calls == [("keyword", {"query": "Q/K/V", "limit": 30})]
 
 
@@ -101,8 +102,10 @@ async def test_multi_query_candidates_deduplicate_chunk_and_merge_query_ids_and_
     assert [candidate.result.chunk_id for candidate in candidates] == ["shared", "second"]
     assert candidates[0].query_ids == ("q1", "q2")
     assert candidates[0].retrieval_ranks == (1, 1)
+    assert candidates[0].retrieval_scores == (0.9, 0.9)
     assert candidates[1].query_ids == ("q1",)
     assert candidates[1].retrieval_ranks == (2,)
+    assert candidates[1].retrieval_scores == (0.8,)
 
 
 @pytest.mark.asyncio

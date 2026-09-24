@@ -103,6 +103,7 @@ class RepositoryCandidateRetriever:
                         result=result,
                         query_ids=(query.query_id,),
                         retrieval_ranks=(rank,),
+                        retrieval_scores=(result.score,),
                         retrieval_score_type=score_type,
                     )
                 elif query.query_id not in existing.query_ids:
@@ -110,6 +111,7 @@ class RepositoryCandidateRetriever:
                         update={
                             "query_ids": (*existing.query_ids, query.query_id),
                             "retrieval_ranks": (*existing.retrieval_ranks, rank),
+                            "retrieval_scores": (*existing.retrieval_scores, result.score),
                         }
                     )
         return tuple(merged.values())

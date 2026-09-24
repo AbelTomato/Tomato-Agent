@@ -7,17 +7,23 @@ import pytest
 
 from app.knowledge.evaluation import (
     EvaluationQuestion,
+    apply_ablation_config,
     build_parser,
     evaluate_retrieval,
     evaluate_question_results,
     load_ablation_configs,
+    load_questions,
     mean_reciprocal_rank,
     recall_at_k,
+    select_ablation_config,
     summarize_question_results,
+    judge_state_counts,
+    validate_report_output_path,
     validate_min_vector_similarity,
 )
 from app.knowledge.ingestion import ingest_manifest
 from app.knowledge.models import SearchResult
+from app.knowledge.pipeline_models import CandidateEvidence
 from app.knowledge.repository import KnowledgeRepository
 
 
@@ -105,8 +111,9 @@ def test_evaluate_retrieval_separates_unanswerable_questions_and_refusals():
     assert summary.recall_at_k == pytest.approx(1.0)
     assert summary.mrr_at_k == pytest.approx(1.0)
     assert summary.unanswerable_count == 1
-    assert summary.correct_refusal_count == 1
+    assert summary.correct_refusal_count == 0
     assert summary.incorrect_answer_count == 0
+    assert summary.refusal_evaluation == "retrieval_only"
 
 
 def test_question_results_record_hits_statuses_and_execution_errors():
@@ -198,10 +205,104 @@ def test_question_results_record_hits_statuses_and_execution_errors():
     assert summary.recall_at_k == pytest.approx(0.5)
     assert summary.hit_at_k == pytest.approx(0.5)
     assert summary.answerable_empty_result_count == 1
-    assert summary.correct_refusal_count == 1
-    assert summary.incorrect_answer_count == 1
+    assert summary.correct_refusal_count == 0
+    assert summary.incorrect_answer_count == 0
     assert summary.execution_error_count == 1
     assert summary.evaluated_unanswerable_count == 2
+
+
+def test_supported_judge_state_without_answer_generation_is_not_refusal_evaluation():
+    question = EvaluationQuestion(
+        question_id="unanswerable-with-hit",
+        query="不存在的线上成本对照",
+        category="无答案",
+        split="dev",
+        answerable=False,
+        relevant_spans=(),
+        reference_answer="材料不足",
+    )
+    result = make_result("similar-but-insufficient", "related", "v1", 1, 2)
+
+    results = evaluate_question_results(
+        [question],
+        {question.question_id: [result]},
+        candidate_result_map={question.question_id: [result]},
+        final_result_map={question.question_id: [result]},
+        evidence_status_map={question.question_id: "supported"},
+        judge_executed_map={question.question_id: True},
+        score_type="rrf",
+        k=5,
+    )
+
+    item = results[0]
+    assert item.candidate_nonempty is True
+    assert item.final_nonempty is True
+    assert item.judge_status == "supported"
+    assert item.correct_refusal is None
+    assert item.incorrect_refusal is None
+    summary = summarize_question_results(results, k=5)
+    assert summary.correct_refusal_count == 0
+    assert summary.incorrect_answer_count == 0
+    assert summary.incorrect_refusal_count == 0
+
+
+def test_nonempty_supported_refusal_counts_as_incorrect_answer_only_after_llm_call():
+    question = EvaluationQuestion(
+        question_id="unanswerable-answered",
+        query="缺少证据的问题",
+        category="无答案",
+        split="dev",
+        answerable=False,
+        relevant_spans=(),
+        reference_answer="材料不足",
+    )
+    result = make_result("similar", "related", "v1", 1, 2)
+
+    results = evaluate_question_results(
+        [question],
+        {question.question_id: [result]},
+        evidence_status_map={question.question_id: "supported"},
+        judge_executed_map={question.question_id: True},
+        llm_called_map={question.question_id: True},
+        score_type="rrf",
+        k=5,
+    )
+
+    summary = summarize_question_results(results, k=5)
+    assert summary.incorrect_refusal_count == 1
+    assert summary.incorrect_answer_count == 1
+
+
+def test_judge_approved_insufficiency_is_a_correct_refusal_even_with_selected_evidence():
+    question = EvaluationQuestion(
+        question_id="unanswerable-insufficient",
+        query="缺少完整证据的问题",
+        category="无答案",
+        split="dev",
+        answerable=False,
+        relevant_spans=(),
+        reference_answer="材料不足",
+    )
+    result = make_result("partial", "related", "v1", 1, 2)
+
+    results = evaluate_question_results(
+        [question],
+        {question.question_id: [result]},
+        final_result_map={question.question_id: [result]},
+        evidence_status_map={question.question_id: "insufficient"},
+        judge_reason_map={question.question_id: "partial_coverage"},
+        judge_executed_map={question.question_id: True},
+        score_type="rrf",
+        k=5,
+    )
+
+    item = results[0]
+    assert item.final_nonempty is True
+    assert item.correct_refusal is True
+    summary = summarize_question_results(results, k=5)
+    assert summary.unanswerable_nonempty_result_count == 1
+    assert summary.correct_refusal_count == 1
+    assert summary.incorrect_answer_count == 0
 
 
 def test_question_results_record_candidate_and_final_evidence_metrics_without_cross_score_comparison():
@@ -246,6 +347,10 @@ def test_question_results_record_candidate_and_final_evidence_metrics_without_cr
 
     item = results[0]
     assert item.candidate_evidence_recall_at_k == pytest.approx(0.5)
+    assert item.candidate_mrr_at_k == pytest.approx(1.0)
+    assert item.candidate_hit_at_k is True
+    assert item.candidate_mrr_at_k == pytest.approx(1.0)
+    assert item.candidate_hit_at_k is True
     assert item.final_evidence_recall == pytest.approx(0.5)
     assert item.source_coverage == {"covered": 2, "required": 2}
     assert item.evidence_status == "supported"
@@ -260,6 +365,154 @@ def test_question_results_record_candidate_and_final_evidence_metrics_without_cr
     assert item.judge_executed is True
     assert item.candidate_results[0]["score_type"] == "bm25"
     assert item.final_results[0]["score_type"] == "rerank"
+
+
+def test_question_results_preserve_candidate_query_ids_and_retrieval_ranks():
+    question = EvaluationQuestion(
+        question_id="trace",
+        query="跨文章问题",
+        category="跨文章",
+        split="dev",
+        answerable=True,
+        relevant_spans=(
+            {"document_id": "doc", "document_version": "v1", "start_line": 1, "end_line": 2},
+        ),
+        reference_answer="答案",
+    )
+    candidate = CandidateEvidence(
+        result=make_result("chunk", "doc", "v1", 1, 2),
+        query_ids=("q1", "q2"),
+        retrieval_ranks=(1, 7),
+        retrieval_score_type="rrf",
+        rerank_score=0.8,
+    )
+
+    result = evaluate_question_results(
+        [question],
+        {question.question_id: [candidate]},
+        candidate_result_map={question.question_id: [candidate]},
+        final_result_map={question.question_id: [candidate]},
+        score_type="rrf",
+        candidate_score_type="rrf",
+        final_score_type="rerank",
+        k=5,
+    )[0]
+
+    assert result.candidate_results[0]["query_ids"] == ["q1", "q2"]
+    assert result.candidate_results[0]["retrieval_ranks"] == [1, 7]
+    assert result.candidate_results[0]["retrieval_score_type"] == "rrf"
+    assert result.final_results[0]["rerank_score"] == pytest.approx(0.8)
+
+
+def test_candidate_metrics_use_the_candidate_order_and_are_summarized_separately():
+    question = EvaluationQuestion(
+        question_id="candidate-metrics",
+        query="证据查询",
+        category="跨文章",
+        split="dev",
+        answerable=True,
+        relevant_spans=(
+            {"document_id": "doc", "document_version": "v1", "start_line": 1, "end_line": 2},
+        ),
+        reference_answer="答案",
+    )
+    candidates = [
+        make_result("miss", "other", "v1", 1, 2),
+        make_result("hit", "doc", "v1", 1, 2),
+    ]
+    results = evaluate_question_results(
+        [question],
+        {question.question_id: [candidates[1]]},
+        candidate_result_map={question.question_id: candidates},
+        final_result_map={question.question_id: [candidates[1]]},
+        candidate_limit=30,
+        score_type="rrf",
+    )
+
+    item = results[0]
+    summary = summarize_question_results(results, k=5)
+
+    assert item.candidate_evidence_recall_at_k == pytest.approx(1.0)
+    assert item.candidate_mrr_at_k == pytest.approx(0.5)
+    assert item.candidate_hit_at_k is True
+    assert summary.candidate_mrr_at_k == pytest.approx(0.5)
+    assert summary.candidate_hit_at_k == pytest.approx(1.0)
+    assert summary.mrr_at_k == pytest.approx(1.0)
+
+
+def test_report_output_path_rejects_overwrite(tmp_path: Path):
+    dataset = tmp_path / "questions.jsonl"
+    database = tmp_path / "knowledge.db"
+    report = tmp_path / "report.json"
+    dataset.write_text("{}\n", encoding="utf-8")
+    database.write_bytes(b"database")
+    report.write_text("preserve me", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already exists"):
+        validate_report_output_path(report, dataset=dataset, database=database)
+
+    assert report.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_dev_question_loading_does_not_validate_test_record_fields(tmp_path: Path):
+    dataset = tmp_path / "questions.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "dev-question",
+                "query": "dev query",
+                "category": "dev",
+                "split": "dev",
+                "answerable": True,
+                "relevant_spans": [],
+                "reference_answer": "answer",
+            }
+        )
+        + "\n"
+        + json.dumps({"split": "test"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    questions = load_questions(dataset, split="dev")
+
+    assert [question.question_id for question in questions] == ["dev-question"]
+
+
+def test_judge_state_counts_only_include_executed_judges():
+    supported = make_result("one", "doc", "v1", 1, 2)
+    insufficient = make_result("two", "doc", "v1", 1, 2)
+    results = evaluate_question_results(
+        [
+            EvaluationQuestion("supported", "q", "c", "dev", True, (), "a"),
+            EvaluationQuestion("insufficient", "q", "c", "dev", True, (), "a"),
+            EvaluationQuestion("error", "q", "c", "dev", True, (), "a"),
+        ],
+        {"supported": [supported], "insufficient": [insufficient], "error": []},
+        error_map={"error": "embedding provider timeout"},
+        evidence_status_map={
+            "supported": "supported",
+            "insufficient": "insufficient",
+        },
+        judge_reason_map={
+            "supported": "coverage_complete",
+            "insufficient": "partial_coverage",
+        },
+        judge_executed_map={"supported": True, "insufficient": True, "error": False},
+        score_type="bm25",
+    )
+
+    counts = judge_state_counts(results)
+
+    assert counts == {
+        "status": {
+            "supported": 1,
+            "insufficient": 1,
+            "no_results": 0,
+            "execution_error": 1,
+        },
+        "reason": {"coverage_complete": 1, "partial_coverage": 1},
+    }
 
 
 def test_evaluation_parser_maps_legacy_top_k_to_final_limit_and_accepts_ablation_fields():
@@ -302,6 +555,31 @@ def test_evaluation_parser_maps_top_k_to_both_limits_by_default():
     assert args.candidate_limit == 5
 
 
+def test_ablation_strategy_is_applied_to_runtime_arguments():
+    args = build_parser().parse_args(
+        [
+            "--dataset", "questions.jsonl",
+            "--split", "dev",
+            "--mode", "hybrid",
+            "--output", "report.json",
+        ]
+    )
+    config = select_ablation_config(
+        load_ablation_configs(Path(__file__).parents[1] / "evals" / "blog_retrieval_ablation.json"),
+        name="coverage",
+    )
+
+    apply_ablation_config(args, config)
+
+    assert args.ablation_name == "coverage"
+    assert args.candidate_limit == 30
+    assert args.final_limit == 5
+    assert args.query_planning == "disabled"
+    assert args.rerank == "noop"
+    assert args.evidence_selection == "coverage-aware"
+    assert args.answerability == "coverage-v1"
+
+
 def test_question_results_can_be_summarized_by_category_and_answerability():
     questions = [
         EvaluationQuestion(
@@ -336,7 +614,7 @@ def test_question_results_can_be_summarized_by_category_and_answerability():
 
     assert summary["术语"].question_count == 1
     assert summary["术语"].recall_at_k == pytest.approx(1.0)
-    assert summary["无答案"].correct_refusal_count == 1
+    assert summary["无答案"].correct_refusal_count == 0
 
 
 @pytest.mark.parametrize("threshold", [-0.01, 1.01, float("nan"), float("inf")])
@@ -364,6 +642,32 @@ def test_evaluation_cli_parses_min_vector_similarity_from_command_line():
     assert args.min_vector_similarity == pytest.approx(0.5)
 
 
+def test_evaluation_cli_applies_pipeline_limits_and_coverage_settings():
+    args = build_parser().parse_args(
+        [
+            "--dataset", "questions.jsonl",
+            "--split", "dev",
+            "--mode", "hybrid",
+            "--output", "report.json",
+            "--candidate-limit", "30",
+            "--candidate-min-vector-similarity", "0.2",
+            "--final-limit", "5",
+            "--query-planning", "disabled",
+            "--rerank", "noop",
+            "--evidence-selection", "coverage-aware",
+            "--answerability", "coverage-v1",
+        ]
+    )
+
+    assert args.candidate_limit == 30
+    assert args.candidate_min_vector_similarity == pytest.approx(0.2)
+    assert args.final_limit == 5
+    assert args.query_planning == "disabled"
+    assert args.rerank == "noop"
+    assert args.evidence_selection == "coverage-aware"
+    assert args.answerability == "coverage-v1"
+
+
 def test_evaluation_cli_writes_reproducible_keyword_report(tmp_path: Path):
     fixture_root = Path(__file__).parent / "fixtures" / "knowledge"
     database = tmp_path / "knowledge.db"
@@ -374,6 +678,7 @@ def test_evaluation_cli_writes_reproducible_keyword_report(tmp_path: Path):
     asyncio.run(
         ingest_manifest(repository, fixture_root / "manifest.json", fixture_root)
     )
+    original_database_bytes = database.read_bytes()
     document = asyncio.run(repository.get_document_by_path("redis.md"))
     assert document is not None
     dataset = tmp_path / "questions.jsonl"
@@ -417,6 +722,20 @@ def test_evaluation_cli_writes_reproducible_keyword_report(tmp_path: Path):
             "dev",
             "--mode",
             "keyword",
+            "--candidate-limit",
+            "30",
+            "--candidate-min-vector-similarity",
+            "0.2",
+            "--final-limit",
+            "5",
+            "--query-planning",
+            "disabled",
+            "--rerank",
+            "noop",
+            "--evidence-selection",
+            "coverage-aware",
+            "--answerability",
+            "coverage-v1",
             "--output",
             str(output),
             "--database",
@@ -429,25 +748,52 @@ def test_evaluation_cli_writes_reproducible_keyword_report(tmp_path: Path):
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert database.read_bytes() == original_database_bytes
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["mode"] == "keyword"
+    assert report["candidate_limit"] == 30
+    assert report["candidate_min_vector_similarity"] == pytest.approx(0.2)
+    assert report["final_limit"] == 5
+    assert report["query_planning"] == "disabled"
+    assert report["rerank"] == "noop"
+    assert report["evidence_selection"] == "coverage-aware"
+    assert report["answerability"] == "coverage-v1"
+    assert report["refusal_policy"] == "coverage_judge_state_only_not_semantic_verification"
+    assert report["correct_refusal_count"] == 0
+    assert report["incorrect_refusal_count"] == 0
     assert report["split"] == "dev"
     assert report["question_count"] == 1
     assert "recall_at_5" in report
     assert report["retrieval_latency_ms"]["mean"] >= 0
     assert report["source_coverage"] == {"covered": 1, "required": 1}
+    assert report["candidate_evidence_recall_at_k"] == pytest.approx(1.0)
+    assert report["candidate_mrr_at_k"] == pytest.approx(1.0)
+    assert report["candidate_hit_at_k"] == pytest.approx(1.0)
+    assert report["judge_state_counts"] == {
+        "status": {
+            "supported": 1,
+            "insufficient": 0,
+            "no_results": 0,
+            "execution_error": 0,
+        },
+        "reason": {"full_query_coverage": 1},
+    }
     assert set(report["phase_latency_ms"]) == {
         "query_planner", "candidate", "rerank", "selection", "judge", "llm"
     }
     assert report["execution"] == {
-        "query_planner_executed": False,
-        "judge_executed": False,
+        "query_planner_executed": True,
+        "candidate_retriever_executed": True,
+        "reranker_executed": True,
+        "evidence_selector_executed": True,
+        "judge_executed": True,
         "llm_executed": False,
         "answer_quality_evaluated": False,
     }
     assert report["blog_formal_014"] is None
     question_result = report["question_results"][0]
-    assert question_result["judge_executed"] is False
-    assert question_result["judge_reason"] is None
+    assert question_result["judge_executed"] is True
+    assert question_result["judge_reason"] == "full_query_coverage"
+    assert question_result["evidence_status"] == "supported"
     assert question_result["llm_called"] is False
     assert question_result["citation_complete"] is None

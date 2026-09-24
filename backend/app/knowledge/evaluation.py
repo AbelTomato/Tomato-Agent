@@ -7,18 +7,81 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Sequence
 
 from app.knowledge.embeddings import EmbeddingClient
+from app.knowledge.answerability import (
+    AnswerabilityConfig,
+    BaselineAnswerabilityJudge,
+    CoverageAnswerabilityJudge,
+)
+from app.knowledge.candidate_retrieval import RepositoryCandidateRetriever
+from app.knowledge.evidence_selection import (
+    BaselineEvidenceSelector,
+    CoverageAwareEvidenceSelector,
+)
 from app.knowledge.models import SearchResult
+from app.knowledge.pipeline_models import CandidateEvidence, PipelineResult
+from app.knowledge.query_planning import (
+    LLMQueryPlanner,
+    QueryPlannerConfig,
+    SafeQueryPlanner,
+)
 from app.knowledge.repository import KnowledgeRepository
+from app.knowledge.reranking import NoopReranker
+from app.knowledge.service import KnowledgePipeline
 from app.settings import settings
 
 RelevantSpan = dict[str, object]
 SearchFunction = Callable[[str, int], Awaitable[list[SearchResult]]]
+EvidenceItem = SearchResult | CandidateEvidence
+
+
+class OfflineFakeReranker:
+    """Deterministic local reranker for offline ablation tests.
+
+    This is deliberately not presented as a provider result. It only gives the
+    fixed ablation a reproducible rerank branch without making network calls.
+    """
+
+    async def rank(
+        self,
+        query: str,
+        candidates: Sequence[CandidateEvidence],
+    ) -> list[CandidateEvidence]:
+        query_terms = set(_evaluation_terms(query))
+        ranked: list[tuple[int, float, CandidateEvidence]] = []
+        for index, candidate in enumerate(candidates):
+            text_terms = set(_evaluation_terms(candidate.result.text))
+            score = (
+                len(query_terms.intersection(text_terms)) / len(query_terms)
+                if query_terms
+                else 0.0
+            )
+            ranked.append(
+                (
+                    index,
+                    score,
+                    candidate.model_copy(update={"rerank_score": score}),
+                )
+            )
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        return [item[2] for item in ranked]
+
+
+def _evaluation_terms(value: str) -> list[str]:
+    terms: list[str] = []
+    for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_.-]*|[\u4e00-\u9fff]+", value.casefold()):
+        token = match.group(0)
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+            terms.extend(token[index : index + 2] for index in range(len(token) - 1))
+        else:
+            terms.append(token)
+    return terms
 
 
 @dataclass(frozen=True)
@@ -41,6 +104,9 @@ class EvaluationSummary:
     unanswerable_count: int
     correct_refusal_count: int
     incorrect_answer_count: int
+    unanswerable_nonempty_count: int = 0
+    incorrect_refusal_count: int = 0
+    refusal_evaluation: str = "retrieval_only"
 
 
 @dataclass(frozen=True)
@@ -59,6 +125,8 @@ class QuestionResult:
     candidate_results: tuple[dict[str, object], ...] = ()
     final_results: tuple[dict[str, object], ...] = ()
     candidate_evidence_recall_at_k: float | None = None
+    candidate_mrr_at_k: float | None = None
+    candidate_hit_at_k: bool | None = None
     final_evidence_recall: float | None = None
     source_coverage: dict[str, int] | None = None
     evidence_status: str | None = None
@@ -68,6 +136,11 @@ class QuestionResult:
     llm_called: bool | None = None
     citation_complete: bool | None = None
     query_plan: dict[str, object] | None = None
+    candidate_nonempty: bool = False
+    final_nonempty: bool = False
+    judge_status: str | None = None
+    incorrect_refusal: bool | None = None
+    correct_refusal: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -87,11 +160,19 @@ class QuestionResultSummary:
     execution_error_count: int
     retrieval_latency_ms: dict[str, float | int | None]
     candidate_evidence_recall_at_k: float | None = None
+    candidate_mrr_at_k: float | None = None
+    candidate_hit_at_k: float | None = None
     final_evidence_recall: float | None = None
     source_coverage: dict[str, int] | None = None
     unanswerable_nonempty_result_count: int = 0
     unanswerable_candidate_nonempty_result_count: int = 0
     phase_latency_ms: dict[str, dict[str, float | int | None]] | None = None
+    candidate_nonempty_count: int = 0
+    final_nonempty_count: int = 0
+    judge_executed_count: int = 0
+    incorrect_refusal_count: int = 0
+    judge_status_counts: dict[str, int] | None = None
+    judge_reason_counts: dict[str, int] | None = None
 
 
 QUESTION_STATUS_SUCCESS = "success"
@@ -173,10 +254,66 @@ def load_ablation_configs(path: Path) -> list[dict[str, object]]:
     return configs
 
 
+def select_ablation_config(
+    configs: Sequence[dict[str, object]],
+    *,
+    name: str | None = None,
+) -> dict[str, object]:
+    if name is None:
+        if len(configs) != 1:
+            raise ValueError("--ablation-name is required when the config contains multiple strategies")
+        return dict(configs[0])
+    for config in configs:
+        if config.get("name") == name:
+            return dict(config)
+    raise ValueError(f"ablation strategy not found: {name}")
+
+
+def apply_ablation_config(args: argparse.Namespace, config: dict[str, object]) -> argparse.Namespace:
+    """Apply a validated strategy to the actual evaluation arguments."""
+    if args.split != "dev":
+        raise ValueError("ablation configurations may only run with split=dev")
+    for field in _ABLATION_FIELDS - {"name"}:
+        setattr(args, field, config[field])
+    args.ablation_name = config["name"]
+    return args
+
+
 def validate_min_vector_similarity(value: float) -> float:
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError("minimum vector similarity must be between 0 and 1")
     return value
+
+
+def validate_report_output_path(output: Path, *, dataset: Path, database: Path) -> None:
+    resolved_output = output.resolve()
+    if resolved_output == dataset.resolve():
+        raise ValueError("report output must not overwrite the evaluation dataset")
+    if resolved_output == database.resolve():
+        raise ValueError("report output must not overwrite the knowledge database")
+    if resolved_output.exists():
+        raise ValueError(f"report output already exists: {resolved_output}")
+
+
+def judge_state_counts(results: Sequence[QuestionResult]) -> dict[str, dict[str, int]]:
+    statuses: dict[str, int] = {
+        "supported": 0,
+        "insufficient": 0,
+        "no_results": 0,
+        "execution_error": 0,
+    }
+    reasons: dict[str, int] = {}
+    for result in results:
+        if result.status == QUESTION_STATUS_ERROR:
+            statuses["execution_error"] += 1
+            continue
+        if result.judge_executed is not True:
+            continue
+        if result.judge_status in statuses:
+            statuses[result.judge_status] += 1
+        if result.judge_reason is not None:
+            reasons[result.judge_reason] = reasons.get(result.judge_reason, 0) + 1
+    return {"status": statuses, "reason": dict(sorted(reasons.items()))}
 
 
 def _span_is_covered(result: SearchResult, span: RelevantSpan) -> bool:
@@ -220,7 +357,16 @@ def evaluate_retrieval(
     result_map: dict[str, Sequence[SearchResult]],
     *,
     k: int = 5,
+    evidence_status_map: dict[str, str] | None = None,
+    judge_executed_map: dict[str, bool] | None = None,
+    llm_called_map: dict[str, bool] | None = None,
 ) -> EvaluationSummary:
+    """Summarize a retrieval-only map without inferring model answers.
+
+    Without an executed Judge, this helper intentionally reports no refusal
+    quality. A non-empty retrieval result is only an observable retrieval fact,
+    not an answer and not a successful refusal.
+    """
     answerable = [question for question in questions if question.answerable]
     unanswerable = [question for question in questions if not question.answerable]
     recalls = [
@@ -233,7 +379,19 @@ def evaluate_retrieval(
         )
         for question in answerable
     ]
-    correct_refusals = sum(not result_map.get(question.question_id) for question in unanswerable)
+    evidence_status_map = evidence_status_map or {}
+    judge_executed_map = judge_executed_map or {}
+    llm_called_map = llm_called_map or {}
+    correct_refusals = sum(
+        judge_executed_map.get(question.question_id, False)
+        and evidence_status_map.get(question.question_id) in {"insufficient", "no_results"}
+        for question in unanswerable
+    )
+    incorrect_answers = sum(
+        llm_called_map.get(question.question_id, False)
+        and evidence_status_map.get(question.question_id) == "supported"
+        for question in unanswerable
+    )
     return EvaluationSummary(
         question_count=len(questions),
         answerable_count=len(answerable),
@@ -241,7 +399,20 @@ def evaluate_retrieval(
         mrr_at_k=sum(mrrs) / len(mrrs) if mrrs else 0.0,
         unanswerable_count=len(unanswerable),
         correct_refusal_count=correct_refusals,
-        incorrect_answer_count=len(unanswerable) - correct_refusals,
+        incorrect_answer_count=incorrect_answers,
+        unanswerable_nonempty_count=sum(
+            bool(result_map.get(question.question_id)) for question in unanswerable
+        ),
+        incorrect_refusal_count=sum(
+            judge_executed_map.get(question.question_id, False)
+            and evidence_status_map.get(question.question_id) == "supported"
+            for question in unanswerable
+        ),
+        refusal_evaluation=(
+            "judge_only"
+            if any(judge_executed_map.get(question.question_id, False) for question in unanswerable)
+            else "retrieval_only"
+        ),
     )
 
 
@@ -270,16 +441,20 @@ def _source_coverage(
     }
 
 
+def _as_search_results(items: Sequence[EvidenceItem]) -> list[SearchResult]:
+    return [item.result if isinstance(item, CandidateEvidence) else item for item in items]
+
+
 def evaluate_question_results(
     questions: Sequence[EvaluationQuestion],
-    result_map: dict[str, Sequence[SearchResult]],
+    result_map: dict[str, Sequence[EvidenceItem]],
     *,
     error_map: dict[str, str] | None = None,
     score_type: str = "unknown",
     latency_map: dict[str, float] | None = None,
     k: int = 5,
-    candidate_result_map: dict[str, Sequence[SearchResult]] | None = None,
-    final_result_map: dict[str, Sequence[SearchResult]] | None = None,
+    candidate_result_map: dict[str, Sequence[EvidenceItem]] | None = None,
+    final_result_map: dict[str, Sequence[EvidenceItem]] | None = None,
     candidate_score_type: str | None = None,
     final_score_type: str | None = None,
     evidence_status_map: dict[str, str] | None = None,
@@ -306,18 +481,18 @@ def evaluate_question_results(
         raise ValueError("score_type must be non-empty")
     error_map = error_map or {}
     latency_map = latency_map or {}
-    candidate_result_map = candidate_result_map or result_map
-    final_result_map = final_result_map or result_map
-    candidate_score_type = candidate_score_type or score_type
-    final_score_type = final_score_type or score_type
-    evidence_status_map = evidence_status_map or {}
-    phase_latency_map = phase_latency_map or {}
-    source_coverage_map = source_coverage_map or {}
-    llm_called_map = llm_called_map or {}
-    citation_complete_map = citation_complete_map or {}
-    query_plan_map = query_plan_map or {}
-    judge_reason_map = judge_reason_map or {}
-    judge_executed_map = judge_executed_map or {}
+    candidate_result_map = result_map if candidate_result_map is None else candidate_result_map
+    final_result_map = result_map if final_result_map is None else final_result_map
+    candidate_score_type = score_type if candidate_score_type is None else candidate_score_type
+    final_score_type = score_type if final_score_type is None else final_score_type
+    evidence_status_map = {} if evidence_status_map is None else evidence_status_map
+    phase_latency_map = {} if phase_latency_map is None else phase_latency_map
+    source_coverage_map = {} if source_coverage_map is None else source_coverage_map
+    llm_called_map = {} if llm_called_map is None else llm_called_map
+    citation_complete_map = {} if citation_complete_map is None else citation_complete_map
+    query_plan_map = {} if query_plan_map is None else query_plan_map
+    judge_reason_map = {} if judge_reason_map is None else judge_reason_map
+    judge_executed_map = {} if judge_executed_map is None else judge_executed_map
     results: list[QuestionResult] = []
     for question in questions:
         question_id = question.question_id
@@ -332,14 +507,15 @@ def evaluate_question_results(
             raise ValueError(f"evaluation latency must be finite and non-negative: {question_id}")
 
         def serialize(
-            results_to_serialize: Sequence[SearchResult],
+            results_to_serialize: Sequence[EvidenceItem],
             result_score_type: str,
             result_limit: int,
         ) -> list[dict[str, object]]:
             serialized: list[dict[str, object]] = []
-            for rank, result in enumerate(results_to_serialize[:result_limit], start=1):
-                serialized.append(
-                {
+            for rank, item in enumerate(results_to_serialize[:result_limit], start=1):
+                candidate = item if isinstance(item, CandidateEvidence) else None
+                result = candidate.result if candidate is not None else item
+                entry: dict[str, object] = {
                     "rank": rank,
                     "chunk_id": result.chunk_id,
                     "document_id": result.document_id,
@@ -353,11 +529,28 @@ def evaluate_question_results(
                         result, question.relevant_spans
                     ),
                 }
-            )
+                if candidate is not None:
+                    entry["query_ids"] = list(candidate.query_ids)
+                    entry["retrieval_ranks"] = list(candidate.retrieval_ranks)
+                    entry["retrieval_score"] = result.score
+                    entry["retrieval_score_type"] = candidate.retrieval_score_type
+                    entry["rerank_score"] = candidate.rerank_score
+                    if candidate.rerank_score is not None:
+                        entry["score_type"] = result_score_type or "rerank"
+                serialized.append(entry)
             return serialized
 
         serialized_candidate_results = serialize(candidate_results, candidate_score_type, candidate_limit)
         serialized_final_results = serialize(final_results, final_score_type, k)
+
+        candidate_results_as_search = [
+            item.result if isinstance(item, CandidateEvidence) else item
+            for item in candidate_results
+        ]
+        final_results_as_search = [
+            item.result if isinstance(item, CandidateEvidence) else item
+            for item in final_results
+        ]
 
         if error is not None:
             status = QUESTION_STATUS_ERROR
@@ -367,8 +560,8 @@ def evaluate_question_results(
         else:
             status = QUESTION_STATUS_SUCCESS if retrieved else QUESTION_STATUS_EMPTY
             if question.answerable:
-                recall = recall_at_k(retrieved, question.relevant_spans, k=k)
-                mrr = mean_reciprocal_rank(retrieved, question.relevant_spans, k=k)
+                recall = recall_at_k(final_results_as_search, question.relevant_spans, k=k)
+                mrr = mean_reciprocal_rank(final_results_as_search, question.relevant_spans, k=k)
                 hit = any(
                     bool(item["covered_span_indexes"])
                     for item in serialized_final_results
@@ -377,6 +570,28 @@ def evaluate_question_results(
                 recall = None
                 mrr = None
                 hit = None
+
+        judge_status = evidence_status_map.get(question_id)
+        judge_executed = judge_executed_map.get(question_id)
+        if error is not None or question.answerable:
+            correct_refusal = None
+        elif judge_executed and judge_status in {"insufficient", "no_results"}:
+            correct_refusal = judge_status in {"insufficient", "no_results"}
+        else:
+            # A supported Coverage Judge state is not a semantic refusal result.
+            # Without an answerer call, refusal quality remains unevaluated.
+            correct_refusal = None
+        incorrect_refusal = (
+            True
+            if (
+                error is None
+                and not question.answerable
+                and judge_executed
+                and llm_called_map.get(question_id, False)
+                and judge_status == "supported"
+            )
+            else None
+        )
 
         results.append(
             QuestionResult(
@@ -396,22 +611,51 @@ def evaluate_question_results(
                 candidate_evidence_recall_at_k=(
                     None
                     if error is not None or not question.answerable
-                    else recall_at_k(candidate_results, question.relevant_spans, k=candidate_limit)
+                    else recall_at_k(
+                        candidate_results_as_search,
+                        question.relevant_spans,
+                        k=candidate_limit,
+                    )
+                ),
+                candidate_mrr_at_k=(
+                    None
+                    if error is not None or not question.answerable
+                    else mean_reciprocal_rank(
+                        candidate_results_as_search,
+                        question.relevant_spans,
+                        k=candidate_limit,
+                    )
+                ),
+                candidate_hit_at_k=(
+                    None
+                    if error is not None or not question.answerable
+                    else any(
+                        bool(item["covered_span_indexes"])
+                        for item in serialized_candidate_results
+                    )
                 ),
                 final_evidence_recall=(
                     None
                     if error is not None or not question.answerable
-                    else recall_at_k(final_results, question.relevant_spans, k=k)
+                    else recall_at_k(final_results_as_search, question.relevant_spans, k=k)
                 ),
                 source_coverage=source_coverage_map.get(question_id)
-                or _source_coverage(final_results, question.relevant_spans),
+                or _source_coverage(
+                    _as_search_results(final_results),
+                    question.relevant_spans,
+                ),
                 evidence_status=evidence_status_map.get(question_id),
                 judge_reason=judge_reason_map.get(question_id),
-                judge_executed=judge_executed_map.get(question_id),
+                judge_executed=judge_executed,
                 phase_latency_ms=phase_latency_map.get(question_id),
                 llm_called=llm_called_map.get(question_id),
                 citation_complete=citation_complete_map.get(question_id),
                 query_plan=query_plan_map.get(question_id),
+                candidate_nonempty=bool(candidate_results),
+                final_nonempty=bool(final_results),
+                judge_status=judge_status,
+                incorrect_refusal=incorrect_refusal,
+                correct_refusal=correct_refusal,
             )
         )
     return results
@@ -474,6 +718,16 @@ def _summarize_question_results(
         for result in evaluated_answerable
         if result.candidate_evidence_recall_at_k is not None
     ]
+    candidate_mrrs = [
+        result.candidate_mrr_at_k
+        for result in evaluated_answerable
+        if result.candidate_mrr_at_k is not None
+    ]
+    candidate_hits = [
+        result.candidate_hit_at_k
+        for result in evaluated_answerable
+        if result.candidate_hit_at_k is not None
+    ]
     final_recalls = [
         result.final_evidence_recall
         for result in evaluated_answerable
@@ -520,11 +774,14 @@ def _summarize_question_results(
         unanswerable_empty_result_count=sum(
             result.status == QUESTION_STATUS_EMPTY for result in unanswerable
         ),
-        correct_refusal_count=sum(
-            result.status == QUESTION_STATUS_EMPTY for result in unanswerable
-        ),
+        correct_refusal_count=sum(result.correct_refusal is True for result in unanswerable),
         incorrect_answer_count=sum(
-            result.status == QUESTION_STATUS_SUCCESS for result in unanswerable
+            result.llm_called is True
+            and result.judge_status == "supported"
+            for result in unanswerable
+        ),
+        incorrect_refusal_count=sum(
+            result.incorrect_refusal is True for result in unanswerable
         ),
         execution_error_count=sum(
             result.status == QUESTION_STATUS_ERROR for result in results
@@ -532,6 +789,12 @@ def _summarize_question_results(
         retrieval_latency_ms=_latency_summary(results),
         candidate_evidence_recall_at_k=(
             sum(candidate_recalls) / len(candidate_recalls) if candidate_recalls else None
+        ),
+        candidate_mrr_at_k=(
+            sum(candidate_mrrs) / len(candidate_mrrs) if candidate_mrrs else None
+        ),
+        candidate_hit_at_k=(
+            sum(candidate_hits) / len(candidate_hits) if candidate_hits else None
         ),
         final_evidence_recall=sum(final_recalls) / len(final_recalls) if final_recalls else None,
         source_coverage=(
@@ -543,13 +806,28 @@ def _summarize_question_results(
             else None
         ),
         unanswerable_nonempty_result_count=sum(
-            result.status == QUESTION_STATUS_SUCCESS for result in unanswerable
+            result.final_nonempty and result.status != QUESTION_STATUS_ERROR
+            for result in unanswerable
         ),
         unanswerable_candidate_nonempty_result_count=sum(
-            bool(result.candidate_results) and result.status != QUESTION_STATUS_ERROR
+            result.candidate_nonempty and result.status != QUESTION_STATUS_ERROR
             for result in unanswerable
         ),
         phase_latency_ms=phase_latency,
+        candidate_nonempty_count=sum(
+            result.candidate_nonempty and result.status != QUESTION_STATUS_ERROR
+            for result in results
+        ),
+        final_nonempty_count=sum(
+            result.final_nonempty and result.status != QUESTION_STATUS_ERROR
+            for result in results
+        ),
+        judge_executed_count=sum(
+            result.judge_executed is True and result.status != QUESTION_STATUS_ERROR
+            for result in results
+        ),
+        judge_status_counts=judge_state_counts(results)["status"],
+        judge_reason_counts=judge_state_counts(results)["reason"],
     )
 
 
@@ -618,7 +896,10 @@ def build_014_trace(
     )
     return {
         "question_id": question.question_id,
-        "original_query_preserved": True,
+        "original_query_preserved": bool(
+            result.query_plan
+            and result.query_plan.get("original_query") == question.query
+        ),
         "query_plan": result.query_plan,
         "candidate_evidence": list(result.candidate_results),
         "final_evidence": list(result.final_results),
@@ -631,10 +912,30 @@ def build_014_trace(
         "evidence_status": result.evidence_status,
         "judge_reason": result.judge_reason,
         "judge_executed": result.judge_executed,
+        "judge_status": result.judge_status,
+        "candidate_nonempty": result.candidate_nonempty,
+        "final_nonempty": result.final_nonempty,
+        "correct_refusal": result.correct_refusal,
+        "incorrect_refusal": result.incorrect_refusal,
         "llm_called": result.llm_called,
         "citation_complete": result.citation_complete,
         "execution_status": result.status,
         "error": result.error,
+    }
+
+
+def _serialize_query_plan(pipeline_result: PipelineResult) -> dict[str, object]:
+    return {
+        "original_query": pipeline_result.plan.original_query,
+        "is_multi_evidence": pipeline_result.plan.is_multi_evidence,
+        "queries": [
+            {
+                "query_id": query.query_id,
+                "text": query.text,
+                "facet": query.facet,
+            }
+            for query in pipeline_result.plan.queries
+        ],
     }
 
 
@@ -650,6 +951,8 @@ def load_questions(path: Path, *, split: str) -> list[EvaluationQuestion]:
             raise ValueError(f"invalid JSON on line {line_number}") from exc
         if not isinstance(value, dict):
             raise ValueError(f"question on line {line_number} must be an object")
+        if value.get("split") != split:
+            continue
         question_id = value.get("id")
         query = value.get("query")
         category = value.get("category")
@@ -664,26 +967,24 @@ def load_questions(path: Path, *, split: str) -> list[EvaluationQuestion]:
             or not isinstance(query, str)
             or not query.strip()
             or not isinstance(category, str)
-            or not isinstance(record_split, str)
-            or record_split not in {"dev", "test"}
+            or record_split != split
             or not isinstance(answerable, bool)
             or not isinstance(spans, list)
             or not isinstance(reference_answer, str)
         ):
             raise ValueError(f"invalid question fields on line {line_number}")
         seen_ids.add(question_id)
-        if record_split == split:
-            questions.append(
-                EvaluationQuestion(
-                    question_id=question_id,
-                    query=query,
-                    category=category,
-                    split=record_split,
-                    answerable=answerable,
-                    relevant_spans=tuple(spans),
-                    reference_answer=reference_answer,
-                )
+        questions.append(
+            EvaluationQuestion(
+                question_id=question_id,
+                query=query,
+                category=category,
+                split=record_split,
+                answerable=answerable,
+                relevant_spans=tuple(spans),
+                reference_answer=reference_answer,
             )
+        )
     return questions
 
 
@@ -694,88 +995,170 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError("evaluation limits must be positive")
     if args.candidate_limit < args.final_limit:
         raise ValueError("candidate_limit must not be smaller than final_limit")
-    questions = load_questions(Path(args.dataset), split=args.split)
+    if args.query_planning not in {"disabled", "conditional"}:
+        raise ValueError(f"unsupported query planning strategy: {args.query_planning}")
+    if args.rerank not in {"noop", "fake-or-approved-provider"}:
+        raise ValueError(f"unsupported rerank strategy: {args.rerank}")
+    if args.evidence_selection not in {"baseline", "coverage-aware"}:
+        raise ValueError(f"unsupported evidence selection strategy: {args.evidence_selection}")
+    if args.answerability not in {"baseline", "coverage-v1"}:
+        raise ValueError(f"unsupported answerability strategy: {args.answerability}")
+    dataset_path = Path(args.dataset)
+    questions = load_questions(dataset_path, split=args.split)
     database_path = Path(args.database)
     if not database_path.is_file():
         raise ValueError(f"knowledge database does not exist: {database_path}")
-    repository = KnowledgeRepository(database_path)
+    output_path = Path(args.output)
+    validate_report_output_path(output_path, dataset=dataset_path, database=database_path)
+    if args.mode in {"vector", "hybrid"} and not settings.embedding_api_key:
+        raise ValueError("vector and hybrid modes require a configured embedding API key")
+    repository = KnowledgeRepository(database_path, read_only=True)
     await repository.init()
 
-    async def search(query: str, limit: int) -> list[SearchResult]:
-        if args.mode == "keyword":
-            return await repository.search_chunks(query, limit=limit)
+    embedding_client: EmbeddingClient | None = None
+    if args.mode in {"vector", "hybrid"}:
         if not args.embedding_model or args.embedding_dimensions <= 0:
             raise ValueError("vector and hybrid modes require embedding model and dimensions")
-        client = EmbeddingClient(
+        embedding_client = EmbeddingClient(
             api_key=settings.embedding_api_key,
             model=args.embedding_model,
             dimensions=args.embedding_dimensions,
             base_url=settings.embedding_base_url,
             timeout_seconds=settings.embedding_timeout_seconds,
         )
-        vector = (await client.embed([query]))[0]
-        if args.mode == "vector":
-            return await repository.search_vector_chunks(
-                vector,
-                model=args.embedding_model,
-                dimensions=args.embedding_dimensions,
-                limit=limit,
-                min_score=args.candidate_min_vector_similarity,
-            )
-        return await repository.search_hybrid_chunks(
-            query,
-            vector,
-            model=args.embedding_model,
-            dimensions=args.embedding_dimensions,
-            limit=limit,
-            min_vector_score=args.candidate_min_vector_similarity,
-        )
 
-    result_map: dict[str, list[SearchResult]] = {}
+    planner = (
+        SafeQueryPlanner()
+        if args.query_planning == "disabled"
+        else LLMQueryPlanner(QueryPlannerConfig(enabled=True))
+    )
+    candidate_retriever = RepositoryCandidateRetriever(
+        repository,
+        query_embedder=embedding_client.embed if embedding_client is not None else None,
+        embedding_model=args.embedding_model,
+        embedding_dimensions=args.embedding_dimensions,
+        candidate_min_vector_similarity=args.candidate_min_vector_similarity,
+    )
+    reranker = (
+        NoopReranker()
+        if args.rerank == "noop"
+        else OfflineFakeReranker()
+    )
+    selector = (
+        BaselineEvidenceSelector()
+        if args.evidence_selection == "baseline"
+        else CoverageAwareEvidenceSelector()
+    )
+    judge = (
+        BaselineAnswerabilityJudge()
+        if args.answerability == "baseline"
+        else CoverageAnswerabilityJudge()
+    )
+    pipeline = KnowledgePipeline(
+        planner=planner,
+        candidate_retriever=candidate_retriever,
+        reranker=reranker,
+        selector=selector,
+        judge=judge,
+        answerability_config=AnswerabilityConfig(
+            min_supported_coverage=settings.knowledge_answerability_min_supported_coverage,
+            min_partial_coverage=settings.knowledge_answerability_min_partial_coverage,
+            min_supported_evidence=settings.knowledge_answerability_min_supported_evidence,
+            multi_evidence_requires_all_queries=(
+                settings.knowledge_answerability_multi_evidence_requires_all_queries
+            ),
+            allow_insufficient_llm=settings.knowledge_answerability_allow_insufficient_llm,
+        ),
+    )
+
+    result_map: dict[str, list[EvidenceItem]] = {}
+    candidate_result_map: dict[str, list[EvidenceItem]] = {}
+    final_result_map: dict[str, list[EvidenceItem]] = {}
     error_map: dict[str, str] = {}
     latency_map: dict[str, float] = {}
     phase_latency_map: dict[str, dict[str, float | None]] = {}
     llm_called_map: dict[str, bool] = {}
     judge_executed_map: dict[str, bool] = {}
+    evidence_status_map: dict[str, str] = {}
+    judge_reason_map: dict[str, str] = {}
+    query_plan_map: dict[str, dict[str, object]] = {}
+    source_coverage_map: dict[str, dict[str, int]] = {}
     for question in questions:
         started = time.perf_counter()
         try:
-            result_map[question.question_id] = await search(question.query, args.candidate_limit)
+            pipeline_result = await pipeline.run(
+                question.query,
+                mode=args.mode,
+                candidate_limit=args.candidate_limit,
+                final_limit=args.final_limit,
+                # Offline evaluation does not call an Answerer or an external
+                # planning model. The configured planner still executes and
+                # safely falls back to the original query when no LLM exists.
+                llm_client=None,
+            )
+            candidates = list(pipeline_result.candidates)
+            final_results = list(pipeline_result.selection.selected)
+            result_map[question.question_id] = final_results
+            candidate_result_map[question.question_id] = candidates
+            final_result_map[question.question_id] = final_results
+            evidence_status_map[question.question_id] = pipeline_result.decision.status
+            judge_reason_map[question.question_id] = pipeline_result.decision.reason
+            query_plan_map[question.question_id] = _serialize_query_plan(pipeline_result)
+            source_coverage_map[question.question_id] = _source_coverage(
+                [candidate.result for candidate in final_results],
+                question.relevant_spans,
+            )
+            phase_latency_map[question.question_id] = {
+                "query_planner": pipeline_result.query_planner_latency_ms,
+                "candidate": pipeline_result.candidate_latency_ms,
+                "rerank": pipeline_result.rerank_latency_ms,
+                "selection": pipeline_result.selection_latency_ms,
+                "judge": pipeline_result.judge_latency_ms,
+                "llm": None,
+            }
+            judge_executed_map[question.question_id] = True
         except Exception as exc:
             error_map[question.question_id] = str(exc) or exc.__class__.__name__
             result_map[question.question_id] = []
+            candidate_result_map[question.question_id] = []
+            final_result_map[question.question_id] = []
+            judge_executed_map[question.question_id] = False
+            phase_latency_map[question.question_id] = {
+                "query_planner": None,
+                "candidate": None,
+                "rerank": None,
+                "selection": None,
+                "judge": None,
+                "llm": None,
+            }
         latency = (time.perf_counter() - started) * 1000
         latency_map[question.question_id] = latency
-        phase_latency_map[question.question_id] = {
-            "query_planner": None,
-            "candidate": latency,
-            "rerank": None,
-            "selection": None,
-            "judge": None,
-            "llm": None,
-        }
         llm_called_map[question.question_id] = False
-        judge_executed_map[question.question_id] = False
     score_type = {
         "keyword": "bm25",
         "vector": "cosine",
         "hybrid": "rrf",
     }[args.mode]
+    final_score_type = "rerank" if args.rerank != "noop" else score_type
     question_results = evaluate_question_results(
         questions,
-        {question_id: results[: args.final_limit] for question_id, results in result_map.items()},
-        candidate_result_map=result_map,
-        final_result_map={question_id: results[: args.final_limit] for question_id, results in result_map.items()},
+        result_map,
+        candidate_result_map=candidate_result_map,
+        final_result_map=final_result_map,
         error_map=error_map,
         score_type=score_type,
         latency_map=latency_map,
         k=args.final_limit,
         candidate_limit=args.candidate_limit,
         candidate_score_type=score_type,
-        final_score_type=score_type,
+        final_score_type=final_score_type,
         phase_latency_map=phase_latency_map,
         llm_called_map=llm_called_map,
         judge_executed_map=judge_executed_map,
+        evidence_status_map=evidence_status_map,
+        judge_reason_map=judge_reason_map,
+        query_plan_map=query_plan_map,
+        source_coverage_map=source_coverage_map,
     )
     detailed_summary = summarize_question_results(question_results, k=args.final_limit)
     summary = EvaluationSummary(
@@ -786,13 +1169,24 @@ async def _run(args: argparse.Namespace) -> int:
         unanswerable_count=detailed_summary.unanswerable_count,
         correct_refusal_count=detailed_summary.correct_refusal_count,
         incorrect_answer_count=detailed_summary.incorrect_answer_count,
+        unanswerable_nonempty_count=detailed_summary.unanswerable_nonempty_result_count,
+        incorrect_refusal_count=detailed_summary.incorrect_refusal_count,
+        refusal_evaluation=(
+            "coverage_judge_state_only"
+            if args.answerability == "coverage-v1"
+            else "retrieval_only"
+        ),
     )
     report = {
         **asdict(summary),
         "recall_at_5": summary.recall_at_k if args.final_limit == 5 else None,
         "mrr_at_5": summary.mrr_at_k if args.final_limit == 5 else None,
-        "metrics_version": "retrieval-v2",
-        "status": "incomplete" if detailed_summary.execution_error_count else "complete",
+        "metrics_version": "pipeline-evaluation-v3",
+        "status": (
+            "incomplete"
+            if detailed_summary.execution_error_count
+            else "complete"
+        ),
         "execution_error_count": detailed_summary.execution_error_count,
         "evaluated_answerable_count": detailed_summary.evaluated_answerable_count,
         "hit_at_5": detailed_summary.hit_at_k if args.final_limit == 5 else None,
@@ -800,7 +1194,11 @@ async def _run(args: argparse.Namespace) -> int:
         "unanswerable_empty_result_count": detailed_summary.unanswerable_empty_result_count,
         "unanswerable_nonempty_result_count": detailed_summary.unanswerable_nonempty_result_count,
         "unanswerable_candidate_nonempty_result_count": detailed_summary.unanswerable_candidate_nonempty_result_count,
+        "refusal_evaluation": summary.refusal_evaluation,
         "evaluated_unanswerable_count": detailed_summary.evaluated_unanswerable_count,
+        "candidate_nonempty_count": detailed_summary.candidate_nonempty_count,
+        "final_nonempty_count": detailed_summary.final_nonempty_count,
+        "judge_executed_count": detailed_summary.judge_executed_count,
         "mode": args.mode,
         "split": args.split,
         "top_k": args.top_k,
@@ -811,8 +1209,19 @@ async def _run(args: argparse.Namespace) -> int:
         "rerank": args.rerank,
         "evidence_selection": args.evidence_selection,
         "answerability": args.answerability,
+        "answerability_config": {
+            "min_supported_coverage": settings.knowledge_answerability_min_supported_coverage,
+            "min_partial_coverage": settings.knowledge_answerability_min_partial_coverage,
+            "min_supported_evidence": settings.knowledge_answerability_min_supported_evidence,
+            "multi_evidence_requires_all_queries": (
+                settings.knowledge_answerability_multi_evidence_requires_all_queries
+            ),
+            "allow_insufficient_llm": settings.knowledge_answerability_allow_insufficient_llm,
+        },
+        "ablation_name": getattr(args, "ablation_name", None),
         "dataset_sha256": hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest(),
         "database": str(Path(args.database)),
+        "database_sha256": hashlib.sha256(database_path.read_bytes()).hexdigest(),
         "embedding_model": args.embedding_model or None,
         "embedding_dimensions": args.embedding_dimensions or None,
         "min_vector_similarity": (
@@ -821,11 +1230,40 @@ async def _run(args: argparse.Namespace) -> int:
         "retrieval_latency_ms": detailed_summary.retrieval_latency_ms,
         "phase_latency_ms": detailed_summary.phase_latency_ms,
         "candidate_evidence_recall_at_k": detailed_summary.candidate_evidence_recall_at_k,
+        "candidate_mrr_at_k": detailed_summary.candidate_mrr_at_k,
+        "candidate_hit_at_k": detailed_summary.candidate_hit_at_k,
         "final_evidence_recall": detailed_summary.final_evidence_recall,
         "source_coverage": detailed_summary.source_coverage,
+        "refusal_policy": (
+            "coverage_judge_state_only_not_semantic_verification"
+            if args.answerability == "coverage-v1"
+            else "not_evaluated_in_baseline_judge"
+        ),
+        "judge_state_counts": judge_state_counts(question_results),
         "execution": {
-            "query_planner_executed": False,
-            "judge_executed": False,
+            "query_planner_executed": any(
+                result.phase_latency_ms is not None
+                and result.phase_latency_ms.get("query_planner") is not None
+                for result in question_results
+            ),
+            "candidate_retriever_executed": any(
+                result.phase_latency_ms is not None
+                and result.phase_latency_ms.get("candidate") is not None
+                for result in question_results
+            ),
+            "reranker_executed": any(
+                result.phase_latency_ms is not None
+                and result.phase_latency_ms.get("rerank") is not None
+                for result in question_results
+            ),
+            "evidence_selector_executed": any(
+                result.phase_latency_ms is not None
+                and result.phase_latency_ms.get("selection") is not None
+                for result in question_results
+            ),
+            "judge_executed": any(
+                result.judge_executed is True for result in question_results
+            ),
             "llm_executed": False,
             "answer_quality_evaluated": False,
         },
@@ -833,7 +1271,7 @@ async def _run(args: argparse.Namespace) -> int:
             key: asdict(value)
             for key, value in summarize_question_results(
                 question_results,
-                k=args.top_k,
+                k=args.final_limit,
                 group_by="category",
             ).items()
         },
@@ -841,7 +1279,7 @@ async def _run(args: argparse.Namespace) -> int:
             key: asdict(value)
             for key, value in summarize_question_results(
                 question_results,
-                k=args.top_k,
+                k=args.final_limit,
                 group_by="answerable",
             ).items()
         },
@@ -849,8 +1287,9 @@ async def _run(args: argparse.Namespace) -> int:
         "blog_formal_014": build_014_trace(questions, question_results),
         "answer_quality": "not evaluated by offline retrieval CLI",
     }
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x", encoding="utf-8") as report_file:
+        report_file.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return 0
 
 
@@ -884,8 +1323,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ablation-config",
         type=Path,
-        help="validate a dev-only ablation configuration before running",
+        help="apply a dev-only ablation configuration before running",
     )
+    parser.add_argument("--ablation-name", help="strategy name inside --ablation-config")
     return parser
 
 
@@ -895,7 +1335,11 @@ def main() -> int:
         if args.final_limit is None:
             args.final_limit = args.top_k
         if args.ablation_config is not None:
-            load_ablation_configs(args.ablation_config)
+            configs = load_ablation_configs(args.ablation_config)
+            apply_ablation_config(
+                args,
+                select_ablation_config(configs, name=args.ablation_name),
+            )
         return asyncio.run(_run(args))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")

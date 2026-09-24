@@ -13,12 +13,36 @@ from app.knowledge.retrieval import (
 
 
 class KnowledgeRepository:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = path
+        self.read_only = read_only
+
+    def _connect(self):
+        if self.read_only:
+            return aiosqlite.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro",
+                uri=True,
+            )
+        return aiosqlite.connect(self.path)
 
     async def init(self) -> None:
+        if self.read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(f"knowledge database does not exist: {self.path}")
+            async with self._connect() as db:
+                await db.execute("PRAGMA query_only = ON")
+                cursor = await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+                tables = {row[0] for row in await cursor.fetchall()}
+            missing = {"documents", "chunks", "embeddings"} - tables
+            if missing:
+                raise ValueError(
+                    f"read-only knowledge database is missing tables: {sorted(missing)}"
+                )
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.execute("PRAGMA foreign_keys = ON")
             await db.executescript(
                 """
@@ -65,7 +89,7 @@ class KnowledgeRepository:
             await db.commit()
 
     async def get_document_by_path(self, source_path: str) -> Document | None:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT document_id, source_path, source_url, title, content_hash "
                 "FROM documents WHERE source_path = ?",
@@ -75,7 +99,7 @@ class KnowledgeRepository:
         return None if row is None else Document(*row)
 
     async def get_document(self, document_id: str) -> Document | None:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT document_id, source_path, source_url, title, content_hash "
                 "FROM documents WHERE document_id = ?",
@@ -85,7 +109,7 @@ class KnowledgeRepository:
         return None if row is None else Document(*row)
 
     async def list_documents(self) -> list[Document]:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT document_id, source_path, source_url, title, content_hash "
                 "FROM documents ORDER BY source_path"
@@ -103,13 +127,13 @@ class KnowledgeRepository:
             query += " WHERE document_id = ?"
             parameters = (document_id,)
         query += " ORDER BY document_id, start_line, chunk_id"
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(query, parameters)
             rows = await cursor.fetchall()
         return [Chunk(*row) for row in rows]
 
     async def get_chunk(self, chunk_id: str) -> Chunk | None:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT chunk_id, document_id, document_version, heading_path, "
                 "start_line, end_line, text, token_count FROM chunks WHERE chunk_id = ?",
@@ -176,17 +200,17 @@ class KnowledgeRepository:
         return reciprocal_rank_fusion([keyword_results, vector_results], limit=limit)
 
     async def count_documents(self) -> int:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute("SELECT COUNT(*) FROM documents")
             return (await cursor.fetchone())[0]
 
     async def count_chunks(self) -> int:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute("SELECT COUNT(*) FROM chunks")
             return (await cursor.fetchone())[0]
 
     async def get_document_index_state(self, document_id: str) -> tuple[str, str | None] | None:
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT index_status, index_error FROM documents WHERE document_id = ?",
                 (document_id,),
@@ -202,7 +226,7 @@ class KnowledgeRepository:
     ) -> None:
         if status not in {"pending", "indexing", "ready", "failed"}:
             raise ValueError(f"unsupported index status: {status}")
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute("SELECT 1 FROM documents WHERE document_id = ?", (document_id,))
             if await cursor.fetchone() is None:
                 raise ValueError(f"document not found: {document_id}")
@@ -227,7 +251,7 @@ class KnowledgeRepository:
         if dimensions is not None:
             conditions.append("dimensions = ?")
             parameters.append(dimensions)
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.execute(
                 f"DELETE FROM embeddings WHERE {' AND '.join(conditions)}",
                 parameters,
@@ -244,7 +268,7 @@ class KnowledgeRepository:
             query += " WHERE document_id = ?"
             parameters = (document_id,)
         query += " ORDER BY chunk_id, model, dimensions"
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(query, parameters)
             rows = await cursor.fetchall()
         return [
@@ -275,7 +299,7 @@ class KnowledgeRepository:
             if not all(math.isfinite(value) for value in record.vector):
                 raise ValueError("embedding vector must contain finite values")
 
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.execute("PRAGMA foreign_keys = ON")
             try:
                 await db.execute("BEGIN")
@@ -322,7 +346,7 @@ class KnowledgeRepository:
     async def replace_document(self, document: Document, chunks: list[Chunk]) -> None:
         if any(chunk.document_id != document.document_id for chunk in chunks):
             raise ValueError("chunk document_id must match its document")
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.execute("PRAGMA foreign_keys = ON")
             try:
                 await db.execute("BEGIN")
@@ -385,7 +409,7 @@ class KnowledgeRepository:
         if not source_paths:
             return 0
         placeholders = ", ".join("?" for _ in source_paths)
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.execute("PRAGMA foreign_keys = ON")
             cursor = await db.execute(
                 f"DELETE FROM documents WHERE source_path IN ({placeholders})", source_paths

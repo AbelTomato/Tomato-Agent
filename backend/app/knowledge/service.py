@@ -2,20 +2,175 @@ from collections.abc import Awaitable, Callable
 import json
 import math
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agent.interfaces import LLMClient
 from app.agent.models import Message
 from app.knowledge.models import SearchResult
-from app.knowledge.pipeline_models import EvidenceStatus, RetrievalMode
+from app.knowledge.pipeline_models import (
+    CandidateEvidence,
+    EvidenceSelection,
+    EvidenceStatus,
+    QueryPlan,
+    RetrievalMode,
+)
 from app.knowledge.answerability import AnswerabilityConfig, AnswerabilityJudge
 from app.knowledge.candidate_retrieval import CandidateRetriever
 from app.knowledge.evidence_selection import EvidenceSelector
 from app.knowledge.pipeline_models import PipelineResult
 from app.knowledge.query_planning import QueryPlanner
 from app.knowledge.reranking import Reranker
+from app.knowledge.reranking import RerankerError
+
+
+class PipelineObserver(Protocol):
+    """Optional boundary for controlled offline pipeline observations."""
+
+    def emit(
+        self,
+        event_type: str,
+        *,
+        status: Literal["success", "skipped", "failed"],
+        payload: dict[str, Any],
+        duration_ms: float | None,
+    ) -> None:
+        ...
+
+
+def _error_code(error: Exception) -> str:
+    if isinstance(error, RerankerError):
+        return "reranker_error"
+    if isinstance(error, ValueError):
+        return "value_error"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    return "stage_error"
+
+
+def _model_payload(value: BaseModel) -> dict[str, Any]:
+    return value.model_dump(mode="json")
+
+
+def _candidate_payload(candidate: CandidateEvidence, *, position: int | None = None) -> dict[str, Any]:
+    payload = _model_payload(candidate)
+    payload["query_retrievals"] = [
+        {
+            "query_id": query_id,
+            "retrieval_rank": retrieval_rank,
+            "retrieval_score": (
+                candidate.retrieval_scores[index]
+                if candidate.retrieval_scores
+                else candidate.result.score if len(candidate.query_ids) == 1 else None
+            ),
+            "score_type": candidate.retrieval_score_type,
+        }
+        for index, (query_id, retrieval_rank) in enumerate(
+            zip(candidate.query_ids, candidate.retrieval_ranks, strict=True)
+        )
+    ]
+    if position is not None:
+        payload["position"] = position
+    return payload
+
+
+def _retrieval_observation_payload(
+    plan: QueryPlan,
+    candidates: tuple[CandidateEvidence, ...],
+    *,
+    mode: RetrievalMode,
+    candidate_limit: int,
+) -> dict[str, Any]:
+    observed_candidates = [
+        _candidate_payload(candidate, position=index)
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+    per_query_results = []
+    for query in plan.queries:
+        results = []
+        for candidate_index, candidate in enumerate(candidates, start=1):
+            for query_retrieval in _candidate_payload(candidate)["query_retrievals"]:
+                if query_retrieval["query_id"] == query.query_id:
+                    results.append(
+                        {
+                            "merged_candidate_index": candidate_index,
+                            "chunk_id": candidate.result.chunk_id,
+                            "retrieval_rank": query_retrieval["retrieval_rank"],
+                        }
+                    )
+        per_query_results.append(
+            {"query_id": query.query_id, "results": results}
+        )
+    return {
+        "mode": mode,
+        "candidate_limit": candidate_limit,
+        "per_query_results": per_query_results,
+        "merged_candidates": observed_candidates,
+    }
+
+
+def _selection_observation_payload(
+    ranked: list[CandidateEvidence],
+    selection: EvidenceSelection,
+) -> dict[str, Any]:
+    dispositions_by_index = {
+        disposition.candidate_index: disposition
+        for disposition in selection.dispositions
+    }
+    selected_order_by_index: dict[int, int] = {}
+    matched_candidate_indices: set[int] = set()
+    for selected_order, selected_candidate in enumerate(selection.selected, start=1):
+        candidate_index = next(
+            (
+                index
+                for index, candidate in enumerate(ranked, start=1)
+                if index not in matched_candidate_indices and candidate == selected_candidate
+            ),
+            None,
+        )
+        if candidate_index is None:
+            candidate_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(ranked, start=1)
+                    if index not in matched_candidate_indices
+                    and candidate.result.chunk_id == selected_candidate.result.chunk_id
+                ),
+                None,
+            )
+        if candidate_index is not None:
+            selected_order_by_index[candidate_index] = selected_order
+            matched_candidate_indices.add(candidate_index)
+    observed_candidates = []
+    for candidate_index, candidate in enumerate(ranked, start=1):
+        disposition = dispositions_by_index.get(candidate_index)
+        if disposition is None:
+            selected_order = selected_order_by_index.get(candidate_index)
+            disposition_payload = {
+                "candidate_index": candidate_index,
+                "chunk_id": candidate.result.chunk_id,
+                "selected": selected_order is not None,
+                "selected_order": selected_order,
+                "excluded_reason": (
+                    None if selected_order is not None else "not_selected_by_selector"
+                ),
+            }
+        else:
+            disposition_payload = disposition.model_dump(mode="json")
+        observed_candidates.append(
+            {
+                **_candidate_payload(candidate, position=candidate_index),
+                **disposition_payload,
+            }
+        )
+    return {
+        "selection": _model_payload(selection),
+        "candidates": observed_candidates,
+        "selected_chunk_ids": [
+            candidate.result.chunk_id for candidate in selection.selected
+        ],
+    }
 
 
 class CitationSnapshot(BaseModel):
@@ -79,6 +234,7 @@ class KnowledgePipeline:
         selector: EvidenceSelector,
         judge: AnswerabilityJudge,
         answerability_config: AnswerabilityConfig,
+        observer: PipelineObserver | None = None,
     ) -> None:
         self.planner = planner
         self.candidate_retriever = candidate_retriever
@@ -86,6 +242,42 @@ class KnowledgePipeline:
         self.selector = selector
         self.judge = judge
         self.answerability_config = answerability_config
+        self.observer = observer
+
+    def _emit(
+        self,
+        event_type: str,
+        *,
+        status: Literal["success", "skipped", "failed"],
+        payload: dict[str, Any] | Callable[[], dict[str, Any]],
+        duration_ms: float | None,
+    ) -> None:
+        if self.observer is not None:
+            resolved_payload = payload() if callable(payload) else payload
+            self.observer.emit(
+                event_type,
+                status=status,
+                payload=resolved_payload,
+                duration_ms=duration_ms,
+            )
+
+    def _emit_failure(
+        self,
+        event_type: str,
+        *,
+        payload: dict[str, Any] | Callable[[], dict[str, Any]],
+        duration_ms: float,
+    ) -> None:
+        try:
+            self._emit(
+                event_type,
+                status="failed",
+                payload=payload,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            # Observation failures must not replace the original pipeline error.
+            pass
 
     async def run(
         self,
@@ -96,27 +288,117 @@ class KnowledgePipeline:
         final_limit: int,
         llm_client: LLMClient | None = None,
     ) -> PipelineResult:
-        started = perf_counter()
-        plan = await self.planner.plan(query, llm_client=llm_client)
-        candidate_started = perf_counter()
-        candidates = await self.candidate_retriever.retrieve(
-            plan, mode=mode, candidate_limit=candidate_limit
+        planner_started = perf_counter()
+        try:
+            plan = await self.planner.plan(query, llm_client=llm_client)
+        except Exception as exc:
+            self._emit_failure(
+                "query_plan.failed",
+                payload=lambda: {"error_code": _error_code(exc)},
+                duration_ms=(perf_counter() - planner_started) * 1000,
+            )
+            raise
+        query_planner_latency_ms = (perf_counter() - planner_started) * 1000
+        self._emit(
+            "query_plan.completed",
+            status="success",
+            payload=lambda: _model_payload(plan),
+            duration_ms=query_planner_latency_ms,
         )
+
+        candidate_started = perf_counter()
+        try:
+            candidates = await self.candidate_retriever.retrieve(
+                plan, mode=mode, candidate_limit=candidate_limit
+            )
+        except Exception as exc:
+            self._emit_failure(
+                "retrieval.failed",
+                payload=lambda: {"error_code": _error_code(exc)},
+                duration_ms=(perf_counter() - candidate_started) * 1000,
+            )
+            raise
         candidate_latency_ms = (perf_counter() - candidate_started) * 1000
+        self._emit(
+            "retrieval.completed",
+            status="success",
+            payload=lambda: _retrieval_observation_payload(
+                plan,
+                tuple(candidates),
+                mode=mode,
+                candidate_limit=candidate_limit,
+            ),
+            duration_ms=candidate_latency_ms,
+        )
+
         rerank_started = perf_counter()
-        ranked = await self.reranker.rank(plan.original_query, candidates)
+        try:
+            ranked = await self.reranker.rank(plan.original_query, candidates)
+        except Exception as exc:
+            self._emit_failure(
+                "rerank.failed",
+                payload=lambda: {"error_code": _error_code(exc)},
+                duration_ms=(perf_counter() - rerank_started) * 1000,
+            )
+            raise
         rerank_latency_ms = (perf_counter() - rerank_started) * 1000
+        self._emit(
+            "rerank.completed",
+            status="success",
+            payload=lambda: {
+                "before": [
+                    _candidate_payload(candidate, position=index)
+                    for index, candidate in enumerate(candidates, start=1)
+                ],
+                "after": [
+                    _candidate_payload(candidate, position=index)
+                    for index, candidate in enumerate(ranked, start=1)
+                ],
+            },
+            duration_ms=rerank_latency_ms,
+        )
+
         selection_started = perf_counter()
-        selection = self.selector.select(plan, ranked, final_limit=final_limit)
+        try:
+            selection = self.selector.select(plan, ranked, final_limit=final_limit)
+        except Exception as exc:
+            self._emit_failure(
+                "evidence_selection.failed",
+                payload=lambda: {"error_code": _error_code(exc)},
+                duration_ms=(perf_counter() - selection_started) * 1000,
+            )
+            raise
         selection_latency_ms = (perf_counter() - selection_started) * 1000
+        self._emit(
+            "evidence_selection.completed",
+            status="success",
+            payload=lambda: _selection_observation_payload(ranked, selection),
+            duration_ms=selection_latency_ms,
+        )
+
         judge_started = perf_counter()
-        decision = self.judge.judge(plan, selection, config=self.answerability_config)
+        try:
+            decision = self.judge.judge(plan, selection, config=self.answerability_config)
+        except Exception as exc:
+            self._emit_failure(
+                "answerability.failed",
+                payload=lambda: {"error_code": _error_code(exc)},
+                duration_ms=(perf_counter() - judge_started) * 1000,
+            )
+            raise
         judge_latency_ms = (perf_counter() - judge_started) * 1000
+        self._emit(
+            "answerability.completed",
+            status="success",
+            payload=lambda: {"decision": _model_payload(decision)},
+            duration_ms=judge_latency_ms,
+        )
         return PipelineResult(
             plan=plan,
             candidates=tuple(ranked),
             selection=selection,
             decision=decision,
+            query_planner_latency_ms=query_planner_latency_ms,
             candidate_latency_ms=candidate_latency_ms,
             rerank_latency_ms=rerank_latency_ms,
             selection_latency_ms=selection_latency_ms,
