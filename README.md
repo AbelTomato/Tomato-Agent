@@ -80,3 +80,15 @@ cd backend
 ```
 
 `vector` 和 `hybrid` 模式还需要兼容的 Embedding 模型、维度和索引。评测可记录证据段召回/排名、空结果、候选与最终证据状态及阶段耗时；这些机器指标不代表答案语义质量。模型答案质量和真实博客效果仍须人工验收，不能用固定测试语料单测成绩代替。RAG 快照和报告分别保存在上述 `databases/`、`reports/` 目录中；当前结果与限制见 [`docs/评测/博客RAG基线报告.md`](docs/评测/博客RAG基线报告.md)。
+
+可追溯的 run/compare Benchmark runner 使用正式 manifest 执行指定 split，并输出逐题 JSON 与 Markdown 报告：
+
+```bash
+cd backend
+.venv/bin/python -m app.knowledge.benchmark run \
+  --manifest /home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json \
+  --strategy keyword-v1 --split dev \
+  --output /home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/reports/YYYY-MM-DD/public-blog/dev/benchmark-v1/keyword-v1
+```
+
+使用前请阅读 [`docs/评测/Benchmark使用说明.md`](docs/评测/Benchmark使用说明.md)。输出目录必须不存在；真实运行仅使用获批的只读 RAG 快照和题集 split。`complete` 只代表运行完整，不代表答案语义或产品质量验收通过。
