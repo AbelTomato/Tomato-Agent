@@ -100,6 +100,11 @@ vector/hybrid 结果相同，不表示两种策略已经优劣等价；本次样
 
 正式逐题报告为 `backend/data/rag/reports/2026-09-23/public-blog/dev/pipeline-v1/hybrid.json`，SHA-256 `092490970f52208768442d38794b549ecf4919a77f9669ec3ebe4319150ccec2`；同目录 `summary.json`（SHA-256 `83bf78f01d3530936b88e2caf97ec3c06f442d40f65b37a6b329e6443c94f8ea`）和 `provenance.json`（SHA-256 `e918fb248f22304e1af3fd085089115da6ddaf26051586fadca2148a37c79256`）记录汇总与数据/代码指纹。该目录与旧 `admission-v1` 分离；本次未重建索引、未查看 `test`，也未修改旧归档工件。
 这些失败样例来自真实博客 `dev`，不是固定夹具或合成题；历史 LLM 输出保存在旧归档，本次逐题 Pipeline 结果保存在新报告中。执行失败不计为正确拒答，Coverage Judge 的 `supported` 状态也不代表语义验证；本次未把 `blog-formal-014` 的候选命中误记为最终覆盖。
+
+### 4.5 2026-09-24 Observe 任务 6 复验状态
+
+离线 `rag-observe-trace/v1` runner 与集成工件完整性检查已通过固定知识库快照和 Fake LLM 测试（任务 6 指定组合测试 198/198）；该测试验证实现和工件契约，不代表真实答案生成。随后按批准范围显式运行 `--real-llm`，候选 run `24f1c9e3-52fb-4fa8-916f-2709a729dd30` 已生成；因为当前 runner 固定使用 `keyword` 检索，而 18 道正式 `dev` 题均无检索候选，18 次 Answerer 调用全部按 `answerability_no_results` 跳过。实际 provider 请求/尝试/响应为 **0/0/0**，执行错误为 0；因此本次没有真实 LLM 答案、引用白名单校验不适用，人工复核为 **0/18**，不得把本次表述为 18 次真实 LLM 问答或质量验收。汇总 `complete` 只表示 run 生命周期和工件完整，不代表评测目标达成。报告位于 `backend/data/rag/reports/2026-09-24/public-blog/dev/observe-v1/24f1c9e3-52fb-4fa8-916f-2709a729dd30/`，Trace schema 为 `rag-observe-trace/v1`；18/18 逐题文件、126 条事件及 22 个 manifest 工件均通过事件链/文件大小/SHA-256 校验。题集 SHA-256 前后均为 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；只读快照 SHA-256 前后均为 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`，SQLite integrity 为 `ok`。provider 不暴露 usage/billing，尽管 Observe 记录没有请求，实际费用仍无法从客户端核实；批准的 `$5` 预算不可本地强制或保证。Benchmark 准入结论不变。下一次真实 LLM 评估需先解决该 runner 的检索模式限制/证据候选缺失，使用新 run ID 并重新确认批准范围；不得重用本次目录或把本次完整状态解释为语义验收。
+
 ## 5. 准入结论与下一步
 当前结论：**未达到 `/home/abeltomato/workspace/projects/Tomato-Agent/docs/实施计划/RAG完成后Benchmark实施计划.md` 的实施准入门槛，暂不进入 Benchmark 任务 1。** 引用越界和 front matter 伪支撑已关闭；当前未满足项包括 `blog-formal-014` 最终证据仅覆盖 1/2，以及三个无答案题均得到 Coverage Judge `supported` 且本次没有语义验证，故仍不符合“无阻断性功能问题”。
 

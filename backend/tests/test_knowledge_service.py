@@ -16,6 +16,11 @@ from app.knowledge.service import (
     RetrievalMode,
     build_evidence_context,
 )
+from app.observability.rag_trace import canonical_json_sha256
+from app.observability.recording_llm_client import (
+    RecordingLLMClient,
+    llm_question_scope,
+)
 
 
 def make_result() -> SearchResult:
@@ -473,6 +478,156 @@ async def test_knowledge_service_answer_generates_json_and_keeps_retrieved_citat
     assert "SETEX" in messages[-1].content
     assert "R1" in messages[-1].content
     assert "chunk-1" not in messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_knowledge_service_can_return_retrieval_without_configured_llm():
+    repository = FakeKnowledgeRepository([make_result()])
+    service = KnowledgeService(repository)
+
+    answer = await service.answer(
+        "SETEX 过期时间",
+        mode="keyword",
+        llm_client=None,
+    )
+
+    assert answer.answer == ""
+    assert answer.evidence_status == "supported"
+    assert [citation.chunk_id for citation in answer.citations] == ["chunk-1"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_service_records_exact_answer_context_and_validated_citation_mapping():
+    class Collector:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, *, status, payload, duration_ms):
+            self.events.append((event_type, status, payload, duration_ms))
+
+    repository = FakeKnowledgeRepository([make_result()])
+    response = LLMResponse(
+        kind="final",
+        content='{"answer":"SETEX 设置过期时间。","citation_ids":["R1"],"evidence_status":"supported"}',
+    )
+    downstream = FakeLLM(response)
+    collector = Collector()
+    client = RecordingLLMClient(
+        downstream,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="test-model",
+    )
+
+    with llm_question_scope("blog-dev-answer-001"):
+        answer = await KnowledgeService(repository).answer(
+            "SETEX 是如何设置过期时间的？",
+            mode="keyword",
+            llm_client=client,
+        )
+
+    assert answer.answer == "SETEX 设置过期时间。"
+    assert [event[0] for event in collector.events] == [
+        "llm.request",
+        "llm.response",
+        "citation_validation.completed",
+        "answer.completed",
+    ]
+    request_payload = collector.events[0][2]
+    actual_messages, actual_tools = downstream.calls[0]
+    assert request_payload["purpose"] == "answerer"
+    assert request_payload["prompt"]["prompt_id"] == "rag.answerer"
+    assert request_payload["messages_sha256"] == canonical_json_sha256(
+        [message.model_dump(mode="json") for message in actual_messages]
+    )
+    assert request_payload["tools_sha256"] == canonical_json_sha256(actual_tools)
+    assert request_payload["messages"][0]["content"] == actual_messages[0].content
+    assert request_payload["messages"][1]["content"] == actual_messages[1].content
+    assert "SETEX 会同时设置键的过期时间。" in request_payload["messages"][1]["content"]
+    assert request_payload["citation_labels"] == ["R1"]
+    assert request_payload["citation_label_map"]["R1"]["chunk_id"] == "chunk-1"
+    citation_payload = collector.events[2][2]
+    assert citation_payload["whitelist_valid"] is True
+    assert citation_payload["validation_passed"] is True
+    assert citation_payload["citation_ids"] == ["R1"]
+    assert citation_payload["mapped_citations"][0]["citation_id"] == "chunk-1"
+    answer_payload = collector.events[3][2]
+    assert answer_payload["raw_content"] == response.content
+    assert answer_payload["answer"] == answer.answer
+    assert answer_payload["evidence_status"] == "supported"
+    assert answer_payload["citation_ids"] == ["R1"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_service_records_invalid_citation_without_silent_remapping():
+    class Collector:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, *, status, payload, duration_ms):
+            self.events.append((event_type, status, payload, duration_ms))
+
+    repository = FakeKnowledgeRepository([make_result()])
+    downstream = FakeLLM(
+        LLMResponse(
+            kind="final",
+            content='{"answer":"answer","citation_ids":["missing"],"evidence_status":"supported"}',
+        )
+    )
+    collector = Collector()
+    client = RecordingLLMClient(
+        downstream,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="test-model",
+    )
+
+    with llm_question_scope("blog-dev-answer-invalid-citation"):
+        with pytest.raises(ValueError, match="not retrieved"):
+            await KnowledgeService(repository).answer(
+                "SETEX",
+                mode="keyword",
+                llm_client=client,
+            )
+
+    citation_events = [event for event in collector.events if event[0] == "citation_validation.completed"]
+    assert len(citation_events) == 1
+    assert citation_events[0][1] == "failed"
+    assert citation_events[0][2]["whitelist_valid"] is False
+    assert citation_events[0][2]["validation_passed"] is False
+    assert citation_events[0][2]["unknown_citation_ids"] == ["missing"]
+    assert citation_events[0][2]["llm_call_id"] == collector.events[1][2]["call_id"]
+    assert citation_events[0][2]["messages_sha256"] == collector.events[1][2]["messages_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_service_records_skipped_answerer_when_retrieval_is_empty():
+    class Collector:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, *, status, payload, duration_ms):
+            self.events.append((event_type, status, payload, duration_ms))
+
+    downstream = FakeLLM(LLMResponse(kind="final", content="must not run"))
+    collector = Collector()
+    client = RecordingLLMClient(
+        downstream,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="test-model",
+    )
+    with llm_question_scope("blog-dev-empty-001"):
+        answer = await KnowledgeService(FakeKnowledgeRepository([])).answer(
+            "unknown",
+            llm_client=client,
+        )
+
+    assert answer.evidence_status == "no_results"
+    assert downstream.calls == []
+    assert len(collector.events) == 1
+    assert collector.events[0][0:2] == ("llm.skipped", "skipped")
+    assert collector.events[0][2]["reason"] == "no_retrieved_citations"
 
 
 @pytest.mark.asyncio

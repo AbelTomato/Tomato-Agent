@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import quote
 from uuid import UUID
@@ -446,10 +446,69 @@ class RagTraceSink:
                 self._fail_for_write_error("review_write_failed")
                 raise
 
+    def write_artifact(self, relative_path: str, content: bytes | str) -> Path:
+        """Write one additional safe JSON object as a private run artifact."""
+        with self._lock:
+            self._ensure_open()
+            if not isinstance(relative_path, str) or not relative_path.strip():
+                raise TraceSinkError("artifact path must be a non-empty relative path")
+            artifact_path = PurePosixPath(relative_path)
+            if (
+                artifact_path.is_absolute()
+                or ".." in artifact_path.parts
+                or "\\" in relative_path
+                or len(artifact_path.parts) != 1
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", relative_path)
+                or relative_path in {
+                    "manifest.json",
+                    "events.jsonl",
+                    "human-reviews.jsonl",
+                    "run-metadata.json",
+                    "failures.json",
+                }
+            ):
+                raise TraceSinkError("artifact path must be a safe top-level run file")
+            path = self.run_dir / relative_path
+            if path.exists() or path.is_symlink():
+                raise TraceSinkError("artifact already exists; refusing to overwrite")
+            try:
+                payload = content.encode("utf-8") if isinstance(content, str) else content
+                if not isinstance(payload, bytes):
+                    raise TraceSinkError("artifact content must be bytes or text")
+                try:
+                    decoded = json.loads(payload)
+                    _validate_payload(decoded, label="artifact")
+                except (UnicodeDecodeError, json.JSONDecodeError, TraceSinkError) as exc:
+                    raise TraceSinkError("artifact must contain a safe JSON object") from exc
+                self._atomic_write(path, payload)
+                self._write_manifest(status="running", finished_at=None)
+                return path
+            except OSError:
+                self._fail_for_write_error("artifact_write_failed")
+                raise
+
     def mark_incomplete(self, error_code: str) -> TraceRunManifest:
         with self._lock:
             if self._closed:
-                return TraceRunManifest.model_validate_json(self.manifest_path.read_bytes())
+                manifest = TraceRunManifest.model_validate_json(self.manifest_path.read_bytes())
+                if manifest.status != "complete":
+                    return manifest
+                # A caller may perform an additional validation after complete()
+                # (for example, checking the final report artifact). Permit that
+                # validation failure to downgrade the run without replacing any
+                # existing question or event artifact.
+                self._closed = False
+                failures_path = self.failures_path
+                if failures_path.is_file():
+                    try:
+                        failures = json.loads(failures_path.read_bytes())
+                    except (OSError, json.JSONDecodeError):
+                        failures = []
+                    self._failure_codes = [
+                        item["code"]
+                        for item in failures
+                        if isinstance(item, dict) and isinstance(item.get("code"), str)
+                    ]
             self._record_failure(error_code)
             return TraceRunManifest.model_validate_json(self.manifest_path.read_bytes())
 

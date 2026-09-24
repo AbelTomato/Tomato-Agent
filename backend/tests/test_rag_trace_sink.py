@@ -290,6 +290,47 @@ def test_explicit_failure_classification_keeps_completed_artifacts(reports_root)
     ]
 
 
+def test_additional_artifact_is_private_listed_and_cannot_be_overwritten(reports_root):
+    sink = make_sink(reports_root)
+    artifact = sink.write_artifact("summary.json", '{"split":"dev"}')
+    with pytest.raises(TraceSinkError, match="already exists"):
+        sink.write_artifact("summary.json", "replacement")
+    populate_complete_run(sink)
+    manifest = sink.complete()
+
+    summary_digest = next(item for item in manifest.artifacts if item.relative_path == "summary.json")
+    assert artifact.read_text(encoding="utf-8") == '{"split":"dev"}'
+    assert summary_digest.size_bytes == artifact.stat().st_size
+    assert summary_digest.sha256 == __import__("hashlib").sha256(artifact.read_bytes()).hexdigest()
+    assert artifact.stat().st_mode & 0o777 == 0o600
+    assert verify_trace_run(sink.run_dir).status == "complete"
+
+
+def test_additional_artifact_rejects_path_traversal_and_reserved_paths(reports_root):
+    sink = make_sink(reports_root)
+    for path in ("../outside.json", "nested/summary.json", "manifest.json", "../manifest.json"):
+        with pytest.raises(TraceSinkError):
+            sink.write_artifact(path, "not-written")
+    with pytest.raises(TraceSinkError, match="safe JSON"):
+        sink.write_artifact("summary.json", '{"authorization":"must-not-persist"}')
+    assert not (sink.run_dir / "summary.json").exists()
+
+
+def test_completed_run_can_be_downgraded_after_late_verification_failure(reports_root):
+    sink = make_sink(reports_root)
+    populate_complete_run(sink)
+    sink.write_artifact("summary.json", '{"split":"dev"}')
+    sink.complete()
+
+    incomplete = sink.mark_incomplete("artifact_integrity_failed")
+
+    assert incomplete.status == "incomplete"
+    assert verify_trace_run(sink.run_dir).status == "incomplete"
+    assert json.loads((sink.run_dir / "failures.json").read_text(encoding="utf-8")) == [
+        {"code": "artifact_integrity_failed"}
+    ]
+
+
 def test_sensitive_question_payload_is_rejected_without_persisting_secret(reports_root):
     sink = make_sink(reports_root)
 

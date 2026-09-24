@@ -1027,48 +1027,10 @@ async def _run(args: argparse.Namespace) -> int:
             timeout_seconds=settings.embedding_timeout_seconds,
         )
 
-    planner = (
-        SafeQueryPlanner()
-        if args.query_planning == "disabled"
-        else LLMQueryPlanner(QueryPlannerConfig(enabled=True))
-    )
-    candidate_retriever = RepositoryCandidateRetriever(
+    pipeline = build_knowledge_pipeline(
+        args,
         repository,
-        query_embedder=embedding_client.embed if embedding_client is not None else None,
-        embedding_model=args.embedding_model,
-        embedding_dimensions=args.embedding_dimensions,
-        candidate_min_vector_similarity=args.candidate_min_vector_similarity,
-    )
-    reranker = (
-        NoopReranker()
-        if args.rerank == "noop"
-        else OfflineFakeReranker()
-    )
-    selector = (
-        BaselineEvidenceSelector()
-        if args.evidence_selection == "baseline"
-        else CoverageAwareEvidenceSelector()
-    )
-    judge = (
-        BaselineAnswerabilityJudge()
-        if args.answerability == "baseline"
-        else CoverageAnswerabilityJudge()
-    )
-    pipeline = KnowledgePipeline(
-        planner=planner,
-        candidate_retriever=candidate_retriever,
-        reranker=reranker,
-        selector=selector,
-        judge=judge,
-        answerability_config=AnswerabilityConfig(
-            min_supported_coverage=settings.knowledge_answerability_min_supported_coverage,
-            min_partial_coverage=settings.knowledge_answerability_min_partial_coverage,
-            min_supported_evidence=settings.knowledge_answerability_min_supported_evidence,
-            multi_evidence_requires_all_queries=(
-                settings.knowledge_answerability_multi_evidence_requires_all_queries
-            ),
-            allow_insufficient_llm=settings.knowledge_answerability_allow_insufficient_llm,
-        ),
+        embedding_client=embedding_client,
     )
 
     result_map: dict[str, list[EvidenceItem]] = {}
@@ -1327,6 +1289,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ablation-name", help="strategy name inside --ablation-config")
     return parser
+
+
+def build_knowledge_pipeline(
+    args: argparse.Namespace,
+    repository: KnowledgeRepository,
+    *,
+    embedding_client: EmbeddingClient | None = None,
+    observer=None,
+) -> KnowledgePipeline:
+    """Build the shared retrieval pipeline used by offline evaluation runners."""
+    planner = (
+        SafeQueryPlanner()
+        if args.query_planning == "disabled"
+        else LLMQueryPlanner(QueryPlannerConfig(enabled=True))
+    )
+    candidate_retriever = RepositoryCandidateRetriever(
+        repository,
+        query_embedder=embedding_client.embed if embedding_client is not None else None,
+        embedding_model=args.embedding_model,
+        embedding_dimensions=args.embedding_dimensions,
+        candidate_min_vector_similarity=args.candidate_min_vector_similarity,
+    )
+    reranker = (
+        NoopReranker()
+        if args.rerank == "noop"
+        else OfflineFakeReranker()
+    )
+    selector = (
+        BaselineEvidenceSelector()
+        if args.evidence_selection == "baseline"
+        else CoverageAwareEvidenceSelector()
+    )
+    judge = (
+        BaselineAnswerabilityJudge()
+        if args.answerability == "baseline"
+        else CoverageAnswerabilityJudge()
+    )
+    return KnowledgePipeline(
+        planner=planner,
+        candidate_retriever=candidate_retriever,
+        reranker=reranker,
+        selector=selector,
+        judge=judge,
+        answerability_config=AnswerabilityConfig(
+            min_supported_coverage=settings.knowledge_answerability_min_supported_coverage,
+            min_partial_coverage=settings.knowledge_answerability_min_partial_coverage,
+            min_supported_evidence=settings.knowledge_answerability_min_supported_evidence,
+            multi_evidence_requires_all_queries=(
+                settings.knowledge_answerability_multi_evidence_requires_all_queries
+            ),
+            allow_insufficient_llm=settings.knowledge_answerability_allow_insufficient_llm,
+        ),
+        observer=observer,
+    )
 
 
 def main() -> int:

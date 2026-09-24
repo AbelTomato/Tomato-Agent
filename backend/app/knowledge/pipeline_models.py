@@ -43,9 +43,11 @@ class QueryPlan(_ImmutableModel):
 
     @model_validator(mode="after")
     def validate_query_ids(self) -> QueryPlan:
-        query_ids = [query.query_id for query in self.queries]
-        if len(query_ids) != len(set(query_ids)):
-            raise ValueError("query_id values must be unique")
+        seen = set()
+        for query in self.queries:
+            if query.query_id in seen:
+                raise ValueError(f"Duplicate query_id found: {query.query_id}")
+            seen.add(query.query_id)
         return self
 
 

@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +12,8 @@ from app.knowledge.query_planning import (
     is_complex_query,
 )
 from app.knowledge.pipeline_models import RetrievalQuery
+from app.observability.recording_llm_client import RecordingLLMClient
+from app.observability.recording_llm_client import llm_question_scope
 from app.settings import Settings
 
 
@@ -74,6 +77,70 @@ async def test_llm_query_planner_preserves_original_and_adds_stable_subqueries()
     assert len(llm.calls) == 1
     assert llm.calls[0][1] == []
     assert "citation" in llm.calls[0][0][0].content
+
+
+@pytest.mark.asyncio
+async def test_query_planner_observation_is_associated_with_query_planning_prompt():
+    class Collector:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, *, status, payload, duration_ms):
+            self.events.append((event_type, status, payload, duration_ms))
+
+    content = json.dumps({"queries": [{"text": "Q/K/V 职责", "facet": "QKV"}]})
+    downstream = FakeLLM(content)
+    collector = Collector()
+    client = RecordingLLMClient(
+        downstream,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="test-model",
+    )
+    planner = LLMQueryPlanner(QueryPlannerConfig(enabled=True))
+
+    with llm_question_scope("blog-dev-planner-001"):
+        plan = await planner.plan(
+            "分别解释 Q/K/V 和多头注意力",
+            llm_client=client,
+        )
+
+    assert len(plan.queries) == 2
+    assert [event[0] for event in collector.events] == ["llm.request", "llm.response"]
+    request = collector.events[0][2]
+    assert request["purpose"] == "query_planner"
+    assert request["prompt"]["prompt_id"] == "rag.query_planner"
+    assert request["prompt"]["sha256"]
+
+
+@pytest.mark.asyncio
+async def test_query_planner_records_skipped_model_call_for_simple_query():
+    class Collector:
+        def __init__(self):
+            self.events = []
+
+        def emit(self, event_type, *, status, payload, duration_ms):
+            self.events.append((event_type, status, payload, duration_ms))
+
+    downstream = FakeLLM('{"queries":[]}')
+    collector = Collector()
+    client = RecordingLLMClient(
+        downstream,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="test-model",
+    )
+    with llm_question_scope("blog-dev-simple-001"):
+        plan = await LLMQueryPlanner(QueryPlannerConfig(enabled=True)).plan(
+            "SETEX 是什么？",
+            llm_client=client,
+        )
+
+    assert [query.query_id for query in plan.queries] == ["q1"]
+    assert downstream.calls == []
+    assert len(collector.events) == 1
+    assert collector.events[0][0:2] == ("llm.skipped", "skipped")
+    assert collector.events[0][2]["reason"] == "simple_query"
 
 
 @pytest.mark.asyncio

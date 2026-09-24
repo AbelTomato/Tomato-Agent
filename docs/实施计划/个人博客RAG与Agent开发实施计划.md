@@ -81,7 +81,7 @@
 - `document_id` 由知识库标识和规范化相对路径计算稳定哈希；`chunk_id` 由文档 ID、内容版本、章节和序号计算。修改后保留文档身份，替换片段版本。
 - `RetrievalHit`：`chunk`、`score`、`retrieval_method`。不同检索方法的原始分数不得直接相加。
 - `Citation`：`citation_id`、`chunk_id`、文档标题、URL、章节、行号、证据摘录、文档版本。回答时保存证据快照，文章后续更新不破坏历史引用。
-- `KnowledgeAnswer`：`answer`、`citations`、`evidence_status`（`supported`、`insufficient`、`unverified`）、`retrieval_query`。`supported` 表示模型按引用格式作答且引用 ID 有效，不等同于程序已经证明语义正确。
+- `KnowledgeAnswer`：`answer`、`citations`、`evidence_status`（`supported`、`insufficient`、`no_results`）、`retrieval_query`。`supported` 表示模型按引用格式作答且引用 ID 有效，不等同于程序已经证明语义正确。
 - `EmbeddingProvider.embed(texts: list[str]) -> list[list[float]]` 为异步接口；禁止空向量、非有限数字、数量不匹配或维度漂移。
 - `KnowledgeRetriever.search(query: str, top_k: int, mode: str) -> list[RetrievalHit]` 为异步接口；`mode` 仅接受 `keyword`、`vector`、`hybrid`。
 
