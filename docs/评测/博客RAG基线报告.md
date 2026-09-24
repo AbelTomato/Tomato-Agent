@@ -2,9 +2,9 @@
 
 ## 1. 报告状态
 
-- **报告日期**：2026-09-23（含 2026-09-22 历史基线）
-- **状态**：已完成真实博客正式题集 `dev` 的三模式离线检索基线、历史 18 题真实 LLM 人工语义验收，以及当前 Pipeline 的 18 题 hybrid 重测；**RAG 尚未达到 Benchmark 实施准入门槛**。
-- **范围限制**：本报告使用 66 篇真实博客的隔离快照、36 题正式题集中的 18 题 `dev`，以及已批准的 Embedding/LLM 配置。`test` 集未查看；本次 Pipeline 重测仅调用 Embedding API，不调用 LLM 做 query splitting、答案生成或语义 judging。历史 LLM 验收不代表本次 Pipeline 重测的生成质量；结果不代表最终博客问答质量，也不构成新策略收益结论。
+- **报告日期**：2026-09-24（含 2026-09-22/23 历史基线）
+- **状态**：已完成真实博客正式题集 `dev` 的三模式离线检索基线、历史 18 题真实 LLM 人工语义验收、18 题 hybrid Pipeline 重测，以及 2026-09-24 Observe 工件复验；最新 Observe run 的检索候选为空，未发生真实 Provider 调用或答案生成。**RAG 尚未达到 Benchmark 实施准入门槛**。
+- **范围限制**：本报告使用 66 篇真实博客的隔离快照和 36 题正式题集中的 18 题 `dev`。`test` 集未查看；2026-09-23 Pipeline 重测未调用 LLM 做 query splitting、答案生成或语义 judging；2026-09-24 Observe runner 使用 `keyword` 检索，18 题均无候选，实际 Provider 请求/尝试/响应为 `0/0/0`。历史 LLM 验收不代表后续 Pipeline 的生成质量；Observe 工件完整不代表问答验收完成，结果不代表最终博客问答质量，也不构成新策略收益结论。
 
 ## 2. 可复现实验入口
 
@@ -51,7 +51,7 @@ cd /home/abeltomato/workspace/projects/Tomato-Agent/backend
 
 正式题集为 `backend/evals/blog_questions.jsonl`，文件 SHA-256 为 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；本次 `dev` 为 18 题（15 个可回答、3 个无答案）。最初 v3 快照将 YAML front matter 作为 927 个片段中的一部分入库；该历史基线用于定位问题，不能与下列 v4 直接作策略优劣比较。
 
-当前 v4 隔离快照为 `/tmp/tomato-public-blog-rag-admission-20260922-v4.db`，包含 66 个文档、886 个正文片段，66/66 文档索引状态为 `ready`。YAML front matter 已排除，正文行号保持原文物理行号；向量配置为 `qwen3.7-text-embedding-flash`、1024 维；vector/hybrid 使用 `top_k=5` 和最低余弦相似度 `0.5`。
+当前 v4 隔离快照为 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases/public-blog-2026-09-23-v1.db`（SHA-256：`20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`），包含 66 个文档、886 个正文片段，66/66 文档索引状态为 `ready`。YAML front matter 已排除，正文行号保持原文物理行号；向量配置为 `qwen3.7-text-embedding-flash`、1024 维；vector/hybrid 使用 `top_k=5` 和最低余弦相似度 `0.5`。早期临时快照路径只作为历史运行记录，不作为后续实验路径。
 
 | 模式 | 可回答空结果 | Recall@5 | MRR@5 | Hit@5 | 无答案空结果 | 执行错误 |
 |---|---:|---:|---:|---:|---:|---:|
