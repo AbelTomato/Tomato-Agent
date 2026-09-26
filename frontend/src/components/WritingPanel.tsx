@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   confirmWritingOutline,
   createWritingTask,
   loadWritingTask,
+  researchWritingTask,
   retryWritingTask,
   saveWritingTask,
   type WritingStatus,
@@ -36,6 +37,18 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
   const [outlineText, setOutlineText] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const researchRequests = useRef(new Set<string>());
+
+  async function startResearch(currentTask: WritingTask): Promise<WritingTask> {
+    const requestKey = `${currentTask.task_id}:${currentTask.version}`;
+    if (researchRequests.current.has(requestKey)) return currentTask;
+    researchRequests.current.add(requestKey);
+    try {
+      return await researchWritingTask(currentTask.task_id, currentTask.version);
+    } finally {
+      researchRequests.current.delete(requestKey);
+    }
+  }
 
   useEffect(() => {
     if (!sessionId) {
@@ -47,7 +60,7 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     const taskId = window.localStorage.getItem(TASK_STORAGE_KEY);
     if (!taskId) return;
     let cancelled = false;
-    void loadWritingTask(taskId).then((loaded) => {
+    void loadWritingTask(taskId).then(async (loaded) => {
       if (cancelled) return;
       if (loaded.session_id !== sessionId) {
         window.localStorage.removeItem(TASK_STORAGE_KEY);
@@ -56,11 +69,20 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
       setTask(loaded);
       setTopic(loaded.topic);
       setOutlineText(formatOutline(loaded.outline));
+      if (loaded.status === 'researching') {
+        const researched = await startResearch(loaded);
+        if (!cancelled) {
+          setTask(researched);
+          setOutlineText(formatOutline(researched.outline));
+        }
+      }
     }).catch((reason: unknown) => {
       if (cancelled) return;
       if (reason instanceof ApiError && reason.status === 404) {
         window.localStorage.removeItem(TASK_STORAGE_KEY);
+        return;
       }
+      setError(reason instanceof Error ? reason.message : '无法恢复写作任务。');
     });
     return () => { cancelled = true; };
   }, [sessionId]);
@@ -86,8 +108,9 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
       const id = await onRequireSession();
       const created = await createWritingTask(id, topic.trim());
       window.localStorage.setItem(TASK_STORAGE_KEY, created.task_id);
-      setTask(created);
-      setOutlineText(formatOutline(created.outline));
+      const researched = await startResearch(created);
+      setTask(researched);
+      setOutlineText(formatOutline(researched.outline));
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : '无法创建写作任务。');
     } finally {
@@ -136,7 +159,10 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     setBusy(true);
     setError('');
     try {
-      setTask(await retryWritingTask(task.task_id, task.version));
+      const reset = await retryWritingTask(task.task_id, task.version);
+      const researched = await startResearch(reset);
+      setTask(researched);
+      setOutlineText(formatOutline(researched.outline));
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : '重试失败。');
     } finally {

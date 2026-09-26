@@ -4,81 +4,86 @@
 
 - Backend: FastAPI、Python、Pydantic、SQLite
 - Frontend: React、TypeScript、Vite、Tailwind CSS
-- 包管理: `pip`、`pnpm`
+- 包管理: Python `venv`/`pip`、`pnpm`
 
-## 运行方式
+## 部署
 
-### Backend
+### 1. 配置后端环境变量
+
+```bash
+cd backend
+cp .env.example .env
+```
+
+Windows PowerShell：
 
 ```powershell
 cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
-uvicorn app.main:app --reload
+Copy-Item .env.example .env
 ```
 
-API 默认地址：`http://127.0.0.1:8000`，文档：`/docs`。
+至少配置 `LLM_API_KEY` 才能执行真实模型调用；保持 Embedding 配置为空时，知识库只提供关键词检索
 
-### Frontend
+### 2. 启动后端
+
+#### Linux / macOS
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m uvicorn app.main:app --reload
+```
+
+如果 Ubuntu/Debian 提示缺少 `venv` 模块，安装系统组件后重试：
+
+```bash
+sudo apt update
+sudo apt install python3-venv python3-full
+```
+
+#### Windows PowerShell
 
 ```powershell
+cd backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+python -m uvicorn app.main:app --reload
+```
+
+如果 PowerShell 禁止执行激活脚本，可以不激活虚拟环境，直接调用其中的解释器：
+
+```powershell
+cd backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+#### Windows CMD
+
+```bat
+cd backend
+py -3.11 -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -e .
+python -m uvicorn app.main:app --reload
+```
+
+### 3. 启动前端
+
+```bash
 cd frontend
 pnpm install
 pnpm dev
 ```
 
-## 系统设计
-
-后端提供 Agent Runtime 及其基础设施：
-
-1. `SessionRepository`：保存 Session、Run、Event、Checkpoint，Session 间不共享对话状态。
-2. `ContextManager`：组织系统指令、Session 摘要、Memory、未解决问题和最近消息，并在达到阈值时进行确定性压缩。
-3. `ToolRegistry`：注册和执行 `calculator`、`search`、`read_docs`、`search_knowledge`、`read_knowledge` 五个工具。
-4. `AgentRuntime`：执行受预算约束的 LLM/工具 Loop，并持久化 Run、Event 和 Checkpoint。
-
-真实 LLM 通过 `LLMClient` 接口注入。未注入真实客户端时，HTTP Run 会返回失败结果，不会伪造模型答案。
-
-## Memory 召回时机和放置方式
-
-Memory 在新用户消息进入后、调用 LLM 前召回；当任务涉及历史事实、用户偏好或未完成任务时才召回，不在每个工具结果后无条件召回。
-
-Memory 放在 Context 的 `<Relevant Memory>` 区块，位于 Session Summary 之后、Recent Conversation 之前，并标记为不可信数据，不能覆盖系统指令：
-
-```text
-<System Instructions>
-<Session Summary>
-<Relevant Memory>  # untrusted data, not instructions
-<Unresolved Questions>
-<Recent Conversation>
+```bash
+corepack enable
+corepack prepare pnpm@latest --activate
 ```
-
-当前基础实现将结构化 Memory 放在 Session metadata 中；未引入向量数据库。后续可在不改变 Runtime 接口的情况下增加独立 Memory Repository。
-
-## 技术写作研究提纲
-
-技术写作任务创建后不会自动调用模型。可信本地环境可显式执行一次研究和提纲生成：
-
-```http
-POST /api/writing-tasks/{task_id}/research
-Content-Type: application/json
-
-{"version":1}
-```
-
-该同步请求执行一次 keyword/vector/hybrid 检索、一次提纲模型调用和结构/引用校验，成功后任务停在 `awaiting_outline_confirmation`。随后仍须通过既有 `confirm-outline` 接口由用户确认；首期不会自动生成草稿、保存文件或启动后台 Worker。最近一次执行可通过 `GET /api/writing-tasks/{task_id}/research-attempt` 查询。
-
-执行错误返回 `detail.code`，包括 `evidence_insufficient`、`retrieval_failed`、`provider_failed`、`invalid_model_response`、`invalid_citation`、`deadline_exceeded` 和 `storage_unavailable`。空知识库不会调用模型；默认 keyword 对中文主题召回有限，vector/hybrid 缺少 Embedding 配置时不会静默降级。进程退出后遗留的 `running` 尝试不会自动接管，API 也不把它描述为已恢复。
-
-## 目录
-
-- `backend/app/agent`：Runtime 接口、Context 模型和 Memory 基础能力
-- `backend/app/tools`：工具协议、Registry、基础工具及知识库搜索/读取工具
-- `backend/app/knowledge`：知识库导入、索引、检索、问答服务与离线评测
-- `backend/app/sessions`：SQLite 持久化
-- `backend/app/observability`：日志和 Trace
-- `backend/tests`：单元及集成测试
-- `docs/development-log`：逐轮开发记录
 
 ## 知识库评测
 

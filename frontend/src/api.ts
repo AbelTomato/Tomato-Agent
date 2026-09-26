@@ -167,6 +167,13 @@ export function loadWritingTask(taskId: string): Promise<WritingTask> {
   return request(`/api/writing-tasks/${encodeURIComponent(taskId)}`);
 }
 
+export function researchWritingTask(taskId: string, version: number): Promise<WritingTask> {
+  return request(
+    `/api/writing-tasks/${encodeURIComponent(taskId)}/research`,
+    jsonRequest({ version }),
+  );
+}
+
 export function confirmWritingOutline(
   taskId: string,
   version: number,
