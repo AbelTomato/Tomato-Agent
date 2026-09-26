@@ -60,6 +60,31 @@ export type KnowledgeDocument = {
   }>;
 };
 
+export type WritingStatus =
+  | 'researching'
+  | 'awaiting_outline_confirmation'
+  | 'drafting'
+  | 'awaiting_save_confirmation'
+  | 'saved'
+  | 'failed';
+
+export type WritingTask = {
+  task_id: string;
+  session_id: string;
+  topic: string;
+  status: WritingStatus;
+  version: number;
+  outline: Record<string, unknown>;
+  draft: string | null;
+  citations: Citation[];
+  research_run_id: string | null;
+  drafting_run_id: string | null;
+  saved_path: string | null;
+  failed_stage: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
 export class ApiError extends Error {
@@ -132,6 +157,39 @@ export function sendBasicMessage(sessionId: string, message: string): Promise<{ 
 
 export function loadDocument(documentId: string): Promise<KnowledgeDocument> {
   return request(`/api/knowledge/documents/${encodeURIComponent(documentId)}`);
+}
+
+export function createWritingTask(sessionId: string, topic: string): Promise<WritingTask> {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/writing-tasks`, jsonRequest({ topic }));
+}
+
+export function loadWritingTask(taskId: string): Promise<WritingTask> {
+  return request(`/api/writing-tasks/${encodeURIComponent(taskId)}`);
+}
+
+export function confirmWritingOutline(
+  taskId: string,
+  version: number,
+  outline: Record<string, unknown>,
+): Promise<WritingTask> {
+  return request(
+    `/api/writing-tasks/${encodeURIComponent(taskId)}/confirm-outline`,
+    jsonRequest({ version, outline }),
+  );
+}
+
+export function saveWritingTask(taskId: string, version: number, idempotencyKey: string): Promise<WritingTask> {
+  return request(
+    `/api/writing-tasks/${encodeURIComponent(taskId)}/save`,
+    jsonRequest({ version, idempotency_key: idempotencyKey }),
+  );
+}
+
+export function retryWritingTask(taskId: string, version: number): Promise<WritingTask> {
+  return request(
+    `/api/writing-tasks/${encodeURIComponent(taskId)}/retry`,
+    jsonRequest({ version }),
+  );
 }
 
 export function isSafeExternalUrl(value: string | null): value is string {
