@@ -30,6 +30,11 @@ from app.knowledge.reranking import CompatibleReranker, NoopReranker
 from app.api.writing import router as writing_router
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingService
+from app.writing.execution_models import ExecutionConfig
+from app.writing.execution_repository import WritingExecutionRepository
+from app.writing.executor import WritingTaskExecutor
+from app.writing.outline import OutlineGenerator
+from app.writing.research import WritingResearcher
 
 repo = SessionRepository(settings.database_path)
 knowledge_repository = KnowledgeRepository(settings.database_path)
@@ -143,6 +148,30 @@ def create_knowledge_service(
 
 knowledge_service = create_knowledge_service(knowledge_repository)
 writing_service = WritingService(writing_repository, draft_directory=settings.draft_directory)
+writing_execution_repository = WritingExecutionRepository(settings.database_path)
+writing_research_service = KnowledgeService(
+    knowledge_repository,
+    query_embedder=knowledge_service.query_embedder,
+    embedding_model=knowledge_service.embedding_model,
+    embedding_dimensions=knowledge_service.embedding_dimensions,
+    min_vector_similarity=knowledge_service.min_vector_similarity,
+    pipeline=None,
+    candidate_limit=knowledge_service.candidate_limit,
+)
+writing_executor = WritingTaskExecutor(
+    writing_service,
+    writing_execution_repository,
+    WritingResearcher(writing_research_service),
+    OutlineGenerator(llm_client),
+    config=ExecutionConfig(
+        retrieval_mode=settings.writing_retrieval_mode,
+        max_evidence=settings.writing_max_evidence,
+        max_context_tokens=settings.writing_max_context_tokens,
+        max_response_chars=settings.writing_max_response_chars,
+        timeout_seconds=settings.writing_timeout_seconds,
+    ),
+    model_id=settings.llm_model if settings.llm_api_key.strip() else "",
+)
 
 
 def create_runtime() -> AgentRuntime:
@@ -161,12 +190,17 @@ async def lifespan(app: FastAPI):
     await repo.init()
     await knowledge_repository.init()
     await writing_repository.init()
+    await writing_execution_repository.init()
     app.state.writing_service = writing_service
+    app.state.writing_execution_repository = writing_execution_repository
+    app.state.writing_executor = writing_executor
     yield
 
 
 app = FastAPI(title="Tomato Agent Infrastructure", lifespan=lifespan)
 app.state.writing_service = writing_service
+app.state.writing_execution_repository = writing_execution_repository
+app.state.writing_executor = writing_executor
 app.include_router(writing_router)
 
 app.add_middleware(

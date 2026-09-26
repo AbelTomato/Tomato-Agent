@@ -55,6 +55,21 @@ Memory 放在 Context 的 `<Relevant Memory>` 区块，位于 Session Summary �
 
 当前基础实现将结构化 Memory 放在 Session metadata 中；未引入向量数据库。后续可在不改变 Runtime 接口的情况下增加独立 Memory Repository。
 
+## 技术写作研究提纲
+
+技术写作任务创建后不会自动调用模型。可信本地环境可显式执行一次研究和提纲生成：
+
+```http
+POST /api/writing-tasks/{task_id}/research
+Content-Type: application/json
+
+{"version":1}
+```
+
+该同步请求执行一次 keyword/vector/hybrid 检索、一次提纲模型调用和结构/引用校验，成功后任务停在 `awaiting_outline_confirmation`。随后仍须通过既有 `confirm-outline` 接口由用户确认；首期不会自动生成草稿、保存文件或启动后台 Worker。最近一次执行可通过 `GET /api/writing-tasks/{task_id}/research-attempt` 查询。
+
+执行错误返回 `detail.code`，包括 `evidence_insufficient`、`retrieval_failed`、`provider_failed`、`invalid_model_response`、`invalid_citation`、`deadline_exceeded` 和 `storage_unavailable`。空知识库不会调用模型；默认 keyword 对中文主题召回有限，vector/hybrid 缺少 Embedding 配置时不会静默降级。进程退出后遗留的 `running` 尝试不会自动接管，API 也不把它描述为已恢复。
+
 ## 目录
 
 - `backend/app/agent`：Runtime 接口、Context 模型和 Memory 基础能力
