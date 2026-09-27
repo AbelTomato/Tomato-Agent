@@ -7,12 +7,17 @@ import pytest
 from app.knowledge.service import CitationSnapshot
 from app.sessions.repository import SessionRepository
 from app.writing.models import WritingStatus
+from app.writing.execution_models import WritingExecutionError
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingConflictError, WritingService
 
 
 @pytest.fixture
 def citation() -> CitationSnapshot:
+    return citation_snapshot()
+
+
+def citation_snapshot() -> CitationSnapshot:
     return CitationSnapshot(
         citation_id="chunk-1",
         chunk_id="chunk-1",
@@ -26,6 +31,18 @@ def citation() -> CitationSnapshot:
         end_line=3,
         text="SETEX 设置过期时间。",
     )
+
+
+def confirmed_outline(citation_id: str = "chunk-1") -> dict:
+    return {
+        "title": "Redis 缓存实践",
+        "sections": [{
+            "title": "过期策略",
+            "points": ["设置过期时间"],
+            "citation_ids": [citation_id],
+        }],
+        "gaps": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -55,11 +72,11 @@ async def test_outline_confirmation_is_server_controlled_and_versioned(
     confirmed = await service.confirm_outline(
         task.task_id,
         expected_version=task.version,
-        outline={"title": "Redis 缓存实践", "sections": ["过期策略", "常见陷阱"]},
+        outline=confirmed_outline(),
     )
     assert confirmed.status == "drafting"
     assert confirmed.version == 3
-    assert confirmed.outline["sections"][-1] == "常见陷阱"
+    assert confirmed.outline == confirmed_outline()
 
 
 @pytest.mark.asyncio
@@ -80,13 +97,57 @@ async def test_stale_outline_confirmation_returns_conflict_without_mutation(
         await service.confirm_outline(
             task.task_id,
             expected_version=task.version - 1,
-            outline={"sections": ["被拒绝"]},
+            outline=confirmed_outline(),
         )
 
     current = await service.get_task(task.task_id)
     assert current.status == WritingStatus.AWAITING_OUTLINE_CONFIRMATION
     assert current.version == task.version
     assert current.outline == {"sections": ["事务"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        ({**confirmed_outline("unknown-chunk")}, "invalid_citation"),
+        ({
+            **confirmed_outline(),
+            "sections": [{
+                "title": "过期策略",
+                "points": ["设置过期时间"],
+                "citation_ids": ["chunk-1", "chunk-1"],
+            }],
+        }, "invalid_citation"),
+        ({**confirmed_outline(), "saved_path": "/tmp/escape.md"}, "invalid_model_response"),
+        ({"title": "Redis", "sections": ["过期策略"], "gaps": []}, "invalid_model_response"),
+    ],
+)
+async def test_outline_confirmation_rejects_untrusted_or_invalid_payloads(
+    tmp_path: Path, citation: CitationSnapshot, payload: dict, code: str
+):
+    session_repo = SessionRepository(tmp_path / "agent.db")
+    await session_repo.init()
+    session_id = await session_repo.create_session()
+    writing_repo = WritingRepository(tmp_path / "agent.db")
+    await writing_repo.init()
+    service = WritingService(writing_repo)
+
+    task = await service.create_task(session_id, "Redis 缓存实践")
+    task = await service.publish_outline(task.task_id, confirmed_outline(), [citation])
+
+    with pytest.raises(WritingExecutionError) as error:
+        await service.confirm_outline(
+            task.task_id,
+            expected_version=task.version,
+            outline=payload,
+        )
+
+    assert error.value.code == code
+    current = await service.get_task(task.task_id)
+    assert current.status == WritingStatus.AWAITING_OUTLINE_CONFIRMATION
+    assert current.version == task.version
+    assert current.outline == task.outline
 
 
 @pytest.mark.asyncio
@@ -110,7 +171,7 @@ async def test_draft_publication_requires_confirmed_outline_and_preserves_eviden
     task = await service.confirm_outline(
         task.task_id,
         expected_version=task.version,
-        outline={"sections": ["过期策略", "常见陷阱"]},
+        outline=confirmed_outline(),
     )
     drafting_run_id = uuid4()
 
@@ -125,7 +186,7 @@ async def test_draft_publication_requires_confirmed_outline_and_preserves_eviden
     assert published.version == task.version + 1
     assert published.draft == "这是经过确认提纲生成的草稿。"
     assert published.drafting_run_id == drafting_run_id
-    assert published.outline == {"sections": ["过期策略", "常见陷阱"]}
+    assert published.outline == confirmed_outline()
     assert published.citations == [citation]
 
     with pytest.raises(WritingConflictError):
@@ -151,7 +212,7 @@ async def test_save_is_idempotent_and_uses_configured_directory(
     task = await service.create_task(session_id, "Redis 缓存实践")
     task = await service.publish_outline(task.task_id, {"sections": ["过期"]}, [citation])
     task = await service.confirm_outline(
-        task.task_id, expected_version=task.version, outline={"sections": ["过期"]}
+        task.task_id, expected_version=task.version, outline=confirmed_outline()
     )
     task = await service.publish_draft(
         task.task_id,
@@ -240,18 +301,18 @@ async def test_concurrent_outline_confirmations_only_allow_one_transition(tmp_pa
     service = WritingService(writing_repo)
 
     task = await service.create_task(session_id, "SQLite 事务")
-    task = await service.publish_outline(task.task_id, {"sections": ["事务"]}, [])
+    task = await service.publish_outline(task.task_id, confirmed_outline(), [citation_snapshot()])
 
     results = await asyncio.gather(
         service.confirm_outline(
             task.task_id,
             expected_version=task.version,
-            outline={"sections": ["确认 A"]},
+            outline=confirmed_outline(),
         ),
         service.confirm_outline(
             task.task_id,
             expected_version=task.version,
-            outline={"sections": ["确认 B"]},
+            outline=confirmed_outline(),
         ),
         return_exceptions=True,
     )

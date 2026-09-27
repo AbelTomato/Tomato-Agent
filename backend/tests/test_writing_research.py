@@ -57,6 +57,25 @@ async def test_research_collect_forwards_mode_limit_and_copies_snapshots():
     assert bundle.citations[0].text == "证据正文"
 
 
+@pytest.mark.asyncio
+async def test_research_collect_records_actual_retrieval_mode_and_fallback_reason():
+    service = FakeKnowledgeService(
+        type("Answer", (), {
+            "evidence_status": "supported",
+            "retrieval_mode": "keyword",
+            "retrieval_fallback_reason": "embedding_client_unconfigured",
+            "citations": [citation()],
+        })()
+    )
+
+    bundle = await WritingResearcher(service).collect(
+        "Transformer架构", config=ExecutionConfig(retrieval_mode="hybrid")
+    )
+
+    assert bundle.retrieval_mode == "keyword"
+    assert bundle.retrieval_fallback_reason == "embedding_client_unconfigured"
+
+
 class ForbiddenLLM:
     async def complete(self, messages, tools):
         raise AssertionError("没有证据时不能调用模型")

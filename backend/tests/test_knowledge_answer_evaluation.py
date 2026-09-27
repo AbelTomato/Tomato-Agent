@@ -320,7 +320,7 @@ def test_answer_runner_real_llm_is_opt_in_and_client_factory_is_offline_by_defau
     client = create_llm_client(real_args)
     assert client is not None
     assert client.api_key == "trusted-test-key"
-    assert client.model == "gpt-5.6-terra"
+    assert client.model == "gpt-5.6-luna"
 
 
 def test_answer_runner_real_llm_requires_configured_credentials(monkeypatch):

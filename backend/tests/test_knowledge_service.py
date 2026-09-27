@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.agent.models import LLMResponse
 from app.knowledge.models import SearchResult
+from app.knowledge.retrieval import IndexRebuildRequired
 from app.knowledge.service import (
     CitationSnapshot,
     EvidenceStatus,
@@ -130,8 +131,9 @@ def test_build_evidence_context_marks_retrieved_text_as_untrusted_data():
 
 
 class FakeKnowledgeRepository:
-    def __init__(self, results: list[SearchResult]):
+    def __init__(self, results: list[SearchResult], *, hybrid_error: Exception | None = None):
         self.results = results
+        self.hybrid_error = hybrid_error
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
 
     async def search_chunks(self, query: str, limit: int = 5):
@@ -174,6 +176,8 @@ class FakeKnowledgeRepository:
         limit: int = 5,
         min_vector_score: float | None = None,
     ):
+        if self.hybrid_error is not None:
+            raise self.hybrid_error
         self.calls.append(
             (
                 "hybrid",
@@ -234,6 +238,60 @@ async def test_knowledge_service_retrieve_returns_mode_and_immutable_citations(m
 
 
 @pytest.mark.asyncio
+async def test_hybrid_retrieval_falls_back_to_keyword_without_embedding_client():
+    repository = FakeKnowledgeRepository([make_result()])
+    service = KnowledgeService(repository)
+
+    answer = await service.retrieve("Transformer架构", mode="hybrid")
+
+    assert answer.retrieval_mode == "keyword"
+    assert answer.retrieval_fallback_reason == "embedding_client_unconfigured"
+    assert [call[0] for call in repository.calls] == ["keyword"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_falls_back_for_incompatible_vector_index():
+    repository = FakeKnowledgeRepository(
+        [make_result()], hybrid_error=IndexRebuildRequired("rebuild required")
+    )
+
+    async def embedder(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0]]
+
+    service = KnowledgeService(
+        repository,
+        query_embedder=embedder,
+        embedding_model="test-model",
+        embedding_dimensions=2,
+    )
+
+    answer = await service.retrieve("Transformer架构", mode="hybrid")
+
+    assert answer.retrieval_mode == "keyword"
+    assert answer.retrieval_fallback_reason == "vector_index_incompatible"
+    assert [call[0] for call in repository.calls] == ["keyword"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_does_not_fallback_provider_errors():
+    repository = FakeKnowledgeRepository([make_result()])
+
+    async def embedder(texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embedding provider unavailable")
+
+    service = KnowledgeService(
+        repository,
+        query_embedder=embedder,
+        embedding_model="test-model",
+        embedding_dimensions=2,
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await service.retrieve("Transformer架构", mode="hybrid")
+    assert repository.calls == []
+
+
+@pytest.mark.asyncio
 async def test_knowledge_service_returns_no_results_without_citations():
     repository = FakeKnowledgeRepository([])
     service = KnowledgeService(repository)
@@ -245,7 +303,7 @@ async def test_knowledge_service_returns_no_results_without_citations():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["vector", "hybrid"])
+@pytest.mark.parametrize("mode", ["vector"])
 async def test_knowledge_service_requires_embedder_for_vector_modes(mode: str):
     service = KnowledgeService(FakeKnowledgeRepository([]))
 

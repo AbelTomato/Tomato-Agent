@@ -151,6 +151,9 @@ async def test_real_keyword_research_publishes_snapshot_and_stops_for_confirmati
 
     stored_attempt = await execution_repository.get_latest_attempt(task.task_id)
     assert stored_attempt is not None
+    assert stored_attempt.config.retrieval_mode == "hybrid"
+    assert stored_attempt.config.actual_retrieval_mode == "keyword"
+    assert stored_attempt.config.retrieval_fallback_reason == "embedding_client_unconfigured"
     run = await sessions.get_run(stored_attempt.run_id, session_id)
     assert run is not None
     assert run.state["phase"] == "publication"

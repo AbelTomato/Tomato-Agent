@@ -139,8 +139,19 @@ def validate_outline(
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
         )
+    except (json.JSONDecodeError, ValueError, TypeError):
+        raise WritingExecutionError("invalid_model_response") from None
+
+    return validate_outline_payload(payload, citations)
+
+
+def validate_outline_payload(
+    payload: Any,
+    citations: list[CitationSnapshot],
+) -> GeneratedOutline:
+    try:
         outline = GeneratedOutline.model_validate(payload, strict=True)
-    except (json.JSONDecodeError, ValueError, TypeError, ValidationError):
+    except (ValueError, TypeError, ValidationError):
         raise WritingExecutionError("invalid_model_response") from None
 
     snapshots_by_id: dict[str, CitationSnapshot] = {}

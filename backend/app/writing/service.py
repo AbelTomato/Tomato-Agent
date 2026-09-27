@@ -6,7 +6,9 @@ from uuid import UUID
 
 from app.knowledge.service import CitationSnapshot
 
+from .execution_models import WritingExecutionError
 from .models import WritingStatus, WritingTask
+from .outline import validate_outline_payload
 from .repository import WritingRepository
 
 
@@ -74,13 +76,14 @@ class WritingService:
             or task.version != expected_version
         ):
             raise WritingConflictError("outline confirmation is stale or invalid")
+        validated_outline = validate_outline_payload(outline, task.citations)
         try:
             return await self.repository.transition(
                 task_id,
                 expected_status=WritingStatus.AWAITING_OUTLINE_CONFIRMATION,
                 expected_version=expected_version,
                 status=WritingStatus.DRAFTING,
-                outline=outline,
+                outline=validated_outline.model_dump(mode="json"),
                 citations=task.citations,
                 research_run_id=task.research_run_id,
             )

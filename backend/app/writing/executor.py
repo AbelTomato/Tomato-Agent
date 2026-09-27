@@ -1,7 +1,13 @@
 import asyncio
 from uuid import UUID, uuid4
 
-from app.writing.execution_models import ExecutionConfig, WritingExecutionError
+from app.writing.draft import DraftGenerator
+from app.writing.execution_models import (
+    DraftConfig,
+    ExecutionConfig,
+    GeneratedOutline,
+    WritingExecutionError,
+)
 from app.writing.execution_repository import WritingExecutionRepository
 from app.writing.models import WritingStatus, WritingTask
 from app.writing.outline import OutlineGenerator, validate_outline
@@ -23,6 +29,8 @@ class WritingTaskExecutor:
         *,
         config: ExecutionConfig,
         model_id: str,
+        draft_generator: DraftGenerator | None = None,
+        draft_config: DraftConfig | None = None,
     ) -> None:
         self.service = service
         self.repository = repository
@@ -30,6 +38,85 @@ class WritingTaskExecutor:
         self.generator = generator
         self.config = config
         self.model_id = model_id
+        self.draft_generator = draft_generator
+        self.draft_config = draft_config or DraftConfig()
+
+    async def execute_draft(self, task_id: UUID, *, expected_version: int) -> WritingTask:
+        try:
+            task = await self.service.get_task(task_id)
+        except WritingNotFoundError:
+            raise
+        except Exception:
+            raise WritingExecutionError("storage_unavailable") from None
+        if not self.model_id.strip():
+            raise WritingExecutionError("model_unconfigured")
+        if self.draft_generator is None:
+            raise WritingExecutionError("model_unconfigured")
+        try:
+            existing = await self.repository.get_attempt(task_id, expected_version, kind="draft")
+        except Exception:
+            raise WritingExecutionError("storage_unavailable") from None
+        if existing is not None:
+            if existing.status == "completed" and task.drafting_run_id == existing.run_id:
+                return task
+            if existing.status == "running":
+                raise WritingConflictError("draft execution is already running")
+            raise WritingConflictError("failed draft must be retried at a new version")
+        if task.status != WritingStatus.DRAFTING or task.version != expected_version:
+            raise WritingConflictError("draft task status or version is stale")
+
+        attempt_id = uuid4()
+        try:
+            attempt = await self.repository.start_draft_attempt(
+                task_id, expected_version=expected_version, config=self.draft_config,
+                model_id=self.model_id, attempt_id=attempt_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except WritingConflictError:
+            raise
+        except Exception:
+            try:
+                raced = await self.repository.get_attempt(task_id, expected_version, kind="draft")
+            except Exception:
+                raise WritingExecutionError("storage_unavailable") from None
+            if raced is not None:
+                raise WritingConflictError("draft attempt already exists") from None
+            raise WritingExecutionError("storage_unavailable") from None
+
+        try:
+            async with asyncio.timeout(self.draft_config.timeout_seconds):
+                await self.repository.set_phase(attempt.attempt_id, "generation")
+                outline = GeneratedOutline.model_validate(task.outline, strict=True)
+                draft = await self.draft_generator.generate(
+                    task.topic, outline, task.citations, config=self.draft_config,
+                )
+                await self.repository.set_phase(attempt.attempt_id, "publication")
+        except TimeoutError:
+            return await self._record_failure(attempt.attempt_id, "deadline_exceeded")
+        except asyncio.CancelledError:
+            await self._record_cancelled(attempt.attempt_id)
+            raise
+        except WritingExecutionError as error:
+            return await self._record_failure(attempt.attempt_id, error.code)
+        except WritingConflictError:
+            raise
+        except Exception:
+            return await self._record_failure(attempt.attempt_id, "provider_failed")
+
+        try:
+            return await self.repository.complete_draft_attempt(attempt.attempt_id, draft=draft)
+        except WritingConflictError:
+            raise
+        except Exception:
+            resolved = await self._read_publication(attempt.attempt_id)
+            if resolved is not None:
+                current, stored, _ = resolved
+                if stored.status == "completed" and current.drafting_run_id == stored.run_id:
+                    return current
+                if stored.status == "conflicted":
+                    raise WritingConflictError("draft result became stale") from None
+            raise WritingExecutionError("storage_unavailable") from None
 
     async def execute_research(self, task_id: UUID, *, expected_version: int) -> WritingTask:
         try:
@@ -91,6 +178,11 @@ class WritingTaskExecutor:
             async with asyncio.timeout(self.config.timeout_seconds):
                 await self.repository.set_phase(attempt.attempt_id, "retrieval")
                 bundle = await self.researcher.collect(task.topic, config=self.config)
+                await self.repository.record_retrieval_result(
+                    attempt.attempt_id,
+                    retrieval_mode=bundle.retrieval_mode,
+                    fallback_reason=bundle.retrieval_fallback_reason,
+                )
                 phase = "generation"
                 await self.repository.set_phase(attempt.attempt_id, "generation")
                 raw, citations = await self.generator.generate(
@@ -149,9 +241,21 @@ class WritingTaskExecutor:
         raise WritingExecutionError(code)
 
     async def _record_cancelled(self, attempt_id: UUID) -> None:
+        cleanup = asyncio.create_task(
+            self.repository.fail_attempt(attempt_id, error_code="cancelled")
+        )
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Cancellation may arrive again while the failure transaction is
+                # committing. Keep waiting so a running attempt is not orphaned.
+                continue
+            except Exception:
+                return
         try:
-            await self.repository.fail_attempt(attempt_id, error_code="cancelled")
-        except Exception:
+            cleanup.result()
+        except BaseException:
             pass
 
     async def _read_publication(self, attempt_id: UUID):

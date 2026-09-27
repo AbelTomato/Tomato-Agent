@@ -88,7 +88,7 @@ export type WritingTask = {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -104,15 +104,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
+    let code: string | undefined;
     try {
       const body: unknown = await response.json();
-      if (typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string') {
-        detail = body.detail;
+      if (typeof body === 'object' && body !== null && 'detail' in body) {
+        const responseDetail = body.detail;
+        if (typeof responseDetail === 'string') detail = responseDetail;
+        if (typeof responseDetail === 'object' && responseDetail !== null && 'code' in responseDetail && typeof responseDetail.code === 'string') {
+          code = responseDetail.code;
+          detail = code;
+        }
       }
     } catch {
       // 非 JSON 错误响应仍使用 HTTP 状态展示。
     }
-    throw new ApiError(detail, response.status);
+    throw new ApiError(detail, response.status, code);
   }
   return response.json() as Promise<T>;
 }
@@ -183,6 +189,22 @@ export function confirmWritingOutline(
     `/api/writing-tasks/${encodeURIComponent(taskId)}/confirm-outline`,
     jsonRequest({ version, outline }),
   );
+}
+
+export function generateWritingDraft(taskId: string, version: number): Promise<WritingTask> {
+  return request(
+    `/api/writing-tasks/${encodeURIComponent(taskId)}/draft`,
+    jsonRequest({ version }),
+  );
+}
+
+export type WritingAttempt = {
+  status: 'running' | 'completed' | 'failed' | 'conflicted';
+  error_code: string | null;
+};
+
+export function loadDraftAttempt(taskId: string): Promise<WritingAttempt | null> {
+  return request(`/api/writing-tasks/${encodeURIComponent(taskId)}/draft-attempt`);
 }
 
 export function saveWritingTask(taskId: string, version: number, idempotencyKey: string): Promise<WritingTask> {

@@ -74,11 +74,57 @@ class GeneratedOutline(BaseModel):
 class ExecutionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    retrieval_mode: RetrievalMode = "keyword"
+    retrieval_mode: RetrievalMode = "hybrid"
+    actual_retrieval_mode: RetrievalMode | None = None
+    retrieval_fallback_reason: str | None = None
     max_evidence: int = Field(default=5, ge=1, le=10)
     max_context_tokens: int = Field(default=8000, gt=0)
     max_response_chars: int = Field(default=20000, gt=0)
     timeout_seconds: float = Field(default=120.0, gt=0)
+
+
+class DraftConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    max_context_tokens: int = Field(default=12000, gt=0)
+    max_response_chars: int = Field(default=50000, gt=0)
+    timeout_seconds: float = Field(default=120.0, gt=0)
+
+
+class DraftSection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=20000)
+    citation_ids: list[str] = Field(min_length=1)
+
+    @field_validator("title", "content", "citation_ids", mode="before")
+    @classmethod
+    def strip_text(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return [item.strip() if isinstance(item, str) else item for item in value]
+        return value
+
+    @field_validator("citation_ids")
+    @classmethod
+    def validate_citation_ids(cls, value: list[str]) -> list[str]:
+        if any(not item for item in value):
+            raise ValueError("citation IDs must not be blank")
+        return value
+
+
+class GeneratedDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    title: str = Field(min_length=1, max_length=200)
+    sections: list[DraftSection] = Field(min_length=1, max_length=12)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def strip_title(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 
 class ResearchBundle(BaseModel):
@@ -87,6 +133,7 @@ class ResearchBundle(BaseModel):
     evidence_status: EvidenceStatus
     citations: list[CitationSnapshot]
     retrieval_mode: RetrievalMode
+    retrieval_fallback_reason: str | None = None
 
 
 class ExecutionAttempt(BaseModel):
@@ -94,12 +141,13 @@ class ExecutionAttempt(BaseModel):
 
     attempt_id: UUID
     task_id: UUID
+    kind: Literal["research", "draft"] = "research"
     input_version: int = Field(ge=1)
     run_id: UUID
     status: Literal["running", "completed", "failed", "conflicted"]
     phase: Literal["retrieval", "generation", "validation", "publication"]
     error_code: str | None = None
-    config: ExecutionConfig
+    config: ExecutionConfig | DraftConfig
     model_id: str
     prompt_version: str
     created_at: datetime

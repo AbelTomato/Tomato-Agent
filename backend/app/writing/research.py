@@ -17,5 +17,6 @@ class WritingResearcher:
         return ResearchBundle(
             evidence_status=answer.evidence_status,
             citations=[citation.model_copy(deep=True) for citation in answer.citations],
-            retrieval_mode=config.retrieval_mode,
+            retrieval_mode=answer.retrieval_mode,
+            retrieval_fallback_reason=getattr(answer, "retrieval_fallback_reason", None),
         )

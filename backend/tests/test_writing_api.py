@@ -4,10 +4,28 @@ import httpx
 import pytest
 
 from app import main
+from app.knowledge.service import CitationSnapshot
 from app.sessions.repository import SessionRepository
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingService
 from uuid import uuid4
+
+
+def citation() -> CitationSnapshot:
+    return CitationSnapshot(
+        citation_id="chunk-1", chunk_id="chunk-1", document_id="doc-1",
+        document_version="v1", source_path="redis.md", source_url=None,
+        title="Redis", heading_path="过期", start_line=1, end_line=1,
+        text="设置过期时间。",
+    )
+
+
+def outline() -> dict:
+    return {
+        "title": "Redis",
+        "sections": [{"title": "过期", "points": ["设置期限"], "citation_ids": ["chunk-1"]}],
+        "gaps": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -35,7 +53,7 @@ async def test_writing_api_requires_explicit_confirmation_and_rejects_stale_vers
         assert task["status"] == "researching"
 
         published = await main.writing_service.publish_outline(
-            task["task_id"], {"sections": ["过期"]}, []
+            task["task_id"], outline(), [citation()]
         )
         current = await client.get(f"/api/writing-tasks/{task['task_id']}")
         assert current.status_code == 200
@@ -43,16 +61,54 @@ async def test_writing_api_requires_explicit_confirmation_and_rejects_stale_vers
 
         stale = await client.post(
             f"/api/writing-tasks/{task['task_id']}/confirm-outline",
-            json={"version": published.version - 1, "outline": {"sections": ["错误"]}},
+            json={"version": published.version - 1, "outline": outline()},
         )
         assert stale.status_code == 409
 
         confirmed = await client.post(
             f"/api/writing-tasks/{task['task_id']}/confirm-outline",
-            json={"version": published.version, "outline": {"sections": ["确认"]}},
+            json={"version": published.version, "outline": outline()},
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["status"] == "drafting"
+
+
+@pytest.mark.asyncio
+async def test_confirm_outline_api_rejects_control_fields_and_invalid_citations(
+    monkeypatch, tmp_path: Path
+):
+    session_repo = SessionRepository(tmp_path / "agent.db")
+    await session_repo.init()
+    writing_repo = WritingRepository(tmp_path / "agent.db")
+    await writing_repo.init()
+    service = WritingService(writing_repo)
+    monkeypatch.setattr(main, "repo", session_repo)
+    monkeypatch.setattr(main, "writing_repository", writing_repo)
+    monkeypatch.setattr(main, "writing_service", service)
+    monkeypatch.setattr(main.app.state, "writing_service", service)
+    session_id = await session_repo.create_session()
+    task = await service.create_task(session_id, "Redis")
+    task = await service.publish_outline(task.task_id, outline(), [citation()])
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        control_field = await client.post(
+            f"/api/writing-tasks/{task.task_id}/confirm-outline",
+            json={"version": task.version, "outline": outline(), "saved_path": "/tmp/escape.md"},
+        )
+        invalid_citation_outline = outline()
+        invalid_citation_outline["sections"][0]["citation_ids"] = ["unknown"]
+        invalid_citation = await client.post(
+            f"/api/writing-tasks/{task.task_id}/confirm-outline",
+            json={"version": task.version, "outline": invalid_citation_outline},
+        )
+
+    assert control_field.status_code == 422
+    assert invalid_citation.status_code == 502
+    assert invalid_citation.json()["detail"] == {"code": "invalid_citation"}
+    current = await service.get_task(task.task_id)
+    assert current.status == "awaiting_outline_confirmation"
+    assert current.version == task.version
 
 
 @pytest.mark.asyncio
@@ -71,9 +127,9 @@ async def test_writing_save_api_only_accepts_version_and_idempotency_key(
     monkeypatch.setattr(main.app.state, "writing_service", service)
 
     task = await service.create_task(session_id, "Redis")
-    task = await service.publish_outline(task.task_id, {"sections": ["过期"]}, [])
+    task = await service.publish_outline(task.task_id, outline(), [citation()])
     task = await service.confirm_outline(
-        task.task_id, expected_version=task.version, outline={"sections": ["过期"]}
+        task.task_id, expected_version=task.version, outline=outline()
     )
     task = await service.publish_draft(
         task.task_id,

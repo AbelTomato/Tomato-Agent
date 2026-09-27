@@ -20,6 +20,8 @@ class CreateWritingTaskRequest(BaseModel):
 
 
 class ConfirmOutlineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     version: int = Field(ge=1)
     outline: dict = Field(default_factory=dict)
 
@@ -39,6 +41,12 @@ class ResearchRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class DraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    version: int = Field(ge=1)
+
+
 def _service(request: Request) -> WritingService:
     return request.app.state.writing_service
 
@@ -48,7 +56,13 @@ def _execution_repository(request: Request) -> WritingExecutionRepository:
 
 
 def _execution_error_status(code: str) -> int:
-    if code in {"evidence_insufficient", "context_budget_exceeded"}:
+    if code in {
+        "evidence_insufficient",
+        "context_budget_exceeded",
+        "outline_invalid",
+        "draft_invalid",
+        "citation_invalid",
+    }:
         return 422
     if code in {"provider_failed", "invalid_model_response", "invalid_citation", "retrieval_failed"}:
         return 502
@@ -103,6 +117,11 @@ async def confirm_outline(task_id: str, request: ConfirmOutlineRequest, http_req
         raise HTTPException(404, str(exc)) from exc
     except WritingConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except WritingExecutionError as exc:
+        raise HTTPException(
+            _execution_error_status(exc.code),
+            {"code": exc.code},
+        ) from None
     return task.model_dump(mode="json")
 
 
@@ -172,7 +191,44 @@ async def get_research_attempt(task_id: str, http_request: Request):
         raise HTTPException(400, "Invalid task_id") from exc
     try:
         await _service(http_request).get_task(task_ident)
-        attempt = await _execution_repository(http_request).get_latest_attempt(task_ident)
+        attempt = await _execution_repository(http_request).get_latest_attempt(
+            task_ident, kind="research"
+        )
+    except WritingNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return attempt.model_dump(mode="json") if attempt is not None else None
+
+
+@router.post("/api/writing-tasks/{task_id}/draft")
+async def draft_writing_task(task_id: str, request: DraftRequest, http_request: Request):
+    try:
+        task_ident = UUID(task_id)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid task_id") from exc
+    try:
+        task = await http_request.app.state.writing_executor.execute_draft(
+            task_ident, expected_version=request.version
+        )
+    except WritingNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except WritingConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except WritingExecutionError as exc:
+        raise HTTPException(_execution_error_status(exc.code), {"code": exc.code}) from exc
+    return task.model_dump(mode="json")
+
+
+@router.get("/api/writing-tasks/{task_id}/draft-attempt")
+async def get_draft_attempt(task_id: str, http_request: Request):
+    try:
+        task_ident = UUID(task_id)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid task_id") from exc
+    try:
+        await _service(http_request).get_task(task_ident)
+        attempt = await _execution_repository(http_request).get_latest_attempt(
+            task_ident, kind="draft"
+        )
     except WritingNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     return attempt.model_dump(mode="json") if attempt is not None else None

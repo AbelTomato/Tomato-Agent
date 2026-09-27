@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     runtime_tool_timeout_seconds: float = 20.0
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-5.6-terra"
+    llm_model: str = "gpt-5.6-luna"
     llm_timeout_seconds: float = 60.0
     embedding_api_key: str = ""
     embedding_base_url: str = "https://api.openai.com/v1"
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     knowledge_rerank_timeout_seconds: float = Field(default=10.0, gt=0)
     knowledge_rerank_candidate_limit: int = Field(default=30, gt=0)
     draft_directory: Path = Path("data/drafts")
-    writing_retrieval_mode: Literal["keyword", "vector", "hybrid"] = "keyword"
+    writing_retrieval_mode: Literal["keyword", "vector", "hybrid"] = "hybrid"
     writing_max_evidence: int = Field(default=5, ge=1, le=10)
     writing_max_context_tokens: int = Field(default=8000, gt=0)
     writing_max_response_chars: int = Field(default=20000, gt=0)

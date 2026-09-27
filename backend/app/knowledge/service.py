@@ -23,6 +23,7 @@ from app.knowledge.pipeline_models import PipelineResult
 from app.knowledge.query_planning import QueryPlanner
 from app.knowledge.reranking import Reranker
 from app.knowledge.reranking import RerankerError
+from app.knowledge.retrieval import IndexRebuildRequired
 from app.observability.recording_llm_client import (
     RecordingLLMClient,
     llm_prompt_scope,
@@ -225,6 +226,7 @@ class CitationSnapshot(BaseModel):
 class KnowledgeAnswer(BaseModel):
     answer: str
     retrieval_mode: RetrievalMode
+    retrieval_fallback_reason: str | None = None
     evidence_status: EvidenceStatus
     citations: list[CitationSnapshot] = Field(default_factory=list)
 
@@ -420,6 +422,7 @@ class GeneratedKnowledgeAnswer(KnowledgeAnswer):
         output: str,
         *,
         retrieval_mode: RetrievalMode | str,
+        retrieval_fallback_reason: str | None = None,
         retrieved_citations: list[CitationSnapshot],
         citation_labels: dict[str, CitationSnapshot] | None = None,
     ) -> "GeneratedKnowledgeAnswer":
@@ -458,6 +461,7 @@ class GeneratedKnowledgeAnswer(KnowledgeAnswer):
         return cls(
             answer=answer,
             retrieval_mode=retrieval_mode,
+            retrieval_fallback_reason=retrieval_fallback_reason,
             evidence_status=evidence_status,
             citations=[citations_by_id[citation_id] for citation_id in citation_ids],
         )
@@ -561,72 +565,109 @@ class KnowledgeService:
         if limit <= 0:
             raise ValueError("limit must be greater than zero")
 
+        fallback_reason: str | None = None
         if self.pipeline is not None:
-            pipeline_result = await self.pipeline.run(
-                query,
-                mode=mode,
-                candidate_limit=self.candidate_limit,
-                final_limit=limit,
-            )
-            citations = [
-                CitationSnapshot.from_search_result(item.result)
-                for item in pipeline_result.selection.selected
-            ]
-            return KnowledgeAnswer(
-                answer="",
-                retrieval_mode=mode,
-                evidence_status=pipeline_result.decision.status,
-                citations=citations,
-            )
+            try:
+                pipeline_result = await self.pipeline.run(
+                    query,
+                    mode=mode,
+                    candidate_limit=self.candidate_limit,
+                    final_limit=limit,
+                )
+                citations = [
+                    CitationSnapshot.from_search_result(item.result)
+                    for item in pipeline_result.selection.selected
+                ]
+                return KnowledgeAnswer(
+                    answer="",
+                    retrieval_mode=mode,
+                    evidence_status=pipeline_result.decision.status,
+                    citations=citations,
+                )
+            except (IndexRebuildRequired, ValueError) as error:
+                if mode != "hybrid" or not self._is_hybrid_fallback_error(error):
+                    raise
+                fallback_reason = self._hybrid_fallback_reason(error)
 
-        if mode == "keyword":
+        if mode == "keyword" or fallback_reason is not None:
             results = await self.repository.search_chunks(query, limit=limit)
+            actual_mode = "keyword"
         else:
             if self.query_embedder is None:
-                raise ValueError("query_embedder is required for vector retrieval")
-            if not self.embedding_model or self.embedding_dimensions <= 0:
-                raise ValueError("embedding model and dimensions are required for vector retrieval")
-            vectors = await self.query_embedder([query])
-            if len(vectors) != 1:
-                raise ValueError("query_embedder must return exactly one vector")
-            query_vector = vectors[0]
-            if not isinstance(query_vector, list) or not query_vector:
-                raise ValueError("query embedding must be a non-empty vector")
-            if len(query_vector) != self.embedding_dimensions:
-                raise ValueError("query embedding dimensions do not match configuration")
-            if any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-                for value in query_vector
-            ):
-                raise ValueError("query embedding must contain finite numeric values")
-            query_vector = [float(value) for value in query_vector]
-            if mode == "vector":
-                results = await self.repository.search_vector_chunks(
-                    query_vector,
-                    model=self.embedding_model,
-                    dimensions=self.embedding_dimensions,
-                    limit=limit,
-                    min_score=self.min_vector_similarity,
-                )
+                if mode != "hybrid":
+                    raise ValueError("query_embedder is required for vector retrieval")
+                fallback_reason = "embedding_client_unconfigured"
+                results = await self.repository.search_chunks(query, limit=limit)
+                actual_mode = "keyword"
+            elif not self.embedding_model or self.embedding_dimensions <= 0:
+                if mode != "hybrid":
+                    raise ValueError("embedding model and dimensions are required for vector retrieval")
+                fallback_reason = "embedding_config_invalid"
+                results = await self.repository.search_chunks(query, limit=limit)
+                actual_mode = "keyword"
             else:
-                results = await self.repository.search_hybrid_chunks(
-                    query,
-                    query_vector,
-                    model=self.embedding_model,
-                    dimensions=self.embedding_dimensions,
-                    limit=limit,
-                    min_vector_score=self.min_vector_similarity,
-                )
+                vectors = await self.query_embedder([query])
+                if len(vectors) != 1:
+                    raise ValueError("query_embedder must return exactly one vector")
+                query_vector = vectors[0]
+                if not isinstance(query_vector, list) or not query_vector:
+                    raise ValueError("query embedding must be a non-empty vector")
+                if len(query_vector) != self.embedding_dimensions:
+                    raise ValueError("query embedding dimensions do not match configuration")
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    for value in query_vector
+                ):
+                    raise ValueError("query embedding must contain finite numeric values")
+                query_vector = [float(value) for value in query_vector]
+                try:
+                    if mode == "vector":
+                        results = await self.repository.search_vector_chunks(
+                            query_vector,
+                            model=self.embedding_model,
+                            dimensions=self.embedding_dimensions,
+                            limit=limit,
+                            min_score=self.min_vector_similarity,
+                        )
+                    else:
+                        results = await self.repository.search_hybrid_chunks(
+                            query,
+                            query_vector,
+                            model=self.embedding_model,
+                            dimensions=self.embedding_dimensions,
+                            limit=limit,
+                            min_vector_score=self.min_vector_similarity,
+                        )
+                except (IndexRebuildRequired, ValueError) as error:
+                    if mode != "hybrid" or not self._is_hybrid_fallback_error(error):
+                        raise
+                    fallback_reason = self._hybrid_fallback_reason(error)
+                    results = await self.repository.search_chunks(query, limit=limit)
+                actual_mode = "keyword" if fallback_reason is not None else mode
 
         citations = [CitationSnapshot.from_search_result(result) for result in results]
         return KnowledgeAnswer(
             answer="",
-            retrieval_mode=mode,
+            retrieval_mode=actual_mode,
+            retrieval_fallback_reason=fallback_reason,
             evidence_status="supported" if citations else "no_results",
             citations=citations,
         )
+
+    @staticmethod
+    def _is_hybrid_fallback_error(error: Exception) -> bool:
+        return isinstance(error, IndexRebuildRequired) or str(error) in {
+            "query_embedder is required for candidate vector retrieval",
+            "embedding model and dimensions are required for candidate vector retrieval",
+        }
+
+    @staticmethod
+    def _hybrid_fallback_reason(error: Exception) -> str:
+        if isinstance(error, IndexRebuildRequired):
+            return "vector_index_incompatible"
+        return "embedding_config_invalid"
 
     async def rewrite_query(
         self,
@@ -760,7 +801,8 @@ class KnowledgeService:
         try:
             answer = GeneratedKnowledgeAnswer.from_model_output(
                 response.content,
-                retrieval_mode=mode,
+                retrieval_mode=retrieved.retrieval_mode,
+                retrieval_fallback_reason=retrieved.retrieval_fallback_reason,
                 retrieved_citations=retrieved.citations,
                 citation_labels=citation_labels,
             )

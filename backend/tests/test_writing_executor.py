@@ -24,13 +24,16 @@ def citation():
 
 
 class FakeResearcher:
-    def __init__(self, *, status="supported", event=None):
+    def __init__(self, *, status="supported", event=None, entered=None):
         self.calls = 0
         self.event = event
+        self.entered = entered
         self.status = status
 
     async def collect(self, topic, *, config):
         self.calls += 1
+        if self.entered:
+            self.entered.set()
         if self.event:
             await self.event.wait()
         return ResearchBundle(
@@ -100,6 +103,8 @@ async def test_success_stops_at_outline_confirmation(components):
     assert result.research_run_id is not None
     attempt = await executions.get_latest_attempt(task.task_id)
     assert attempt.status == "completed" and attempt.run_id == result.research_run_id
+    assert attempt.config.retrieval_mode == "hybrid"
+    assert attempt.config.actual_retrieval_mode == "keyword"
     run = await sessions.get_run(attempt.run_id, task.session_id)
     assert run.status == "completed"
     assert await sessions.list_events(attempt.run_id) == []
@@ -231,13 +236,63 @@ async def test_timeout_is_recorded(components):
 async def test_cancelled_execution_is_recorded_and_propagated(components):
     _, _, service, executions, task = components
     gate = asyncio.Event()
-    executor, _, _ = make_executor(service, executions, researcher=FakeResearcher(event=gate))
+    researcher_entered = asyncio.Event()
+    researcher = FakeResearcher(event=gate, entered=researcher_entered)
+    executor, _, _ = make_executor(service, executions, researcher=researcher)
     pending = asyncio.create_task(executor.execute_research(task.task_id, expected_version=task.version))
+    await researcher_entered.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    attempt = await executions.get_attempt(task.task_id, task.version)
+    assert attempt.status == "failed" and attempt.error_code == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_second_cancel_does_not_interrupt_cancel_cleanup(components, monkeypatch):
+    _, _, service, executions, task = components
+    research_release = asyncio.Event()
+    generation_gate = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    original_fail_attempt = executions.fail_attempt
+
+    async def delayed_fail_attempt(attempt_id, *, error_code):
+        cleanup_entered.set()
+        await cleanup_release.wait()
+        return await original_fail_attempt(attempt_id, error_code=error_code)
+
+    monkeypatch.setattr(executions, "fail_attempt", delayed_fail_attempt)
+    executor, _, _ = make_executor(
+        service,
+        executions,
+        researcher=FakeResearcher(event=research_release),
+        llm=FakeLLM(event=generation_gate),
+    )
+    pending = asyncio.create_task(
+        executor.execute_research(task.task_id, expected_version=task.version)
+    )
     for _ in range(100):
-        if await executions.get_attempt(task.task_id, task.version):
+        attempt = await executions.get_attempt(task.task_id, task.version)
+        if attempt is not None and attempt.phase == "retrieval":
             break
         await asyncio.sleep(0)
+    else:
+        raise AssertionError("research execution did not reach retrieval phase")
+    research_release.set()
+    for _ in range(100):
+        attempt = await executions.get_attempt(task.task_id, task.version)
+        if attempt is not None and attempt.phase == "generation":
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("research execution did not reach generation phase")
+
     pending.cancel()
+    await cleanup_entered.wait()
+    pending.cancel()
+    cleanup_release.set()
+
     with pytest.raises(asyncio.CancelledError):
         await pending
     attempt = await executions.get_attempt(task.task_id, task.version)

@@ -106,7 +106,7 @@ async def test_research_maps_stable_execution_errors(monkeypatch, tmp_path):
 
 
 def test_writing_execution_settings_are_validated():
-    assert main.Settings().writing_retrieval_mode == "keyword"
+    assert main.Settings().writing_retrieval_mode == "hybrid"
     assert main.Settings().writing_max_evidence == 5
     with pytest.raises(ValueError):
         main.Settings(writing_max_evidence=0)

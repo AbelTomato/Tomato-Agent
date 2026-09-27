@@ -85,6 +85,22 @@ corepack enable
 corepack prepare pnpm@latest --activate
 ```
 
+## 技术写作任务执行器
+
+技术写作采用用户显式推进的状态机：创建任务 → 开始研究 → 确认提纲 → 生成草稿 → 使用幂等键保存。服务端固定任务版本并保存完整证据快照，未知引用、额外控制字段、无证据和非法模型输出会被拒绝；未确认提纲不会生成草稿或保存文件。研究默认使用 `hybrid`，仅在已知 Embedding/索引不可用时记录原因并回退 `keyword`，Provider 网络或认证错误不会静默回退。
+
+该入口是带超时的同步显式调用，不是持久化队列或后台 Worker。页面刷新不会自动重放生成；运行中 attempt 不自动接管，硬崩溃恢复、分布式执行、自动重试和公开多租户鉴权不在当前范围内。RAG 快照和实验报告分别写入 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases/` 与 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/reports/`。
+
+完整写作测试集：
+
+```bash
+cd /home/abeltomato/workspace/projects/Tomato-Agent/backend
+files=$(find tests -maxdepth 1 -type f -name 'test_writing*.py' -print | sort)
+.venv/bin/python -m pytest $files -q
+```
+
+机器测试通过不代表真实模型主题覆盖或人工内容质量通过；真实模型报告和限制见 [`docs/技术写作Agent说明.md`](docs/技术写作Agent说明.md)。
+
 ## 知识库评测
 
 知识库导入和评测使用固定的 JSON 清单与 JSONL 问题集。评测命令要求显式提供已导入的 SQLite 知识库：

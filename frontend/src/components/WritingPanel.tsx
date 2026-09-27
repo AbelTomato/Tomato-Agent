@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ApiError,
   confirmWritingOutline,
   createWritingTask,
+  generateWritingDraft,
+  loadDraftAttempt,
   loadWritingTask,
   researchWritingTask,
   retryWritingTask,
@@ -17,6 +19,7 @@ type WritingPanelProps = {
 };
 
 const TASK_STORAGE_KEY = 'tomato-agent-writing-task-id';
+const SAVE_KEY_PREFIX = 'tomato-agent-writing-save-key:';
 
 const statusLabels: Record<WritingStatus, string> = {
   researching: '正在研究',
@@ -36,18 +39,25 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
   const [task, setTask] = useState<WritingTask | null>(null);
   const [outlineText, setOutlineText] = useState('');
   const [error, setError] = useState('');
+  const [attemptError, setAttemptError] = useState('');
   const [busy, setBusy] = useState(false);
-  const researchRequests = useRef(new Set<string>());
 
-  async function startResearch(currentTask: WritingTask): Promise<WritingTask> {
-    const requestKey = `${currentTask.task_id}:${currentTask.version}`;
-    if (researchRequests.current.has(requestKey)) return currentTask;
-    researchRequests.current.add(requestKey);
-    try {
-      return await researchWritingTask(currentTask.task_id, currentTask.version);
-    } finally {
-      researchRequests.current.delete(requestKey);
-    }
+  function saveKey(taskId: string): string {
+    const storageKey = `${SAVE_KEY_PREFIX}${taskId}`;
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const created = `frontend-save-${taskId}`;
+    window.localStorage.setItem(storageKey, created);
+    return created;
+  }
+
+  async function refreshTask(taskId: string): Promise<void> {
+    const loaded = await loadWritingTask(taskId);
+    setTask(loaded);
+    setTopic(loaded.topic);
+    setOutlineText(formatOutline(loaded.outline));
+    const attempt = await loadDraftAttempt(taskId);
+    setAttemptError(attempt?.error_code ?? '');
   }
 
   useEffect(() => {
@@ -60,22 +70,15 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     const taskId = window.localStorage.getItem(TASK_STORAGE_KEY);
     if (!taskId) return;
     let cancelled = false;
-    void loadWritingTask(taskId).then(async (loaded) => {
+    void loadWritingTask(taskId).then((loaded) => {
       if (cancelled) return;
       if (loaded.session_id !== sessionId) {
         window.localStorage.removeItem(TASK_STORAGE_KEY);
         return;
       }
-      setTask(loaded);
-      setTopic(loaded.topic);
-      setOutlineText(formatOutline(loaded.outline));
-      if (loaded.status === 'researching') {
-        const researched = await startResearch(loaded);
-        if (!cancelled) {
-          setTask(researched);
-          setOutlineText(formatOutline(researched.outline));
-        }
-      }
+      void refreshTask(taskId).catch((reason: unknown) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '无法恢复写作任务。');
+      });
     }).catch((reason: unknown) => {
       if (cancelled) return;
       if (reason instanceof ApiError && reason.status === 404) {
@@ -87,19 +90,6 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     return () => { cancelled = true; };
   }, [sessionId]);
 
-  useEffect(() => {
-    if (!task || !['researching', 'drafting'].includes(task.status)) return;
-    const timer = window.setInterval(() => {
-      void loadWritingTask(task.task_id).then((loaded) => {
-        setTask(loaded);
-        setOutlineText(formatOutline(loaded.outline));
-      }).catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : '无法刷新写作任务。');
-      });
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [task]);
-
   async function startTask() {
     if (!topic.trim() || busy) return;
     setBusy(true);
@@ -108,11 +98,25 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
       const id = await onRequireSession();
       const created = await createWritingTask(id, topic.trim());
       window.localStorage.setItem(TASK_STORAGE_KEY, created.task_id);
-      const researched = await startResearch(created);
+      setTask(created);
+      setOutlineText(formatOutline(created.outline));
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : '无法创建写作任务。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startResearch() {
+    if (!task || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const researched = await researchWritingTask(task.task_id, task.version);
       setTask(researched);
       setOutlineText(formatOutline(researched.outline));
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : '无法创建写作任务。');
+      setError(reason instanceof ApiError && reason.code ? `研究失败：${reason.code}` : reason instanceof Error ? reason.message : '研究失败。');
     } finally {
       setBusy(false);
     }
@@ -145,10 +149,48 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     setBusy(true);
     setError('');
     try {
-      const saved = await saveWritingTask(task.task_id, task.version, `frontend-save-${task.version}`);
+      const saved = await saveWritingTask(task.task_id, task.version, saveKey(task.task_id));
       setTask(saved);
+      setAttemptError('');
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : '草稿保存失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateDraft() {
+    if (!task || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const drafted = await generateWritingDraft(task.task_id, task.version);
+      setTask(drafted);
+      setAttemptError('');
+    } catch (reason: unknown) {
+      setError(reason instanceof ApiError && reason.code ? `草稿生成失败：${reason.code}` : reason instanceof Error ? reason.message : '草稿生成失败。');
+      try {
+        const attempt = await loadDraftAttempt(task.task_id);
+        if (attempt?.error_code) setError(`草稿生成失败：${attempt.error_code}`);
+      } catch {
+        // 保留原始错误，attempt 查询仅用于补充失败原因。
+      }
+      const refreshed = await loadWritingTask(task.task_id).catch(() => null);
+      if (refreshed) setTask(refreshed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retrySave() {
+    if (!task || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const saved = await saveWritingTask(task.task_id, task.version, saveKey(task.task_id));
+      setTask(saved);
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : '保存重试失败。');
     } finally {
       setBusy(false);
     }
@@ -160,9 +202,8 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     setError('');
     try {
       const reset = await retryWritingTask(task.task_id, task.version);
-      const researched = await startResearch(reset);
-      setTask(researched);
-      setOutlineText(formatOutline(researched.outline));
+      setTask(reset);
+      setOutlineText(formatOutline(reset.outline));
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : '重试失败。');
     } finally {
@@ -176,6 +217,7 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
     setTopic('');
     setOutlineText('');
     setError('');
+    setAttemptError('');
   }
 
   return (
@@ -192,17 +234,35 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
       ) : (
         <div className="writing-task">
           <p className="task-topic">主题：{task.topic} · 版本 {task.version}</p>
+          {task.status === 'researching' && <>
+            <p className="notice">任务已创建，研究只会在你明确点击后开始。</p>
+            <button type="button" onClick={() => void startResearch()} disabled={busy}>{busy ? '研究中…' : '开始研究'}</button>
+          </>}
           {task.status === 'awaiting_outline_confirmation' && <>
+            <p className="notice">研究完成，请检查证据和提纲后再继续。</p>
+            <p className="evidence-summary">证据状态：{task.citations.length > 0 ? `已有 ${task.citations.length} 条引用` : '材料不足，无法生成有依据的草稿'}</p>
+            {task.citations.length > 0 && <ol className="writing-citations">{task.citations.map((citation) => <li key={citation.citation_id}>{citation.title}：{citation.heading_path || '未标注章节'}（第 {citation.start_line}–{citation.end_line} 行）</li>)}</ol>}
             <label>提纲 JSON<textarea value={outlineText} onChange={(event) => setOutlineText(event.target.value)} rows={9} disabled={busy} /></label>
-            <button type="button" onClick={() => void confirmOutline()} disabled={busy}>{busy ? '确认中…' : '确认提纲并继续'}</button>
+            <button type="button" onClick={() => void confirmOutline()} disabled={busy}>{busy ? '确认中…' : '确认提纲并生成草稿'}</button>
+          </>}
+          {task.status === 'drafting' && <>
+            <p className="notice">提纲已确认。点击按钮后才会调用草稿生成。</p>
+            <button type="button" onClick={() => void generateDraft()} disabled={busy}>{busy ? '生成中…' : '生成草稿'}</button>
           </>}
           {task.status === 'awaiting_save_confirmation' && <>
             <label>草稿<textarea value={task.draft ?? ''} readOnly rows={14} /></label>
+            <p className="evidence-summary">引用归属：{task.citations.length} 条服务端证据</p>
             <button type="button" onClick={() => void saveDraft()} disabled={busy}>{busy ? '保存中…' : '确认保存草稿'}</button>
           </>}
-          {['researching', 'drafting'].includes(task.status) && <p className="notice">后端正在处理任务，页面会自动刷新状态。</p>}
           {task.status === 'saved' && <p className="notice success">草稿已保存：{task.saved_path}</p>}
-          {task.status === 'failed' && <><p className="notice error">任务在“{task.failed_stage ?? '未知阶段'}”失败。</p><button type="button" onClick={() => void retry()} disabled={busy}>{busy ? '重试中…' : '重试任务'}</button></>}
+          {task.status === 'failed' && <>
+            <p className="notice error">任务在“{task.failed_stage ?? '未知阶段'}”失败{attemptError ? `：${attemptError}` : '。'}</p>
+            {task.failed_stage === 'saving' ? (
+              <button type="button" onClick={() => void retrySave()} disabled={busy}>{busy ? '保存重试中…' : '重试保存'}</button>
+            ) : (
+              <button type="button" onClick={() => void retry()} disabled={busy}>{busy ? '重试中…' : '重试生成'}</button>
+            )}
+          </>}
           {error && <p className="notice error">{error}</p>}
           <button className="secondary-button" type="button" onClick={clearTask} disabled={busy}>结束当前写作任务</button>
         </div>
