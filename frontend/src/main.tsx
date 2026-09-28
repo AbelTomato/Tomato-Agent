@@ -96,16 +96,20 @@ function App() {
   async function send() {
     const text = input.trim();
     if (!text || status === 'sending' || status === 'loading-history') return;
-    setInput(''); setError(''); setMessages((current) => [...current, { role: 'user', content: text }]); setStatus('sending');
+    setError(''); setMessages((current) => [...current, { role: 'user', content: text }]); setStatus('sending');
     try {
       const id = await ensureSession();
       if (mode === 'knowledge') {
         const result = await sendKnowledgeMessage(id, text, retrievalMode);
-        setMessages((current) => [...current, { role: 'assistant', content: result.answer || (result.evidence_status === 'no_results' ? '未找到足够的相关材料。' : '无响应'), citations: result.citations, evidence_status: result.evidence_status, retrieval_mode: result.retrieval_mode }]);
+        const answer = result.answer.trim();
+        setMessages((current) => [...current, { role: 'assistant', content: answer || (result.evidence_status === 'no_results' ? '未找到足够的相关材料。' : '无响应'), citations: result.citations, evidence_status: result.evidence_status, retrieval_mode: result.retrieval_mode }]);
+        if (answer) setInput('');
         setStatus(result.evidence_status === 'no_results' ? 'no-results' : 'success');
       } else {
         const result = await sendBasicMessage(id, text);
-        setMessages((current) => [...current, { role: 'assistant', content: result.answer ?? result.message ?? '无响应' }]);
+        const answer = result.answer?.trim() || result.message?.trim() || '';
+        setMessages((current) => [...current, { role: 'assistant', content: answer || '无响应' }]);
+        if (answer) setInput('');
         setStatus('success');
       }
     } catch (reason: unknown) {
