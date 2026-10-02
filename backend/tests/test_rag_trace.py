@@ -11,11 +11,13 @@ from app.observability.rag_trace import (
     HumanAnswerReview,
     LLMCallRecord,
     PromptIdentity,
+    ProviderCallStats,
     ReviewStatus,
     TraceEvent,
     TraceRunManifest,
     canonical_json_bytes,
     canonical_json_sha256,
+    summarize_provider_calls,
 )
 
 
@@ -239,6 +241,25 @@ def test_canonical_json_is_utf8_sorted_compact_and_hash_stable():
     assert canonical_json_bytes(first) == canonical_json_bytes(second)
     assert canonical_json_sha256(first) == canonical_json_sha256(second)
     assert len(canonical_json_sha256(make_event())) == 64
+
+
+def test_provider_call_stats_track_attempted_terminal_and_skipped_calls():
+    events = [
+        {"event_type": "embedding.request", "status": "success", "payload": {}},
+        {"event_type": "embedding.response", "status": "failed", "payload": {}},
+        {"event_type": "reranker.request", "status": "success", "payload": {}},
+        {"event_type": "reranker.response", "status": "success", "payload": {}},
+        {"event_type": "llm.request", "status": "success", "payload": {"purpose": "query_planner"}},
+        {"event_type": "llm.response", "status": "success", "payload": {"purpose": "query_planner"}},
+        {"event_type": "llm.skipped", "status": "skipped", "payload": {"purpose": "answerer"}},
+    ]
+
+    stats = summarize_provider_calls(events)
+
+    assert stats["embedding"] == ProviderCallStats(attempted=1, succeeded=0, failed=1, skipped=0)
+    assert stats["reranker"] == ProviderCallStats(attempted=1, succeeded=1, failed=0, skipped=0)
+    assert stats["query_planner"] == ProviderCallStats(attempted=1, succeeded=1, failed=0, skipped=0)
+    assert stats["answerer"] == ProviderCallStats(attempted=0, succeeded=0, failed=0, skipped=1)
 
 
 @pytest.mark.parametrize("value", [{"value": float("nan")}, {"value": float("inf")}, {"value": object()}])

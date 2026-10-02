@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from app.knowledge.evaluation import (
+    PRODUCTION_EQUIVALENT_PROFILE,
     EvaluationQuestion,
     apply_ablation_config,
+    apply_production_equivalent_profile,
     build_parser,
     evaluate_retrieval,
     evaluate_question_results,
@@ -21,6 +23,8 @@ from app.knowledge.evaluation import (
     validate_report_output_path,
     validate_min_vector_similarity,
 )
+from app.knowledge.pipeline_factory import runtime_config_for_evaluation_profile
+from app.settings import Settings
 from app.knowledge.ingestion import ingest_manifest
 from app.knowledge.models import SearchResult
 from app.knowledge.pipeline_models import CandidateEvidence
@@ -666,6 +670,58 @@ def test_evaluation_cli_applies_pipeline_limits_and_coverage_settings():
     assert args.rerank == "noop"
     assert args.evidence_selection == "coverage-aware"
     assert args.answerability == "coverage-v1"
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        Settings(),
+        Settings(
+            embedding_api_key="fake-embedding-key",
+            embedding_model="fake-embedding",
+            embedding_dimensions=3,
+        ),
+    ],
+    ids=["missing-embedding", "missing-reranker"],
+)
+def test_production_equivalent_runtime_config_rejects_missing_provider_settings_before_requests(settings):
+    args = build_parser().parse_args(
+        [
+            "--dataset",
+            "questions.jsonl",
+            "--split",
+            "dev",
+            "--mode",
+            "hybrid",
+            "--output",
+            "report.json",
+            "--profile",
+            PRODUCTION_EQUIVALENT_PROFILE,
+            "--embedding-model",
+            "fake-embedding",
+            "--embedding-dimensions",
+            "3",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="embedding|rerank"):
+        apply_production_equivalent_profile(
+            args,
+            {
+                "name": PRODUCTION_EQUIVALENT_PROFILE,
+                "split": "dev",
+                "mode": "hybrid",
+                "candidate_limit": 30,
+                "candidate_min_vector_similarity": 0.2,
+                "final_limit": 5,
+                "query_planning": "conditional",
+                "rerank": "provider",
+                "evidence_selection": "coverage-aware",
+                "answerability": "coverage-v1",
+                "allow_insufficient_llm": False,
+            },
+        )
+        runtime_config_for_evaluation_profile(args, settings=settings)
 
 
 def test_evaluation_cli_writes_reproducible_keyword_report(tmp_path: Path):

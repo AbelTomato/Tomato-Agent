@@ -1,0 +1,38 @@
+[
+  {
+    "name": "baseline",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 5,
+    "candidate_min_vector_similarity": 0.5,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "baseline",
+    "answerability": "baseline"
+  },
+  {
+    "name": "wide-candidate",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "baseline",
+    "answerability": "baseline"
+  },
+  {
+    "name": "coverage-aware",
+    "split": "dev",
+    "mode": "hybrid",
+    "candidate_limit": 30,
+    "candidate_min_vector_similarity": 0.2,
+    "final_limit": 5,
+    "query_planning": "disabled",
+    "rerank": "noop",
+    "evidence_selection": "coverage-aware",
+    "answerability": "coverage-v1"
+  }
+]

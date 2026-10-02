@@ -126,6 +126,8 @@ class RecordingLLMClient:
         run_id: UUID | None = None,
         model_id: str | None = None,
         max_calls: int | None = None,
+        max_query_planner_calls: int | None = None,
+        max_answerer_calls: int | None = None,
     ) -> None:
         if observer is not None:
             if not isinstance(run_id, UUID):
@@ -136,18 +138,49 @@ class RecordingLLMClient:
         self.observer = observer
         self.run_id = run_id
         self.model_id = model_id
-        if max_calls is not None and max_calls <= 0:
-            raise ValueError("max_calls must be greater than zero")
+        for name, value in (
+            ("max_calls", max_calls),
+            ("max_query_planner_calls", max_query_planner_calls),
+            ("max_answerer_calls", max_answerer_calls),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be greater than zero")
         self.max_calls = max_calls
+        self.max_query_planner_calls = max_query_planner_calls
+        self.max_answerer_calls = max_answerer_calls
         self._call_count = 0
+        self._purpose_call_counts: dict[LLMPurpose, int] = {
+            "query_planner": 0,
+            "answerer": 0,
+        }
         self._attempts: dict[tuple[str, LLMPurpose], int] = {}
         self._attempt_lock = Lock()
 
-    def _reserve_call(self) -> None:
+    def _purpose_limit(self, purpose: LLMPurpose) -> int | None:
+        if purpose == "query_planner":
+            return self.max_query_planner_calls
+        return self.max_answerer_calls
+
+    def _reserve_call(self, purpose: LLMPurpose) -> str | None:
+        """Atomically reserve aggregate and purpose-specific budget.
+
+        Returning a stable reason instead of raising here lets the caller emit a
+        skipped event without ever forwarding a call that exceeded one of the
+        limits. The counters are changed only when every applicable limit can
+        be reserved.
+        """
         with self._attempt_lock:
             if self.max_calls is not None and self._call_count >= self.max_calls:
-                raise LLMObservationError("LLM client call limit reached")
+                return "llm_call_limit"
+            purpose_limit = self._purpose_limit(purpose)
+            if (
+                purpose_limit is not None
+                and self._purpose_call_counts[purpose] >= purpose_limit
+            ):
+                return f"{purpose}_call_limit"
             self._call_count += 1
+            self._purpose_call_counts[purpose] += 1
+            return None
 
     def _next_attempt(self, question_id: str, purpose: LLMPurpose) -> int:
         key = (question_id, purpose)
@@ -196,10 +229,12 @@ class RecordingLLMClient:
             status="skipped",
             payload={
                 "question_id": question_id,
+                "run_id": str(self.run_id),
                 "purpose": purpose,
                 "model_id": self.model_id,
                 "prompt": prompt.model_dump(mode="json"),
                 "reason": reason,
+                "call_state": "skipped",
             },
             duration_ms=None,
         )
@@ -209,8 +244,14 @@ class RecordingLLMClient:
         messages: list[Message],
         tools: list[ToolDefinition],
     ) -> LLMResponse:
-        self._reserve_call()
         if self.observer is None:
+            # Preserve the original transparent mode. Without an observation
+            # scope there is no purpose to which a per-purpose budget could be
+            # attributed; the aggregate limit remains enforceable.
+            with self._attempt_lock:
+                if self.max_calls is not None and self._call_count >= self.max_calls:
+                    raise LLMObservationError("LLM client call limit reached")
+                self._call_count += 1
             return await self.client.complete(messages, tools)
 
         question_id = _question_id_var.get()
@@ -219,6 +260,28 @@ class RecordingLLMClient:
             raise LLMObservationError("LLM observation requires an active question scope")
         if scope is None:
             raise LLMObservationError("LLM observation requires an active prompt scope")
+
+        budget_reason = self._reserve_call(scope.purpose)
+        if budget_reason is not None:
+            try:
+                self.observer.emit(
+                    "llm.skipped",
+                    status="skipped",
+                    payload={
+                        "question_id": question_id,
+                        "run_id": str(self.run_id),
+                        "purpose": scope.purpose,
+                        "model_id": self.model_id,
+                        "prompt": scope.prompt.model_dump(mode="json"),
+                        "reason": "budget_exceeded",
+                        "budget": budget_reason,
+                        "call_state": "skipped",
+                    },
+                    duration_ms=None,
+                )
+            except Exception as exc:
+                raise LLMObservationError("unable to record LLM skipped event") from exc
+            raise LLMObservationError(f"{scope.purpose} call limit reached")
 
         # Freeze the precise interface values before downstream code can mutate them.
         message_snapshot = deepcopy([_json_model(message) for message in messages])
@@ -231,6 +294,7 @@ class RecordingLLMClient:
         request_payload = {
             "call_id": call_id,
             "question_id": question_id,
+            "run_id": str(self.run_id),
             "purpose": scope.purpose,
             "attempt": attempt,
             "model_id": self.model_id,
@@ -239,6 +303,7 @@ class RecordingLLMClient:
             "tools": tools_snapshot,
             "messages_sha256": messages_sha256,
             "tools_sha256": tools_sha256,
+            "call_state": "attempted",
             **deepcopy(scope.metadata),
         }
         try:
@@ -272,12 +337,14 @@ class RecordingLLMClient:
                     payload={
                         "call_id": call_id,
                         "question_id": question_id,
+                        "run_id": str(self.run_id),
                         "purpose": scope.purpose,
                         "attempt": attempt,
                         "model_id": self.model_id,
                         "messages_sha256": messages_sha256,
                         "tools_sha256": tools_sha256,
                         "status": "failed",
+                        "call_state": "failed",
                         "error_code": _error_code(exc),
                     },
                     duration_ms=duration_ms,
@@ -307,12 +374,14 @@ class RecordingLLMClient:
                     payload={
                         "call_id": call_id,
                         "question_id": question_id,
+                        "run_id": str(self.run_id),
                         "purpose": scope.purpose,
                         "attempt": attempt,
                         "model_id": self.model_id,
                         "messages_sha256": messages_sha256,
                         "tools_sha256": tools_sha256,
                         "status": "failed",
+                        "call_state": "failed",
                         "error_code": "invalid_response_object",
                     },
                     duration_ms=duration_ms,
@@ -327,12 +396,14 @@ class RecordingLLMClient:
             payload={
                 "call_id": call_id,
                 "question_id": question_id,
+                "run_id": str(self.run_id),
                 "purpose": scope.purpose,
                 "attempt": attempt,
                 "model_id": self.model_id,
                 "messages_sha256": messages_sha256,
                 "tools_sha256": tools_sha256,
                 "status": "success",
+                "call_state": "succeeded",
                 "response": response_payload,
             },
             duration_ms=duration_ms,

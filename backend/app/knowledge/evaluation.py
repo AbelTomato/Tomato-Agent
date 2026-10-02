@@ -32,6 +32,11 @@ from app.knowledge.query_planning import (
     SafeQueryPlanner,
 )
 from app.knowledge.repository import KnowledgeRepository
+from app.knowledge.pipeline_factory import (
+    build_knowledge_pipeline as build_runtime_knowledge_pipeline,
+    runtime_config_for_evaluation_profile,
+    runtime_config_manifest,
+)
 from app.knowledge.reranking import NoopReranker
 from app.knowledge.service import KnowledgePipeline
 from app.settings import settings
@@ -191,6 +196,23 @@ _ABLATION_FIELDS = {
     "evidence_selection",
     "answerability",
 }
+PRODUCTION_EQUIVALENT_PROFILE = "production-equivalent"
+PRODUCTION_EQUIVALENT_PROFILE_PATH = (
+    Path(__file__).resolve().parents[2] / "evals" / "blog_retrieval_production_equivalent_dev.json"
+)
+_PRODUCTION_EQUIVALENT_FIELDS = {
+    "name",
+    "split",
+    "mode",
+    "candidate_limit",
+    "candidate_min_vector_similarity",
+    "final_limit",
+    "query_planning",
+    "rerank",
+    "evidence_selection",
+    "answerability",
+    "allow_insufficient_llm",
+}
 
 
 class _EvaluationArgumentParser(argparse.ArgumentParser):
@@ -252,6 +274,57 @@ def load_ablation_configs(path: Path) -> list[dict[str, object]]:
         names.add(name)
         configs.append(dict(item))
     return configs
+
+
+def load_production_equivalent_profile(path: Path) -> dict[str, object]:
+    """Load the single, fixed, dev-only production-equivalent profile."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid production-equivalent profile JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("production-equivalent profile must be an object")
+    unknown = set(value) - _PRODUCTION_EQUIVALENT_FIELDS
+    if unknown:
+        raise ValueError(f"production-equivalent profile has unknown fields: {sorted(unknown)}")
+    if set(value) != _PRODUCTION_EQUIVALENT_FIELDS:
+        missing = sorted(_PRODUCTION_EQUIVALENT_FIELDS - set(value))
+        raise ValueError(f"production-equivalent profile is missing fields: {missing}")
+    expected = {
+        "name": PRODUCTION_EQUIVALENT_PROFILE,
+        "split": "dev",
+        "mode": "hybrid",
+        "candidate_limit": 30,
+        "candidate_min_vector_similarity": 0.2,
+        "final_limit": 5,
+        "query_planning": "conditional",
+        "rerank": "provider",
+        "evidence_selection": "coverage-aware",
+        "answerability": "coverage-v1",
+        "allow_insufficient_llm": False,
+    }
+    if value != expected:
+        raise ValueError("production-equivalent profile does not match the approved fixed configuration")
+    return dict(value)
+
+
+def apply_production_equivalent_profile(
+    args: argparse.Namespace,
+    profile: dict[str, object],
+) -> argparse.Namespace:
+    """Apply the validated profile without changing legacy CLI defaults."""
+
+    if profile.get("name") != PRODUCTION_EQUIVALENT_PROFILE:
+        raise ValueError("unsupported evaluation profile")
+    if args.split != "dev":
+        raise ValueError("production-equivalent profile accepts only split=dev")
+    if getattr(args, "allow_insufficient_llm", None) is True:
+        raise ValueError("production-equivalent profile requires allow_insufficient_llm=false")
+    for field in _PRODUCTION_EQUIVALENT_FIELDS - {"name"}:
+        setattr(args, field, profile[field])
+    args.profile = PRODUCTION_EQUIVALENT_PROFILE
+    return args
 
 
 def select_ablation_config(
@@ -988,7 +1061,17 @@ def load_questions(path: Path, *, split: str) -> list[EvaluationQuestion]:
     return questions
 
 
-async def _run(args: argparse.Namespace) -> int:
+async def _run(
+    args: argparse.Namespace,
+    *,
+    embedding_client=None,
+    reranker=None,
+) -> int:
+    if getattr(args, "profile", None) == PRODUCTION_EQUIVALENT_PROFILE:
+        apply_production_equivalent_profile(
+            args,
+            load_production_equivalent_profile(PRODUCTION_EQUIVALENT_PROFILE_PATH),
+        )
     validate_min_vector_similarity(args.min_vector_similarity)
     validate_min_vector_similarity(args.candidate_min_vector_similarity)
     if args.top_k <= 0 or args.final_limit <= 0 or args.candidate_limit <= 0:
@@ -997,7 +1080,7 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError("candidate_limit must not be smaller than final_limit")
     if args.query_planning not in {"disabled", "conditional"}:
         raise ValueError(f"unsupported query planning strategy: {args.query_planning}")
-    if args.rerank not in {"noop", "fake-or-approved-provider"}:
+    if args.rerank not in {"noop", "fake-or-approved-provider", "provider"}:
         raise ValueError(f"unsupported rerank strategy: {args.rerank}")
     if args.evidence_selection not in {"baseline", "coverage-aware"}:
         raise ValueError(f"unsupported evidence selection strategy: {args.evidence_selection}")
@@ -1010,13 +1093,23 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError(f"knowledge database does not exist: {database_path}")
     output_path = Path(args.output)
     validate_report_output_path(output_path, dataset=dataset_path, database=database_path)
-    if args.mode in {"vector", "hybrid"} and not settings.embedding_api_key:
+    if args.profile == PRODUCTION_EQUIVALENT_PROFILE:
+        runtime_config = runtime_config_for_evaluation_profile(
+            args,
+            settings=settings,
+            embedding_client=embedding_client,
+            reranker=reranker,
+        )
+    elif args.mode in {"vector", "hybrid"} and not settings.embedding_api_key:
+        runtime_config = None
+    else:
+        runtime_config = None
+    if args.profile != PRODUCTION_EQUIVALENT_PROFILE and args.mode in {"vector", "hybrid"} and not settings.embedding_api_key:
         raise ValueError("vector and hybrid modes require a configured embedding API key")
     repository = KnowledgeRepository(database_path, read_only=True)
     await repository.init()
 
-    embedding_client: EmbeddingClient | None = None
-    if args.mode in {"vector", "hybrid"}:
+    if args.mode in {"vector", "hybrid"} and embedding_client is None:
         if not args.embedding_model or args.embedding_dimensions <= 0:
             raise ValueError("vector and hybrid modes require embedding model and dimensions")
         embedding_client = EmbeddingClient(
@@ -1027,11 +1120,19 @@ async def _run(args: argparse.Namespace) -> int:
             timeout_seconds=settings.embedding_timeout_seconds,
         )
 
-    pipeline = build_knowledge_pipeline(
-        args,
-        repository,
-        embedding_client=embedding_client,
-    )
+    if runtime_config is not None:
+        pipeline = build_runtime_knowledge_pipeline(
+            repository,
+            runtime_config,
+            embedding_client=embedding_client,
+            reranker=reranker,
+        )
+    else:
+        pipeline = build_knowledge_pipeline(
+            args,
+            repository,
+            embedding_client=embedding_client,
+        )
 
     result_map: dict[str, list[EvidenceItem]] = {}
     candidate_result_map: dict[str, list[EvidenceItem]] = {}
@@ -1172,15 +1273,47 @@ async def _run(args: argparse.Namespace) -> int:
         "evidence_selection": args.evidence_selection,
         "answerability": args.answerability,
         "answerability_config": {
-            "min_supported_coverage": settings.knowledge_answerability_min_supported_coverage,
-            "min_partial_coverage": settings.knowledge_answerability_min_partial_coverage,
-            "min_supported_evidence": settings.knowledge_answerability_min_supported_evidence,
-            "multi_evidence_requires_all_queries": (
-                settings.knowledge_answerability_multi_evidence_requires_all_queries
+            "min_supported_coverage": (
+                runtime_config.answerability_min_supported_coverage
+                if runtime_config is not None
+                else settings.knowledge_answerability_min_supported_coverage
             ),
-            "allow_insufficient_llm": settings.knowledge_answerability_allow_insufficient_llm,
+            "min_partial_coverage": (
+                runtime_config.answerability_min_partial_coverage
+                if runtime_config is not None
+                else settings.knowledge_answerability_min_partial_coverage
+            ),
+            "min_supported_evidence": (
+                runtime_config.answerability_min_supported_evidence
+                if runtime_config is not None
+                else settings.knowledge_answerability_min_supported_evidence
+            ),
+            "multi_evidence_requires_all_queries": (
+                runtime_config.answerability_multi_evidence_requires_all_queries
+                if runtime_config is not None
+                else settings.knowledge_answerability_multi_evidence_requires_all_queries
+            ),
+            "allow_insufficient_llm": (
+                runtime_config.allow_insufficient_llm
+                if runtime_config is not None
+                else settings.knowledge_answerability_allow_insufficient_llm
+            ),
         },
         "ablation_name": getattr(args, "ablation_name", None),
+        "profile": getattr(args, "profile", None),
+        "effective_config": (
+            {
+                **runtime_config_manifest(runtime_config),
+                "embedding_provider": "injected" if embedding_client is not None else "configured",
+                "reranker_provider": "injected" if reranker is not None else "configured",
+                "embedding_provider_configured": embedding_client is not None
+                or runtime_config_manifest(runtime_config)["embedding_provider_configured"],
+                "rerank_provider_configured": reranker is not None
+                or runtime_config_manifest(runtime_config)["rerank_provider_configured"],
+            }
+            if runtime_config is not None
+            else None
+        ),
         "dataset_sha256": hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest(),
         "database": str(Path(args.database)),
         "database_sha256": hashlib.sha256(database_path.read_bytes()).hexdigest(),
@@ -1281,6 +1414,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rerank", default="noop")
     parser.add_argument("--evidence-selection", default="baseline")
     parser.add_argument("--answerability", default="baseline")
+    parser.add_argument("--profile", choices=(PRODUCTION_EQUIVALENT_PROFILE,))
+    parser.add_argument("--allow-insufficient-llm", action="store_true", default=None)
     parser.set_defaults(final_limit=None)
     parser.add_argument(
         "--ablation-config",
@@ -1302,7 +1437,9 @@ def build_knowledge_pipeline(
     planner = (
         SafeQueryPlanner()
         if args.query_planning == "disabled"
-        else LLMQueryPlanner(QueryPlannerConfig(enabled=True))
+        else LLMQueryPlanner(
+            QueryPlannerConfig(enabled=True, structural_fallback_enabled=True)
+        )
     )
     candidate_retriever = RepositoryCandidateRetriever(
         repository,
@@ -1355,6 +1492,11 @@ def main() -> int:
             apply_ablation_config(
                 args,
                 select_ablation_config(configs, name=args.ablation_name),
+            )
+        if args.profile == PRODUCTION_EQUIVALENT_PROFILE:
+            apply_production_equivalent_profile(
+                args,
+                load_production_equivalent_profile(PRODUCTION_EQUIVALENT_PROFILE_PATH),
             )
         return asyncio.run(_run(args))
     except (OSError, ValueError) as exc:

@@ -11,6 +11,8 @@ import pytest
 
 from app.agent.models import LLMResponse, Message, ToolDefinition
 from app.knowledge.ingestion import ingest_manifest
+from app.knowledge.indexing import build_embedding_index
+from app.knowledge.pipeline_models import CandidateEvidence
 from app.knowledge.repository import KnowledgeRepository
 from app.observability.rag_trace import TRACE_SCHEMA, canonical_json_sha256
 from app.observability.rag_trace_sink import (
@@ -21,6 +23,7 @@ from app.observability.rag_trace_sink import (
     verify_trace_run,
 )
 from app.observability.recording_llm_client import RecordingLLMClient
+from app.settings import settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +45,30 @@ class FakeLLM:
         return response
 
 
+class FakeEmbeddingProvider:
+    def __init__(self, dimensions: int = 2) -> None:
+        self.dimensions = dimensions
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(texts)
+        return [[1.0] + [0.0] * (self.dimensions - 1) for _ in texts]
+
+
+class FakeReranker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    async def rank(self, query: str, candidates: list[CandidateEvidence]) -> list[CandidateEvidence]:
+        self.calls.append((query, len(candidates)))
+        return [
+            candidate.model_copy(
+                update={"rerank_score": 1.0 - index / max(len(candidates), 1)}
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+
+
 def answer_response(answer: str = "SETEX 会同时设置键的过期时间。") -> LLMResponse:
     return LLMResponse(
         kind="final",
@@ -50,6 +77,21 @@ def answer_response(answer: str = "SETEX 会同时设置键的过期时间。") 
                 "answer": answer,
                 "citation_ids": ["R1"],
                 "evidence_status": "supported",
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+def planner_response() -> LLMResponse:
+    return LLMResponse(
+        kind="final",
+        content=json.dumps(
+            {
+                "queries": [
+                    {"text": "SETEX", "facet": "命令"},
+                    {"text": "缓存", "facet": "缓存场景"},
+                ]
             },
             ensure_ascii=False,
         ),
@@ -301,6 +343,125 @@ def test_answer_runner_records_non_llm_path_as_not_called_for_no_results():
         assert result.report["llm_execution"]["request_count"] == 0
 
 
+def test_production_equivalent_profile_runs_with_fake_providers_and_records_effective_config(monkeypatch):
+    from app.knowledge.answer_evaluation import run_answer_evaluation
+
+    with private_database_root() as database_directory, private_reports_root() as report_directory:
+        dataset, database, question_ids = create_inputs(
+            Path(database_directory),
+            questions=[("dev-001", "SETEX 过期时间以及缓存")],
+        )
+        repository = KnowledgeRepository(database)
+        embedding = FakeEmbeddingProvider(dimensions=2)
+        asyncio.run(
+            build_embedding_index(
+                repository,
+                embedding,
+                model="fake-embedding",
+                dimensions=2,
+                batch_size=32,
+            )
+        )
+        reranker = FakeReranker()
+        fake_llm = FakeLLM([planner_response(), answer_response()])
+        args = make_args(
+            dataset,
+            database,
+            Path(report_directory),
+            "--profile",
+            "production-equivalent",
+            "--embedding-model",
+            "fake-embedding",
+            "--embedding-dimensions",
+            "2",
+        )
+        monkeypatch.setattr(settings, "embedding_model", "fake-embedding")
+        monkeypatch.setattr(settings, "embedding_dimensions", 2)
+
+        result = asyncio.run(
+            run_answer_evaluation(
+                args,
+                llm_client=fake_llm,
+                embedding_client=embedding,
+                reranker=reranker,
+                run_id=RUN_ID,
+            )
+        )
+
+        assert result.exit_code == 0
+        assert question_ids == ["dev-001"]
+        assert embedding.calls
+        assert reranker.calls
+        assert fake_llm.calls
+        assert len(fake_llm.calls) == 2
+        assert result.manifest.configuration["profile"] == "production-equivalent"
+        effective = result.manifest.configuration["effective_config"]
+        assert effective["candidate_limit"] == 30
+        assert effective["candidate_min_vector_similarity"] == 0.2
+        assert effective["embedding_provider"] == "injected"
+        assert effective["reranker_provider"] == "injected"
+        assert effective["evidence_selection"] == "coverage-aware"
+        assert effective["answerability"] == "coverage-v1"
+        expected_provider_statistics = {
+            provider: {
+                "attempted": 1,
+                "succeeded": 1,
+                "failed": 0,
+                "skipped": 0,
+            }
+            for provider in ("embedding", "reranker", "query_planner", "answerer")
+        }
+        assert result.report["provider_call_statistics"] == expected_provider_statistics
+        summary = json.loads(
+            (result.run_dir / "summary.json").read_text(encoding="utf-8")
+        )
+        assert summary["provider_call_statistics"] == expected_provider_statistics
+        trace = json.loads(
+            (result.run_dir / "questions" / "dev-001.json").read_text(encoding="utf-8")
+        )["trace"]
+        assert len(trace["query_plan"]["queries"]) == 3
+        citation_event = next(
+            event for event in trace["events"] if event["event_type"] == "citation_validation.completed"
+        )
+        assert citation_event["payload"]["whitelist_valid"] is True
+        assert citation_event["payload"]["citation_ids"] == ["R1"]
+
+
+def test_answer_runner_legacy_parser_defaults_remain_keyword_and_noop():
+    from app.knowledge.answer_evaluation import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--dataset",
+            "questions.jsonl",
+            "--database",
+            "snapshot.db",
+            "--report-root",
+            str(DEFAULT_REPORTS_ROOT),
+        ]
+    )
+
+    assert args.mode == "keyword"
+    assert args.query_planning == "disabled"
+    assert args.rerank == "noop"
+    assert args.evidence_selection == "baseline"
+    assert args.answerability == "baseline"
+
+
+def test_answer_runner_rejects_hybrid_or_provider_without_explicit_profile():
+    from app.knowledge.answer_evaluation import run_answer_evaluation
+
+    with private_database_root() as database_directory, private_reports_root() as report_directory:
+        dataset, database, _ = create_inputs(Path(database_directory))
+        hybrid_args = make_args(dataset, database, Path(report_directory), "--mode", "hybrid")
+        provider_args = make_args(dataset, database, Path(report_directory), "--rerank", "provider")
+
+        with pytest.raises(ValueError, match="production-equivalent profile"):
+            asyncio.run(run_answer_evaluation(hybrid_args, llm_client=None, run_id=RUN_ID))
+        with pytest.raises(ValueError, match="production-equivalent profile"):
+            asyncio.run(run_answer_evaluation(provider_args, llm_client=None, run_id=RUN_ID))
+
+
 def test_answer_runner_real_llm_is_opt_in_and_client_factory_is_offline_by_default(monkeypatch):
     from app.knowledge.answer_evaluation import build_parser, create_llm_client
 
@@ -346,7 +507,6 @@ def test_answer_runner_caps_real_llm_calls_at_eighteen():
         dataset, database, _ = create_inputs(Path(database_directory), questions=questions)
         fake = FakeLLM([answer_response() for _ in range(18)])
         args = make_args(dataset, database, Path(report_directory))
-
         result = asyncio.run(run_answer_evaluation(args, llm_client=fake, run_id=RUN_ID))
 
         assert len(fake.calls) == 18
@@ -369,6 +529,61 @@ def test_answer_runner_rejects_real_llm_with_query_planning_before_request():
             asyncio.run(run_answer_evaluation(args, llm_client=fake, run_id=RUN_ID))
 
         assert fake.calls == []
+
+
+def test_production_equivalent_profile_allows_real_llm_with_query_planner(monkeypatch):
+    from app.knowledge.answer_evaluation import run_answer_evaluation
+
+    monkeypatch.setattr(settings, "embedding_api_key", "fake-embedding-key")
+    monkeypatch.setattr(settings, "embedding_model", "fake-embedding")
+    monkeypatch.setattr(settings, "embedding_dimensions", 2)
+    monkeypatch.setattr(settings, "knowledge_rerank_api_key", "fake-rerank-key")
+    monkeypatch.setattr(settings, "knowledge_rerank_base_url", "https://fake.example/v1")
+    monkeypatch.setattr(settings, "knowledge_rerank_model", "fake-reranker")
+
+    with private_database_root() as database_directory, private_reports_root() as report_directory:
+        dataset, database, _ = create_inputs(Path(database_directory))
+        fake_llm = FakeLLM([planner_response()])
+        embedding = FakeEmbeddingProvider()
+        args = make_args(
+            dataset,
+            database,
+            Path(report_directory),
+            "--profile",
+            "production-equivalent",
+            "--real-llm",
+            "--embedding-model",
+            "fake-embedding",
+            "--embedding-dimensions",
+            "2",
+        )
+
+        from app.knowledge import answer_evaluation
+
+        monkeypatch.setattr(
+            answer_evaluation,
+            "create_embedding_client",
+            lambda _: embedding,
+        )
+        monkeypatch.setattr(
+            answer_evaluation,
+            "create_reranker",
+            lambda _: FakeReranker(),
+        )
+        fake_llm = FakeLLM([planner_response(), answer_response()])
+
+        result = asyncio.run(
+            run_answer_evaluation(
+                args,
+                llm_client=fake_llm,
+                embedding_client=embedding,
+                reranker=FakeReranker(),
+                run_id=RUN_ID,
+            )
+        )
+
+        assert fake_llm.calls
+        assert result.manifest.configuration["profile"] == "production-equivalent"
 
 
 def test_answer_runner_rejects_symlinked_report_root_ancestor_before_creating_run():

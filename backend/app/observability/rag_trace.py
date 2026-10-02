@@ -165,6 +165,76 @@ def canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+class ProviderCallStats(_TraceModel):
+    """JSON-safe terminal accounting for one observed provider category."""
+
+    attempted: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+
+
+_PROVIDER_STAT_KEYS = ("embedding", "reranker", "query_planner", "answerer")
+
+
+def summarize_provider_calls(
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, ProviderCallStats]:
+    """Aggregate provider call states without retaining provider diagnostics.
+
+    Request events are the attempted boundary and response/skipped events are
+    terminal states. The fallback based on event type keeps this compatible
+    with older trace rows that predate the explicit ``call_state`` payload.
+    """
+
+    counts = {
+        key: {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+        for key in _PROVIDER_STAT_KEYS
+    }
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("event_type")
+        if not isinstance(event_type, str):
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if event_type.startswith("embedding."):
+            category = "embedding"
+        elif event_type.startswith("reranker."):
+            category = "reranker"
+        elif event_type == "llm.request" or event_type == "llm.response" or event_type == "llm.skipped":
+            purpose = payload.get("purpose")
+            if purpose not in {"query_planner", "answerer"}:
+                continue
+            category = purpose
+        else:
+            continue
+
+        call_state = payload.get("call_state")
+        status = event.get("status")
+        if call_state == "attempted" or (call_state is None and event_type.endswith(".request")):
+            counts[category]["attempted"] += 1
+        elif call_state == "succeeded" or (
+            call_state is None and event_type.endswith(".response") and status == "success"
+        ):
+            counts[category]["succeeded"] += 1
+        elif call_state == "failed" or (
+            call_state is None and event_type.endswith(".response") and status == "failed"
+        ):
+            counts[category]["failed"] += 1
+        elif call_state == "skipped" or (
+            call_state is None and event_type.endswith(".skipped")
+        ):
+            counts[category]["skipped"] += 1
+
+    return {
+        category: ProviderCallStats(**counts[category])
+        for category in _PROVIDER_STAT_KEYS
+    }
+
+
 class DataFingerprint(_TraceModel):
     path_identifier: str = Field(min_length=1)
     sha256: str

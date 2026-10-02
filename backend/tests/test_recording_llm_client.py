@@ -206,3 +206,97 @@ async def test_recording_client_requires_question_scope_when_observation_is_enab
 
     assert fake.calls == []
     assert collector.events == []
+
+
+@pytest.mark.asyncio
+async def test_recording_client_enforces_per_purpose_and_total_budgets_with_skip_events():
+    collector = EventCollector()
+    response = LLMResponse(kind="final", content="done")
+    fake = FakeLLM([response, response])
+    client = RecordingLLMClient(
+        fake,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="offline-test-model",
+        max_calls=2,
+        max_query_planner_calls=1,
+        max_answerer_calls=1,
+    )
+    planner_prompt = make_prompt_identity("rag.plan", "1", "planner")
+    answerer_prompt = make_prompt_identity("rag.answer", "1", "answerer")
+
+    with llm_question_scope("blog-dev-budget"):
+        with llm_prompt_scope("query_planner", planner_prompt):
+            assert await client.complete([Message(role="user", content="plan")], []) is response
+            with pytest.raises(LLMObservationError, match="query_planner.*limit"):
+                await client.complete([Message(role="user", content="plan again")], [])
+        with llm_prompt_scope("answerer", answerer_prompt):
+            assert await client.complete([Message(role="user", content="answer")], []) is response
+            with pytest.raises(LLMObservationError, match="answerer.*limit"):
+                await client.complete([Message(role="user", content="answer again")], [])
+
+    assert len(fake.calls) == 2
+    skipped = [event for event in collector.events if event[0] == "llm.skipped"]
+    assert len(skipped) == 2
+    assert all(event[1]["payload"]["call_state"] == "skipped" for event in skipped)
+
+
+@pytest.mark.asyncio
+async def test_recording_client_allows_eighteen_per_purpose_with_thirty_six_total_calls():
+    collector = EventCollector()
+    response = LLMResponse(kind="final", content="done")
+    fake = FakeLLM([response] * 37)
+    client = RecordingLLMClient(
+        fake,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="offline-test-model",
+        max_calls=36,
+        max_query_planner_calls=18,
+        max_answerer_calls=18,
+    )
+    planner_prompt = make_prompt_identity("rag.plan", "1", "planner")
+    answerer_prompt = make_prompt_identity("rag.answer", "1", "answerer")
+
+    with llm_question_scope("blog-dev-aggregate-budget"):
+        for index in range(17):
+            with llm_prompt_scope("query_planner", planner_prompt):
+                await client.complete([Message(role="user", content=f"plan {index}")], [])
+            with llm_prompt_scope("answerer", answerer_prompt):
+                await client.complete([Message(role="user", content=f"answer {index}")], [])
+        with llm_prompt_scope("answerer", answerer_prompt):
+            await client.complete([Message(role="user", content="answer 17")], [])
+        with llm_prompt_scope("query_planner", planner_prompt):
+            await client.complete([Message(role="user", content="plan 17")], [])
+    assert len(fake.calls) == 36
+    assert sum(event[0] == "llm.request" for event in collector.events) == 36
+    assert sum(event[0] == "llm.skipped" for event in collector.events) == 0
+
+
+@pytest.mark.asyncio
+async def test_recording_client_rejects_thirty_seventh_call():
+    collector = EventCollector()
+    response = LLMResponse(kind="final", content="done")
+    fake = FakeLLM([response] * 37)
+    client = RecordingLLMClient(
+        fake,
+        observer=collector,
+        run_id=uuid4(),
+        model_id="offline-test-model",
+        max_calls=36,
+    )
+    planner_prompt = make_prompt_identity("rag.plan", "1", "planner")
+
+    with llm_question_scope("blog-dev-aggregate-budget"):
+        for index in range(18):
+            with llm_prompt_scope("query_planner", planner_prompt):
+                await client.complete([Message(role="user", content=f"plan {index}")], [])
+            with llm_prompt_scope("answerer", make_prompt_identity("rag.answer", "1", "answerer")):
+                await client.complete([Message(role="user", content=f"answer {index}")], [])
+        with llm_prompt_scope("answerer", make_prompt_identity("rag.answer", "1", "answerer")):
+            with pytest.raises(LLMObservationError, match="answerer.*limit"):
+                await client.complete([Message(role="user", content="over budget")], [])
+
+    assert len(fake.calls) == 36
+    assert sum(event[0] == "llm.request" for event in collector.events) == 36
+    assert sum(event[0] == "llm.skipped" for event in collector.events) == 1

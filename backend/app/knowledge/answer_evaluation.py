@@ -18,11 +18,22 @@ from app.agent.interfaces import LLMClient
 from app.knowledge import evaluation as retrieval_evaluation
 from app.knowledge.evaluation import (
     EvaluationQuestion,
+    PRODUCTION_EQUIVALENT_PROFILE,
+    PRODUCTION_EQUIVALENT_PROFILE_PATH,
+    apply_production_equivalent_profile,
     QuestionResult,
     build_knowledge_pipeline,
     evaluate_question_results,
+    load_production_equivalent_profile,
     load_questions,
     summarize_question_results,
+)
+from app.knowledge.pipeline_factory import (
+    build_knowledge_pipeline as build_runtime_knowledge_pipeline,
+    create_embedding_client,
+    create_reranker,
+    runtime_config_for_evaluation_profile,
+    runtime_config_manifest,
 )
 from app.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import (
@@ -34,6 +45,7 @@ from app.observability.rag_trace import (
     HumanAnswerReview,
     TraceRunManifest,
     canonical_json_sha256,
+    summarize_provider_calls,
 )
 from app.observability.rag_trace_sink import (
     RagTraceSink,
@@ -46,6 +58,8 @@ from app.observability.recording_llm_client import (
     RecordingLLMClient,
     llm_question_scope,
 )
+from app.observability.recording_embedding_client import RecordingEmbeddingClient
+from app.observability.recording_reranker import RecordingReranker
 from app.llm.compatible_client import OpenAICompatibleClient
 from app.settings import settings
 
@@ -53,7 +67,11 @@ from app.settings import settings
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATABASES_ROOT = (PROJECT_ROOT / "backend" / "data" / "rag" / "databases").resolve()
 _SAFE_DATASET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-MAX_LLM_CALLS = 18
+MAX_EMBEDDING_CALLS = 18
+MAX_RERANKER_CALLS = 18
+MAX_QUERY_PLANNER_CALLS = 18
+MAX_ANSWERER_CALLS = 18
+MAX_LLM_CALLS = MAX_QUERY_PLANNER_CALLS + MAX_ANSWERER_CALLS
 
 
 def create_llm_client(args: argparse.Namespace) -> LLMClient | None:
@@ -362,28 +380,53 @@ async def run_answer_evaluation(
     *,
     llm_client: LLMClient | None = None,
     run_id: UUID | None = None,
+    embedding_client=None,
+    reranker=None,
 ) -> AnswerEvaluationResult:
     """Run answer generation and audit on only the selected dev questions."""
+    if getattr(args, "profile", None) == PRODUCTION_EQUIVALENT_PROFILE:
+        apply_production_equivalent_profile(
+            args,
+            load_production_equivalent_profile(PRODUCTION_EQUIVALENT_PROFILE_PATH),
+        )
     if args.split != "dev":
         raise ValueError("answer evaluation accepts only the dev split")
-    if args.mode != "keyword":
-        raise ValueError("answer evaluation currently accepts keyword mode only")
+    if args.mode not in {"keyword", "hybrid"}:
+        raise ValueError("answer evaluation supports keyword mode and the production-equivalent hybrid profile")
+    if getattr(args, "profile", None) != PRODUCTION_EQUIVALENT_PROFILE and args.mode != "keyword":
+        raise ValueError("hybrid mode requires the production-equivalent profile")
     if args.candidate_limit <= 0 or args.final_limit <= 0:
         raise ValueError("candidate_limit and final_limit must be positive")
     if args.candidate_limit < args.final_limit:
         raise ValueError("candidate_limit must not be smaller than final_limit")
     if args.query_planning not in {"disabled", "conditional"}:
         raise ValueError("unsupported query planning strategy")
-    if args.real_llm and (args.query_planning != "disabled" or settings.knowledge_query_planning_enabled):
+    is_production_equivalent = (
+        getattr(args, "profile", None) == PRODUCTION_EQUIVALENT_PROFILE
+    )
+    if args.real_llm and not is_production_equivalent and (
+        args.query_planning != "disabled" or settings.knowledge_query_planning_enabled
+    ):
         raise ValueError("real LLM mode requires query planning to be disabled")
     if args.real_llm and settings.knowledge_answerability_allow_insufficient_llm:
         raise ValueError("real LLM mode requires insufficient-evidence LLM calls to be disabled")
-    if args.rerank not in {"noop", "offline-fake"}:
-        raise ValueError("answer evaluation permits only noop or offline-fake reranking")
+    if args.rerank not in {"noop", "offline-fake", "provider"}:
+        raise ValueError("unsupported answer evaluation reranking strategy")
+    if getattr(args, "profile", None) != PRODUCTION_EQUIVALENT_PROFILE and args.rerank == "provider":
+        raise ValueError("provider reranking requires the production-equivalent profile")
     if args.evidence_selection not in {"baseline", "coverage-aware"}:
         raise ValueError("unsupported evidence selection strategy")
     if args.answerability not in {"baseline", "coverage-v1"}:
         raise ValueError("unsupported answerability strategy")
+
+    runtime_config = None
+    if getattr(args, "profile", None) == PRODUCTION_EQUIVALENT_PROFILE:
+        runtime_config = runtime_config_for_evaluation_profile(
+            args,
+            settings=settings,
+            embedding_client=embedding_client,
+            reranker=reranker,
+        )
 
     dataset_input_path = Path(args.dataset)
     if dataset_input_path.is_symlink():
@@ -443,7 +486,11 @@ async def run_answer_evaluation(
         "rerank": args.rerank,
         "evidence_selection": args.evidence_selection,
         "answerability": args.answerability,
-        "answerability_allow_insufficient_llm": settings.knowledge_answerability_allow_insufficient_llm,
+        "answerability_allow_insufficient_llm": (
+            runtime_config.allow_insufficient_llm
+            if runtime_config is not None
+            else settings.knowledge_answerability_allow_insufficient_llm
+        ),
         "llm_client": (
             "real_provider" if args.real_llm
             else "injected" if llm_client is not None
@@ -451,7 +498,23 @@ async def run_answer_evaluation(
         ),
         "llm_model_id": args.llm_model_id if llm_client is not None else None,
         "llm_max_requests": MAX_LLM_CALLS if llm_client is not None else None,
+        "query_planner_max_requests": MAX_QUERY_PLANNER_CALLS if llm_client is not None else None,
+        "answerer_max_requests": MAX_ANSWERER_CALLS if llm_client is not None else None,
         "llm_mode": "real_opt_in" if args.real_llm else "offline_or_injected",
+        "profile": getattr(args, "profile", None),
+        "effective_config": (
+            {
+                **runtime_config_manifest(runtime_config),
+                "embedding_provider": "injected" if embedding_client is not None else "configured",
+                "reranker_provider": "injected" if reranker is not None else "configured",
+                "embedding_provider_configured": embedding_client is not None
+                or runtime_config_manifest(runtime_config)["embedding_provider_configured"],
+                "rerank_provider_configured": reranker is not None
+                or runtime_config_manifest(runtime_config)["rerank_provider_configured"],
+            }
+            if runtime_config is not None
+            else None
+        ),
     }
     sink = RagTraceSink(
         report_root=report_root,
@@ -469,12 +532,43 @@ async def run_answer_evaluation(
         configuration=config,
     )
     observer = _RunObserver(sink)
-    pipeline = build_knowledge_pipeline(args, repository, observer=observer)
+    if runtime_config is not None:
+        raw_embedding_client = embedding_client or create_embedding_client(runtime_config)
+        recorded_embedding_client = (
+            RecordingEmbeddingClient(
+                raw_embedding_client,
+                observer=observer,
+                run_id=selected_run_id,
+                model_id=runtime_config.embedding_model,
+                max_calls=MAX_EMBEDDING_CALLS,
+            )
+            if raw_embedding_client is not None
+            else None
+        )
+        raw_reranker = reranker or create_reranker(runtime_config)
+        recorded_reranker = RecordingReranker(
+            raw_reranker,
+            observer=observer,
+            run_id=selected_run_id,
+            model_id=runtime_config.rerank_model or "noop-reranker",
+            max_calls=MAX_RERANKER_CALLS,
+        )
+        pipeline = build_runtime_knowledge_pipeline(
+            repository,
+            runtime_config,
+            embedding_client=recorded_embedding_client,
+            reranker=recorded_reranker,
+            observer=observer,
+        )
+        allow_insufficient_llm = runtime_config.allow_insufficient_llm
+    else:
+        pipeline = build_knowledge_pipeline(args, repository, observer=observer)
+        allow_insufficient_llm = settings.knowledge_answerability_allow_insufficient_llm
     service = KnowledgeService(
         repository,
         pipeline=pipeline,
         candidate_limit=args.candidate_limit,
-        allow_insufficient_llm=settings.knowledge_answerability_allow_insufficient_llm,
+        allow_insufficient_llm=allow_insufficient_llm,
     )
     recorded_client: RecordingLLMClient | None = None
     if llm_client is not None:
@@ -484,6 +578,8 @@ async def run_answer_evaluation(
             run_id=selected_run_id,
             model_id=args.llm_model_id,
             max_calls=MAX_LLM_CALLS,
+            max_query_planner_calls=MAX_QUERY_PLANNER_CALLS,
+            max_answerer_calls=MAX_ANSWERER_CALLS,
         )
 
     question_results: list[QuestionResult] = []
@@ -623,6 +719,15 @@ async def run_answer_evaluation(
         for question in questions
     ]
     retrieval_summary = summarize_question_results(question_results, k=args.final_limit)
+    observed_events = [
+        event
+        for question in questions
+        for event in observer.events[question.question_id]
+    ]
+    provider_call_statistics = {
+        category: statistics.model_dump(mode="json")
+        for category, statistics in summarize_provider_calls(observed_events).items()
+    }
     report: dict[str, Any] = {
         "split": "dev",
         "run_id": str(selected_run_id),
@@ -643,9 +748,8 @@ async def run_answer_evaluation(
         "retrieval_summary": asdict(retrieval_summary),
         "answer_quality": {"status": "not_evaluated", "sample_count": 0},
         "human_review": _review_summary(pending_reviews),
-        "llm_execution": _llm_counts(
-            [event for question in questions for event in observer.events[question.question_id]]
-        ),
+        "llm_execution": _llm_counts(observed_events),
+        "provider_call_statistics": provider_call_statistics,
         "provider_usage_and_cost": "unknown; client does not expose provider usage or billing",
         "provenance": {
             "dataset_sha256": dataset_fingerprint.sha256,
@@ -704,7 +808,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-root", required=True)
     parser.add_argument("--dataset-name", default="public-blog")
     parser.add_argument("--split", choices=("dev",), default="dev")
-    parser.add_argument("--mode", choices=("keyword",), default="keyword")
+    parser.add_argument("--mode", choices=("keyword", "hybrid"), default="keyword")
     parser.add_argument("--candidate-limit", type=int, default=30)
     parser.add_argument("--final-limit", type=int, default=5)
     parser.add_argument("--embedding-model", default=settings.embedding_model)
@@ -715,9 +819,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=settings.knowledge_candidate_min_vector_similarity,
     )
     parser.add_argument("--query-planning", choices=("disabled", "conditional"), default="disabled")
-    parser.add_argument("--rerank", choices=("noop", "offline-fake"), default="noop")
+    parser.add_argument("--rerank", choices=("noop", "offline-fake", "provider"), default="noop")
     parser.add_argument("--evidence-selection", choices=("baseline", "coverage-aware"), default="baseline")
     parser.add_argument("--answerability", choices=("baseline", "coverage-v1"), default="baseline")
+    parser.add_argument("--profile", choices=(PRODUCTION_EQUIVALENT_PROFILE,))
+    parser.add_argument("--allow-insufficient-llm", action="store_true", default=None)
     parser.add_argument("--llm-model-id", default="injected-offline-client")
     parser.add_argument("--run-id", type=UUID, help="optional preallocated unique run UUID")
     parser.add_argument(
