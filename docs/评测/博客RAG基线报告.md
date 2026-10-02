@@ -2,8 +2,8 @@
 
 ## 1. 报告状态
 
-- **报告日期**：2026-09-24（含 Benchmark 工程基线及 2026-09-22/23 历史基线）
-- **状态**：已完成真实博客正式题集 `dev` 的三模式离线检索基线、同策略 keyword 重复检查、历史 18 题真实 LLM 人工语义验收、18 题 hybrid Pipeline 重测，以及 2026-09-24 Observe 工件复验；最新 Observe run 的检索候选为空，未发生真实 Provider 调用或答案生成。**RAG 产品质量验收仍未通过**。
+- **报告日期**：2026-09-28（含 Benchmark 工程基线及 2026-09-22/23 历史基线）
+- **状态**：已完成真实博客正式题集 `dev` 的三模式离线检索基线、同策略 keyword 重复检查、历史 18 题真实 LLM 人工语义验收、18 题 hybrid Pipeline 重测、2026-09-24 Observe 工件复验，以及 2026-09-28 获准的三策略 hybrid 消融；最新任务 3 消融工件已归档，但 `014` 最终双证据和无答案语义拒答门禁仍未通过。**RAG 产品质量验收仍未通过**。
 - **范围限制**：本报告使用 66 篇真实博客的隔离快照和 36 题正式题集中的 18 题 `dev`。`test` 集未查看；2026-09-23 Pipeline 重测未调用 LLM 做 query splitting、答案生成或语义 judging；2026-09-24 Observe runner 使用 `keyword` 检索，18 题均无候选，实际 Provider 请求/尝试/响应为 `0/0/0`。历史 LLM 验收不代表后续 Pipeline 的生成质量；Observe 工件完整不代表问答验收完成，结果不代表最终博客问答质量，也不构成新策略收益结论。
 
 ## 2. 可复现实验入口
@@ -23,6 +23,19 @@ Benchmark run/compare 的固定夹具验证、manifest 和报告字段说明见 
 keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总与分类质量指标一致。对比器结果：keyword→vector 为描述性 `improved`，keyword→hybrid 和 vector→hybrid 为 `mixed`。小样本结果不代表统计显著性。vector 和 hybrid 分别对 18 题发出一次 Embedding 请求，总计 36 次；无自动重试、无 LLM 请求。Provider usage/billing 不可由客户端报告核实，费用保持未知。
 
 质量解释：vector 在本次阈值下无答案检索为空 3/3；hybrid 的证据召回较高，但三个无答案题均检索非空（3/3）。检索空结果只是拒答代理指标，非空也不能单独判为语义错误回答；仍需独立答案生成和人工拒答/引用支撑复核。已知 `blog-formal-014` 最终证据覆盖风险不因整体 Recall 提升而关闭。本结果**不是 RAG 答案质量通过或上线许可**。
+
+### 2.2 2026-09-28 任务 1：冻结验收契约与对照基线
+
+本节是任务 1 的当前验收矩阵，不改写 2026-09-23/24 的历史实验事实，也不宣称 RAG 产品质量通过。
+
+| 验收项 | 冻结事实与分母 | 可追溯证据 | 结论 |
+|---|---|---|---|
+| A1 输入与快照 | 原始题集文件 36 题，SHA-256 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；选定 `dev` 规范化题集 18 题，指纹 `0d320487ad2f76269ba225bb43f2f3236f6b8759606a6a0478db11baa2dbf4f3`；快照文件 SHA-256 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`；SQLite `integrity_check=ok`，66 documents、886 chunks、886 embeddings | `/home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json`、2026-09-24 Benchmark `report.json`、只读 SQLite 核验 | 通过 |
+| A2 题集与标注范围 | manifest 与规范化 `dev` 题集 ID 完全一致：`blog-formal-001`–`blog-formal-018`；可回答 15 题、无答案 3 题（`013/017/018`）；可回答题共 17 条标注 evidence span，`014` 占 2 条、`015` 占 2 条，其余 13 题各 1 条；所有 `document_version`、物理起止行均通过范围校验 | `load_questions(..., split="dev")`、`benchmark_snapshot.py` 的 `EvidenceSpan` 校验、manifest `question_ids/question_splits/question_groups` | 通过 |
+| A3 对照策略与有效配置 | 三个已归档对照 run 均为 `status=complete`、相同 `metric_version=benchmark-metrics/v1`、相同 corpus/index/source 指纹和 `dev` 题集指纹：`keyword-v1`（BM25，candidate 30/final 5，阈值 0.0）、`vector-v1`（cosine，candidate 30/final 5，阈值 0.5，`qwen3.7-text-embedding-flash`/1024 维）、`hybrid-v1`（RRF，candidate 30/final 5，余弦阈值 0.2，同一 Embedding） | `/home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json`、`backend/data/rag/reports/2026-09-24/public-blog/dev/benchmark-v1/*/report.json`；三 run `source_sha256` 均为 `796a8d174f63e9ef9a3ed3da33022e491d2eab36a572a6cc6285168c6b02f22b` | 通过；仅作描述性对照 |
+| A4 逐题字段与语义边界 | `evaluation.py` 的逐题结果分别记录 candidate/final 证据、证据/来源覆盖、Judge 状态与 reason、LLM 是否调用、阶段/端到端耗时、错误；离线检索报告的 `answer_quality_evaluated` 固定为 `false`，无答案非空不能计为正确拒答，执行错误不计为空结果或正确拒答 | `EvaluationQuestion`/`QuestionResult`、`evaluate_question_results`、`test_knowledge_evaluation.py` 现有断言；`014` 仍单列 candidate/final 覆盖，三道无答案仍单列非空风险 | 通过；不替代任务 4/5 人工答案审计 |
+
+题集当前 schema 没有独立的 `annotation_version` 字段；本轮不擅自新增字段。标注版本由每条 `relevant_spans` 的 `document_version` 与物理行范围表达，已纳入 A2 校验。机器 Judge 的 `supported`、引用白名单合法性和报告 `complete` 均不代表答案语义通过；`014` 双证据最终覆盖与三道无答案题的安全拒答仍是后续任务门禁。
 
 评测 CLI 固定为：
 
@@ -120,6 +133,20 @@ vector/hybrid 结果相同，不表示两种策略已经优劣等价；本次样
 ### 4.5 2026-09-24 Observe 任务 6 复验状态
 
 离线 `rag-observe-trace/v1` runner 与集成工件完整性检查已通过固定知识库快照和 Fake LLM 测试（任务 6 指定组合测试 198/198）；该测试验证实现和工件契约，不代表真实答案生成。随后按批准范围显式运行 `--real-llm`，候选 run `24f1c9e3-52fb-4fa8-916f-2709a729dd30` 已生成；因为当前 runner 固定使用 `keyword` 检索，而 18 道正式 `dev` 题均无检索候选，18 次 Answerer 调用全部按 `answerability_no_results` 跳过。实际 provider 请求/尝试/响应为 **0/0/0**，执行错误为 0；因此本次没有真实 LLM 答案、引用白名单校验不适用，人工复核为 **0/18**，不得把本次表述为 18 次真实 LLM 问答或质量验收。汇总 `complete` 只表示 run 生命周期和工件完整，不代表评测目标达成。报告位于 `backend/data/rag/reports/2026-09-24/public-blog/dev/observe-v1/24f1c9e3-52fb-4fa8-916f-2709a729dd30/`，Trace schema 为 `rag-observe-trace/v1`；18/18 逐题文件、126 条事件及 22 个 manifest 工件均通过事件链/文件大小/SHA-256 校验。题集 SHA-256 前后均为 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；只读快照 SHA-256 前后均为 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`，SQLite integrity 为 `ok`。provider 不暴露 usage/billing，尽管 Observe 记录没有请求，实际费用仍无法从客户端核实；批准的 `$5` 预算不可本地强制或保证。Benchmark 准入结论不变。下一次真实 LLM 评估需先解决该 runner 的检索模式限制/证据候选缺失，使用新 run ID 并重新确认批准范围；不得重用本次目录或把本次完整状态解释为语义验收。
+
+### 4.6 2026-09-28 任务 3：获准 hybrid 消融与离线准入
+
+本次只运行版本化配置 `backend/evals/blog_retrieval_ablation_task3.json` 中显式批准的 `baseline`、`wide-candidate`、`coverage-aware` 三项策略；三者均为 `mode=hybrid`、query planning `disabled`、rerank `noop`，只使用 `dev` 18 题和同一只读快照。Embedding 来自 `backend/.env` 配置的 `qwen3.7-text-embedding-flash`（1024 维）；没有 LLM、reranker Provider 或业务数据库调用，也未读取 `test`。运行前后题集 SHA-256 均为 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`，快照 SHA-256 均为 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`，SQLite `integrity_check=ok`。
+
+| 策略 | candidate/final 配置 | Recall@5 | MRR@5 | Hit@5 | `014` candidate/final | `014` 来源覆盖 | 可回答空结果 | 无答案 candidate/final 非空 | 执行错误 | p50/p95 延迟 |
+|---|---|---:|---:|---:|---|---|---:|---|---:|---:|
+| baseline | 5 / 5，候选余弦阈值 0.5 | 0.9333 | 0.8222 | 0.9333 | 0/2 / 0/2 | 0/2 | 1/15 | 0/3 / 0/3 | 0/18 | 552/678 ms |
+| wide-candidate | 30 / 5，候选余弦阈值 0.2 | 0.9667 | 0.8889 | 1.0000 | 2/2 / 1/2（candidate ranks 7、1；final rank 1） | 1/2 | 0/15 | 3/3 / 3/3 | 0/18 | 554/693 ms |
+| coverage-aware | 30 / 5，候选余弦阈值 0.2 | 0.9667 | 0.8889 | 1.0000 | 2/2 / 1/2（candidate ranks 7、1；final rank 1） | 1/2 | 0/15 | 3/3 / 3/3 | 0/18 | 534/620 ms |
+
+每个策略均为 `status=complete`，每个策略发出 18 次 Embedding 请求，失败 0、重试 0、LLM 请求 0；Provider usage/billing 未返回，费用保持未知。宽候选两项仅相对 baseline 做描述性配对比较，未声明统计显著性。`wide-candidate` 与 `coverage-aware` 虽然消除了 15 道可回答题的空结果，但 `blog-formal-014` final 仍只覆盖一条标注证据和一个来源；三道无答案题的 candidate/final 均非空，Coverage Judge 的 `supported`/`full_query_coverage` 只是结构状态，不能被写成正确拒答或语义安全结论。Baseline 仍为保留策略。
+
+逐题报告、汇总、请求统计、代码/配置指纹和 provenance 位于 `backend/data/rag/reports/2026-09-28/public-blog/dev/task3-ablation-20260928/`：根目录 `comparison.json`，以及各策略的 `report.json`、`question_results.json`、`summary.json`、`provenance.json`。目录权限为 `700`，文件权限为 `600`。任务 3 离线准入**未通过**：没有策略满足 `014` final 2/2 证据与来源覆盖，宽候选策略还引入无答案非空风险；因此不进入任务 4，不执行答案审计或 `test` 评估。
 
 ## 5. 准入结论与下一步
 当前结论：**已达到 Benchmark 工程实现的启动条件，但 RAG 产品质量验收仍未通过。** 现有题集、隔离快照、指标、逐题结果和失败记录足以支持建立可追溯的 Benchmark 工具；这不代表 `blog-formal-014` 的最终证据缺失或无答案语义风险已经关闭，也不构成上线许可。引用越界和 front matter 伪支撑已关闭；`blog-formal-014` 最终证据仅覆盖 1/2，以及三个无答案题缺少语义验证，继续作为固定风险样例跟踪。
