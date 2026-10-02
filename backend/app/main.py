@@ -21,12 +21,12 @@ from app.tools.search_knowledge import SearchKnowledge
 from app.llm.compatible_client import OpenAICompatibleClient
 from app.knowledge.embeddings import EmbeddingClient
 from app.knowledge.repository import KnowledgeRepository
-from app.knowledge.service import CitationSnapshot, KnowledgeAnswer, KnowledgePipeline, KnowledgeService
-from app.knowledge.answerability import AnswerabilityConfig, CoverageAnswerabilityJudge
-from app.knowledge.candidate_retrieval import RepositoryCandidateRetriever
-from app.knowledge.evidence_selection import CoverageAwareEvidenceSelector
-from app.knowledge.query_planning import LLMQueryPlanner, QueryPlannerConfig, SafeQueryPlanner
-from app.knowledge.reranking import CompatibleReranker, NoopReranker
+from app.knowledge.service import CitationSnapshot, KnowledgeAnswer, KnowledgeService
+from app.knowledge.pipeline_factory import (
+    build_knowledge_service,
+    runtime_config_from_settings,
+)
+from app.knowledge.reranking import NoopReranker
 from app.api.writing import router as writing_router
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingService
@@ -91,59 +91,8 @@ def create_knowledge_service(
     repository: KnowledgeRepository,
     config: Settings | None = None,
 ) -> KnowledgeService:
-    config = config or settings
-    embedding_client = create_embedding_client(config)
-    pipeline = None
-    if config.knowledge_pipeline_enabled:
-        planner = LLMQueryPlanner(
-            QueryPlannerConfig(
-                enabled=config.knowledge_query_planning_enabled,
-                max_queries=config.knowledge_query_planning_max_queries,
-                max_query_chars=config.knowledge_query_planning_max_query_chars,
-            )
-        ) if config.knowledge_query_planning_enabled else SafeQueryPlanner()
-        candidate_retriever = RepositoryCandidateRetriever(
-            repository,
-            query_embedder=embedding_client.embed if embedding_client is not None else None,
-            embedding_model=config.embedding_model,
-            embedding_dimensions=config.embedding_dimensions,
-            candidate_min_vector_similarity=config.knowledge_candidate_min_vector_similarity,
-        )
-        if config.knowledge_rerank_enabled:
-            if not config.knowledge_rerank_api_key.strip():
-                raise ValueError("knowledge rerank API key is required when rerank is enabled")
-            reranker = CompatibleReranker(
-                api_key=config.knowledge_rerank_api_key,
-                base_url=config.knowledge_rerank_base_url,
-                model=config.knowledge_rerank_model,
-                timeout_seconds=config.knowledge_rerank_timeout_seconds,
-            )
-        else:
-            reranker = NoopReranker()
-        pipeline = KnowledgePipeline(
-            planner=planner,
-            candidate_retriever=candidate_retriever,
-            reranker=reranker,
-            selector=CoverageAwareEvidenceSelector(),
-            judge=CoverageAnswerabilityJudge(),
-            answerability_config=AnswerabilityConfig(
-                min_supported_coverage=config.knowledge_answerability_min_supported_coverage,
-                min_partial_coverage=config.knowledge_answerability_min_partial_coverage,
-                min_supported_evidence=config.knowledge_answerability_min_supported_evidence,
-                multi_evidence_requires_all_queries=config.knowledge_answerability_multi_evidence_requires_all_queries,
-                allow_insufficient_llm=config.knowledge_answerability_allow_insufficient_llm,
-            ),
-        )
-    return KnowledgeService(
-        repository,
-        query_embedder=embedding_client.embed if embedding_client is not None else None,
-        embedding_model=config.embedding_model,
-        embedding_dimensions=config.embedding_dimensions,
-        min_vector_similarity=config.knowledge_min_vector_similarity,
-        pipeline=pipeline,
-        candidate_limit=config.knowledge_candidate_limit,
-        allow_insufficient_llm=config.knowledge_answerability_allow_insufficient_llm,
-    )
+    runtime_config = runtime_config_from_settings(config or settings)
+    return build_knowledge_service(repository, runtime_config)
 
 
 knowledge_service = create_knowledge_service(knowledge_repository)

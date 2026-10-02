@@ -5,7 +5,7 @@ from app.knowledge.evidence_selection import CoverageAwareEvidenceSelector
 from app.knowledge.models import SearchResult
 from app.knowledge.pipeline_models import CandidateEvidence, EvidenceSelection
 from app.knowledge.pipeline_models import QueryPlan, RetrievalQuery
-from app.knowledge.query_planning import SafeQueryPlanner
+from app.knowledge.query_planning import QueryPlannerConfig, SafeQueryPlanner
 from app.knowledge.reranking import NoopReranker, RerankerError
 from app.knowledge.service import KnowledgePipeline
 
@@ -68,6 +68,44 @@ class TwoQueryPlanner:
             ),
             is_multi_evidence=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_safe_structural_facets_to_keep_both_documents():
+    candidates = [
+        evidence("qkv-span", "doc-qkv", ("q1", "q2"), retrieval_ranks=(1, 1)),
+        evidence(
+            "attention-span",
+            "doc-attention",
+            ("q1", "q3"),
+            retrieval_ranks=(7, 1),
+        ),
+    ]
+    pipeline = KnowledgePipeline(
+        planner=SafeQueryPlanner(
+            QueryPlannerConfig(structural_fallback_enabled=True)
+        ),
+        candidate_retriever=FakeCandidateRetriever(candidates),
+        reranker=NoopReranker(),
+        selector=CoverageAwareEvidenceSelector(),
+        judge=CoverageAnswerabilityJudge(),
+        answerability_config=AnswerabilityConfig(),
+    )
+
+    result = await pipeline.run(
+        "Q、K、V 的职责分化如何帮助理解多头注意力中多个独立子空间的作用？",
+        mode="keyword",
+        candidate_limit=30,
+        final_limit=5,
+    )
+
+    assert result.plan.is_multi_evidence is True
+    assert [query.query_id for query in result.plan.queries] == ["q1", "q2", "q3"]
+    assert {
+        item.result.document_id for item in result.selection.selected
+    } == {"doc-qkv", "doc-attention"}
+    assert result.selection.covered_query_ids == ("q1", "q2", "q3")
+    assert result.decision.status == "supported"
 
 
 class TraceCollector:

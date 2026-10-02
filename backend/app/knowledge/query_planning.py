@@ -21,6 +21,7 @@ class QueryPlannerConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
+    structural_fallback_enabled: bool = False
     max_queries: int = Field(default=4, ge=1, le=4)
     max_query_chars: int = Field(default=300, ge=1, le=300)
 
@@ -36,6 +37,7 @@ _COMPLEX_QUERY_SIGNALS: tuple[str, ...] = (
     "比较",
     "关系",
     "如何理解",
+    "如何帮助理解",
     "以及",
 )
 
@@ -70,12 +72,78 @@ def _single_query_plan(query: str) -> QueryPlan:
     )
 
 
+def _facet_label(text: str) -> str:
+    text = text.strip(" ，,：:；;。！？?!")
+    for suffix in ("的职责分化", "的职责", "的作用", "的功能"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            break
+    for separator in ("中多个", "中的", "的", "中", "里"):
+        label, _, _ = text.partition(separator)
+        if label.strip():
+            return label.strip().replace("、", "/")
+    return text
+
+
+def _structural_fallback_plan(
+    query: str,
+    *,
+    max_queries: int,
+    max_query_chars: int,
+) -> QueryPlan:
+    """Build a bounded, local fallback for an explicitly structured relation.
+
+    This is intentionally narrower than ``is_complex_query``.  It only splits
+    a question when the wording itself provides a clear two-sided relation;
+    otherwise the original query remains the sole retrieval query.  No model,
+    document identifier, or answer content is involved.
+    """
+
+    boundary = "如何帮助理解"
+    if boundary not in query or max_queries < 3:
+        return _single_query_plan(query)
+
+    left, right = query.split(boundary, 1)
+    left = left.strip(" ，,：:；;。！？?!")
+    right = right.strip(" ，,：:；;。！？?!")
+    if (
+        not left
+        or not right
+        or len(left) > max_query_chars
+        or len(right) > max_query_chars
+    ):
+        return _single_query_plan(query)
+
+    return QueryPlan(
+        original_query=query,
+        queries=(
+            _original_query(query),
+            RetrievalQuery(query_id="q2", text=left, facet=_facet_label(left)),
+            RetrievalQuery(query_id="q3", text=right, facet=_facet_label(right)),
+        ),
+        is_multi_evidence=True,
+    )
+
+
+def _fallback_plan(query: str, config: QueryPlannerConfig) -> QueryPlan:
+    if config.structural_fallback_enabled:
+        return _structural_fallback_plan(
+            query,
+            max_queries=config.max_queries,
+            max_query_chars=config.max_query_chars,
+        )
+    return _single_query_plan(query)
+
+
 class SafeQueryPlanner:
-    """Return only the original user query and never performs model I/O."""
+    """Plan locally without model I/O, with an opt-in structural fallback."""
+
+    def __init__(self, config: QueryPlannerConfig | None = None):
+        self.config = config or QueryPlannerConfig()
 
     async def plan(self, query: str, *, llm_client: LLMClient | None = None) -> QueryPlan:
         normalized_query = _validate_query(query)
-        return _single_query_plan(normalized_query)
+        return _fallback_plan(normalized_query, self.config)
 
 
 class LLMQueryPlanner:
@@ -87,7 +155,7 @@ class LLMQueryPlanner:
     async def plan(self, query: str, *, llm_client: LLMClient | None = None) -> QueryPlan:
         normalized_query = _validate_query(query)
         original = _original_query(normalized_query)
-        if not self.config.enabled or llm_client is None or not is_complex_query(normalized_query):
+        if not self.config.enabled or not is_complex_query(normalized_query):
             if isinstance(llm_client, RecordingLLMClient) and llm_client.observer is not None:
                 reason = (
                     "planner_disabled"
@@ -103,6 +171,9 @@ class LLMQueryPlanner:
                 )
             return _single_query_plan(normalized_query)
 
+        if llm_client is None:
+            return _fallback_plan(normalized_query, self.config)
+
         try:
             with llm_prompt_scope("query_planner", QUERY_PLANNER_PROMPT):
                 response = await llm_client.complete(
@@ -116,7 +187,7 @@ class LLMQueryPlanner:
         except LLMObservationError:
             raise
         except Exception:
-            return _single_query_plan(normalized_query)
+            return _fallback_plan(normalized_query, self.config)
 
         queries = (original, *generated)
         return QueryPlan(

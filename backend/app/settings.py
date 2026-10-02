@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: float = 60.0
     knowledge_min_vector_similarity: float = 0.5
     knowledge_query_planning_enabled: bool = False
+    knowledge_query_planning_structural_fallback_enabled: bool = False
     knowledge_query_planning_max_queries: int = 4
     knowledge_query_planning_max_query_chars: int = 300
     knowledge_candidate_limit: int = 30
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     knowledge_answerability_multi_evidence_requires_all_queries: bool = True
     knowledge_answerability_allow_insufficient_llm: bool = False
     knowledge_rerank_enabled: bool = False
+    knowledge_rerank_provider: str = "compatible"
     knowledge_rerank_api_key: str = ""
     knowledge_rerank_base_url: str = ""
     knowledge_rerank_model: str = ""

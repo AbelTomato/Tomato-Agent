@@ -86,40 +86,106 @@ class CompatibleReranker:
             response_payload = response.json()
         except ValueError as exc:
             raise RerankerError("rerank provider returned invalid JSON") from exc
-        return self._rank_from_response(response_payload, candidates)
+        return _rank_from_response(response_payload, candidates, score_key="score")
 
-    def _rank_from_response(
+
+class DashScopeReranker:
+    def __init__(
         self,
-        payload: object,
-        candidates: Sequence[CandidateEvidence],
-    ) -> list[CandidateEvidence]:
-        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-            raise RerankerError("rerank provider returned an invalid response object")
-        raw_results = payload["results"]
-        if len(raw_results) != len(candidates):
-            raise RerankerError("rerank provider response has an invalid result count")
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if not model.strip():
+            raise ValueError("rerank model cannot be empty")
+        if timeout_seconds <= 0:
+            raise ValueError("rerank timeout_seconds must be greater than zero")
+        if not base_url.strip():
+            raise ValueError("rerank base_url cannot be empty")
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = httpx.Timeout(timeout_seconds)
+        self.transport = transport
 
-        ranked: list[tuple[int, float, CandidateEvidence]] = []
-        seen: set[int] = set()
-        for item in raw_results:
-            if not isinstance(item, dict):
-                raise RerankerError("rerank provider returned an invalid response entry")
-            index = item.get("index")
-            score = item.get("score")
-            if (
-                isinstance(index, bool)
-                or not isinstance(index, int)
-                or not 0 <= index < len(candidates)
-                or index in seen
-                or isinstance(score, bool)
-                or not isinstance(score, (int, float))
-                or not math.isfinite(float(score))
-                or float(score) < 0
-            ):
-                raise RerankerError("rerank provider returned an invalid response entry")
-            seen.add(index)
-            ranked.append((index, float(score), candidates[index].model_copy(update={"rerank_score": float(score)})))
-        if seen != set(range(len(candidates))):
-            raise RerankerError("rerank provider response has incomplete indices")
-        ranked.sort(key=lambda item: (-item[1], item[0]))
-        return [item[2] for item in ranked]
+    async def rank(
+        self, query: str, candidates: Sequence[CandidateEvidence]
+    ) -> list[CandidateEvidence]:
+        if not query.strip():
+            raise ValueError("rerank query cannot be empty")
+        if not candidates:
+            return []
+        payload = {
+            "model": self.model,
+            "input": {
+                "query": query,
+                "documents": [candidate.result.text for candidate in candidates],
+            },
+            "parameters": {"top_n": len(candidates), "return_documents": True},
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/services/rerank/text-rerank/text-rerank",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+        except Exception as exc:
+            raise RerankerError("rerank provider request failed") from exc
+        if response.is_error:
+            raise RerankerError(f"rerank provider request failed: HTTP {response.status_code}")
+        try:
+            response_payload = response.json()
+        except ValueError as exc:
+            raise RerankerError("rerank provider returned invalid JSON") from exc
+        return _rank_from_response(response_payload, candidates, score_key="relevance_score")
+
+
+def _rank_from_response(
+    payload: object,
+    candidates: Sequence[CandidateEvidence],
+    *,
+    score_key: str,
+) -> list[CandidateEvidence]:
+    if isinstance(payload, dict) and isinstance(payload.get("output"), dict):
+        payload = payload["output"]
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise RerankerError("rerank provider returned an invalid response object")
+    raw_results = payload["results"]
+    if len(raw_results) != len(candidates):
+        raise RerankerError("rerank provider response has an invalid result count")
+
+    ranked: list[tuple[int, float, CandidateEvidence]] = []
+    seen: set[int] = set()
+    for item in raw_results:
+        if not isinstance(item, dict):
+            raise RerankerError("rerank provider returned an invalid response entry")
+        index = item.get("index")
+        score = item.get(score_key)
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(candidates)
+            or index in seen
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or float(score) < 0
+        ):
+            raise RerankerError("rerank provider returned an invalid response entry")
+        seen.add(index)
+        value = float(score)
+        ranked.append((index, value, candidates[index].model_copy(update={"rerank_score": value})))
+    if seen != set(range(len(candidates))):
+        raise RerankerError("rerank provider response has incomplete indices")
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return [item[2] for item in ranked]

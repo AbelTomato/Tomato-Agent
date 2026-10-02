@@ -8,6 +8,7 @@ from app.knowledge.models import SearchResult
 from app.knowledge.pipeline_models import CandidateEvidence
 from app.knowledge.reranking import (
     CompatibleReranker,
+    DashScopeReranker,
     NoopReranker,
     RerankerError,
 )
@@ -86,6 +87,45 @@ async def test_compatible_reranker_can_promote_seventh_candidate_and_sorts_stabl
         "candidates": [
             {"index": index, "text": f"候选正文 {index}"} for index in range(7)
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashscope_reranker_uses_native_request_and_maps_relevance_scores():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "results": [
+                        {"index": 1, "relevance_score": 0.8},
+                        {"index": 0, "relevance_score": 0.2},
+                    ]
+                }
+            },
+            request=request,
+        )
+
+    reranker = DashScopeReranker(
+        api_key="test-key",
+        base_url="https://maas.qianwenaiapi.com",
+        model="qwen3.7-text-rerank",
+        transport=httpx.MockTransport(handler),
+    )
+
+    ranked = await reranker.rank("原始问题", [candidate("0"), candidate("1")])
+
+    assert [item.result.chunk_id for item in ranked] == ["1", "0"]
+    assert [item.rerank_score for item in ranked] == [0.8, 0.2]
+    assert captured["path"] == "/api/v1/services/rerank/text-rerank/text-rerank"
+    assert captured["payload"] == {
+        "model": "qwen3.7-text-rerank",
+        "input": {"query": "原始问题", "documents": ["候选正文 0", "候选正文 1"]},
+        "parameters": {"top_n": 2, "return_documents": True},
     }
 
 

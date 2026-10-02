@@ -47,6 +47,53 @@ async def test_safe_query_planner_rejects_empty_query():
 
 
 @pytest.mark.asyncio
+async def test_safe_query_planner_preserves_two_structural_facets_without_model_io():
+    query = "Q、K、V 的职责分化如何帮助理解多头注意力中多个独立子空间的作用？"
+
+    plan = await SafeQueryPlanner(
+        QueryPlannerConfig(structural_fallback_enabled=True)
+    ).plan(query)
+
+    assert plan.original_query == query
+    assert [(item.query_id, item.facet) for item in plan.queries] == [
+        ("q1", "original"),
+        ("q2", "Q/K/V"),
+        ("q3", "多头注意力"),
+    ]
+    assert [item.text for item in plan.queries] == [
+        query,
+        "Q、K、V 的职责分化",
+        "多头注意力中多个独立子空间的作用",
+    ]
+    assert plan.is_multi_evidence is True
+
+
+@pytest.mark.asyncio
+async def test_safe_query_planner_does_not_split_unstructured_question():
+    plan = await SafeQueryPlanner().plan("如何理解缓存淘汰策略？")
+
+    assert plan.queries[0].text == "如何理解缓存淘汰策略？"
+    assert plan.is_multi_evidence is False
+
+
+@pytest.mark.asyncio
+async def test_conditional_planner_uses_local_structural_fallback_without_model_call():
+    query = "Q、K、V 的职责分化如何帮助理解多头注意力中多个独立子空间的作用？"
+
+    plan = await LLMQueryPlanner(
+        QueryPlannerConfig(enabled=True, structural_fallback_enabled=True)
+    ).plan(query, llm_client=None)
+
+    assert plan.original_query == query
+    assert [(item.query_id, item.facet) for item in plan.queries] == [
+        ("q1", "original"),
+        ("q2", "Q/K/V"),
+        ("q3", "多头注意力"),
+    ]
+    assert plan.is_multi_evidence is True
+
+
+@pytest.mark.asyncio
 async def test_llm_query_planner_preserves_original_and_adds_stable_subqueries():
     llm = FakeLLM(
         json.dumps(
