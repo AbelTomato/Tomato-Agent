@@ -294,6 +294,7 @@ class KnowledgePipeline:
         candidate_limit: int,
         final_limit: int,
         llm_client: LLMClient | None = None,
+        answerability_override: str | None = None,
     ) -> PipelineResult:
         planner_started = perf_counter()
         try:
@@ -394,6 +395,13 @@ class KnowledgePipeline:
             )
             raise
         judge_latency_ms = (perf_counter() - judge_started) * 1000
+        if answerability_override is not None:
+            decision = decision.model_copy(
+                update={
+                    "status": "insufficient",
+                    "reason": answerability_override,
+                }
+            )
         self._emit(
             "answerability.completed",
             status="success",
@@ -721,6 +729,7 @@ class KnowledgeService:
         limit: int = 5,
         llm_client: LLMClient | None,
         retrieval_query: str | None = None,
+        answerability_override: str | None = None,
     ) -> GeneratedKnowledgeAnswer | KnowledgeAnswer:
         retrieval_input = retrieval_query or query
         if self.pipeline is None:
@@ -732,6 +741,7 @@ class KnowledgeService:
                 candidate_limit=self.candidate_limit,
                 final_limit=limit,
                 llm_client=llm_client,
+                answerability_override=answerability_override,
             )
             retrieved = KnowledgeAnswer(
                 answer="",

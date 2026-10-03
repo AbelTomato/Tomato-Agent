@@ -145,6 +145,9 @@ class RecordingReranker:
         except Exception as exc:
             duration_ms = (perf_counter() - started) * 1000
             try:
+                diagnostics = getattr(exc, "diagnostics", {})
+                if not isinstance(diagnostics, dict):
+                    diagnostics = {}
                 self._emit(
                     "reranker.response",
                     status="failed",
@@ -156,6 +159,7 @@ class RecordingReranker:
                         "candidate_count": len(candidates),
                         "call_state": "failed",
                         "error_code": _error_code(exc),
+                        "diagnostics": diagnostics,
                     },
                     duration_ms=duration_ms,
                 )

@@ -57,6 +57,19 @@ def test_selector_prefers_uncovered_query_over_duplicate_same_document_candidate
     assert selection.covered_query_ids == ("q1", "q2")
 
 
+def test_selector_does_not_treat_same_document_as_duplicate_evidence():
+    candidates = [
+        candidate("top", "doc-a", ("q1",), 1),
+        candidate("gold-later", "doc-a", ("q1",), 2),
+        candidate("other", "doc-b", ("q1",), 3),
+    ]
+
+    selection = CoverageAwareEvidenceSelector().select(plan("q1"), candidates, final_limit=2)
+
+    assert [item.result.chunk_id for item in selection.selected] == ["top", "gold-later"]
+    assert selection.covered_document_ids == ("doc-a",)
+
+
 def test_selector_uses_relevance_order_for_simple_query():
     candidates = [
         candidate("second", "doc", ("q1",), 2),

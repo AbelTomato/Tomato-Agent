@@ -315,6 +315,35 @@ def test_answer_runner_records_answer_context_metrics_and_private_artifacts():
         assert "invalid_test_payload" not in all_artifact_text
 
 
+
+def test_answer_runner_enforces_unanswerable_question_gate_before_answerer():
+    from app.knowledge.answer_evaluation import run_answer_evaluation
+
+    with private_database_root() as database_directory, private_reports_root() as report_directory:
+        dataset, database, _ = create_inputs(
+            Path(database_directory), questions=[("dev-unanswerable", "SETEX 过期时间")]
+        )
+        record = json.loads(dataset.read_text(encoding="utf-8").splitlines()[0])
+        record["answerable"] = False
+        record["relevant_spans"] = []
+        dataset.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+        fake = FakeLLM([answer_response()])
+        args = make_args(dataset, database, Path(report_directory))
+
+        result = asyncio.run(run_answer_evaluation(args, llm_client=fake, run_id=RUN_ID))
+
+        assert result.exit_code == 0
+        assert fake.calls == []
+        question = result.report["question_results"][0]
+        assert question["answerable"] is False
+        assert question["evidence_status"] == "insufficient"
+        assert question["judge_reason"] == "unanswerable_question"
+        assert question["llm_called"] is False
+        assert question["answer"] is not None
+        assert question["answer"]["evidence_status"] == "insufficient"
+        assert question["answer"]["generated"] is False
+
+
 def test_answer_runner_records_non_llm_path_as_not_called_for_no_results():
     from app.knowledge.answer_evaluation import run_answer_evaluation
 

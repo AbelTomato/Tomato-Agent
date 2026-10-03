@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -9,8 +10,50 @@ import httpx
 from app.knowledge.pipeline_models import CandidateEvidence
 
 
+_DIAGNOSTIC_MAX_CHARS = 300
+_SENSITIVE_TEXT_RE = re.compile(
+    r"(?i)(authorization\s*[:=]\s*bearer\s+[^\s,;]+|api[_ -]?key\s*[:=]\s*[^\s,;]+|bearer\s+[^\s,;]+)"
+)
+
+
+def _safe_diagnostic_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = _SENSITIVE_TEXT_RE.sub("[REDACTED]", value).strip()
+    return text[:_DIAGNOSTIC_MAX_CHARS] or None
+
+
 class RerankerError(RuntimeError):
     """Raised when the rerank provider cannot return a valid ranking."""
+
+    def __init__(self, message: str, *, diagnostics: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+def _http_diagnostics(response: httpx.Response) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        "error_type": "http_error",
+        "http_status": response.status_code,
+    }
+    request_id = response.headers.get("x-request-id") or response.headers.get("x-dashscope-request-id")
+    if request_id:
+        diagnostics["provider_request_id"] = _safe_diagnostic_text(request_id)
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        for source_key, target_key in (("code", "provider_code"), ("error_code", "provider_code"), ("message", "provider_message"), ("error", "provider_message")):
+            if target_key not in diagnostics and source_key in body:
+                value = _safe_diagnostic_text(body[source_key])
+                if value is not None:
+                    diagnostics[target_key] = value
+    return diagnostics
+
+
+def _transport_diagnostics(exc: Exception) -> dict[str, object]:
+    return {"error_type": "transport_error", "exception_type": type(exc).__name__}
 
 
 class Reranker(Protocol):
@@ -78,10 +121,16 @@ class CompatibleReranker:
                     json=payload,
                 )
         except Exception as exc:
-            raise RerankerError("rerank provider request failed") from exc
+            raise RerankerError(
+                "rerank provider request failed",
+                diagnostics=_transport_diagnostics(exc),
+            ) from exc
 
         if response.is_error:
-            raise RerankerError(f"rerank provider request failed: HTTP {response.status_code}")
+            raise RerankerError(
+                f"rerank provider request failed: HTTP {response.status_code}",
+                diagnostics=_http_diagnostics(response),
+            )
         try:
             response_payload = response.json()
         except ValueError as exc:
@@ -140,9 +189,15 @@ class DashScopeReranker:
                     json=payload,
                 )
         except Exception as exc:
-            raise RerankerError("rerank provider request failed") from exc
+            raise RerankerError(
+                "rerank provider request failed",
+                diagnostics=_transport_diagnostics(exc),
+            ) from exc
         if response.is_error:
-            raise RerankerError(f"rerank provider request failed: HTTP {response.status_code}")
+            raise RerankerError(
+                f"rerank provider request failed: HTTP {response.status_code}",
+                diagnostics=_http_diagnostics(response),
+            )
         try:
             response_payload = response.json()
         except ValueError as exc:

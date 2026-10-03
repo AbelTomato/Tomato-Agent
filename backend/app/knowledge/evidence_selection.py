@@ -105,17 +105,14 @@ class CoverageAwareEvidenceSelector:
         ordered = self._ordered_unique(candidates)
         selected: list[CandidateEvidence] = []
         covered_queries: set[str] = set()
-        covered_documents: set[str] = set()
 
         for candidate in ordered:
             if len(selected) >= final_limit:
                 break
             adds_query = bool(set(candidate.query_ids) - covered_queries)
-            adds_document = candidate.result.document_id not in covered_documents
-            if adds_query or (adds_document and plan.is_multi_evidence):
+            if adds_query:
                 selected.append(candidate)
                 covered_queries.update(candidate.query_ids)
-                covered_documents.add(candidate.result.document_id)
 
         for candidate in ordered:
             if len(selected) >= final_limit:
@@ -124,7 +121,6 @@ class CoverageAwareEvidenceSelector:
                 continue
             selected.append(candidate)
             covered_queries.update(candidate.query_ids)
-            covered_documents.add(candidate.result.document_id)
 
         first_candidate_indices: dict[str, int] = {}
         for candidate_index, candidate in enumerate(candidates, start=1):

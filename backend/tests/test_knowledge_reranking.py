@@ -197,6 +197,63 @@ async def test_compatible_reranker_converts_timeout_and_transport_errors():
         await reranker.rank("问题", [candidate("a")])
 
 
+@pytest.mark.asyncio
+async def test_dashscope_reranker_error_exposes_safe_http_diagnostics():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={"code": "Throttled", "message": "request rejected"},
+            headers={"x-request-id": "request-123"},
+            request=request,
+        )
+
+    reranker = DashScopeReranker(
+        api_key="secret-api-key",
+        base_url="https://rerank.example",
+        model="qwen3.7-text-rerank",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RerankerError) as error:
+        await reranker.rank("secret-query", [candidate("secret-document")])
+
+    diagnostics = error.value.diagnostics
+    assert diagnostics == {
+        "error_type": "http_error",
+        "http_status": 429,
+        "provider_request_id": "request-123",
+        "provider_code": "Throttled",
+        "provider_message": "request rejected",
+    }
+    assert "secret-api-key" not in str(error.value)
+    assert "secret-query" not in str(error.value)
+    assert "secret-document" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_dashscope_reranker_transport_diagnostics_expose_type_without_secrets():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("secret-transport-detail", request=request)
+
+    reranker = DashScopeReranker(
+        api_key="secret-api-key",
+        base_url="https://rerank.example",
+        model="rerank-model",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RerankerError) as error:
+        await reranker.rank("secret-query", [candidate("secret-document")])
+
+    assert error.value.diagnostics == {
+        "error_type": "transport_error",
+        "exception_type": "ReadTimeout",
+    }
+    assert "secret-api-key" not in str(error.value)
+    assert "secret-query" not in str(error.value)
+    assert "secret-document" not in str(error.value)
+
+
 def test_reranker_settings_have_safe_disabled_defaults_and_validate_limits():
     settings = Settings()
 

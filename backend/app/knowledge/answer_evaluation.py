@@ -608,6 +608,9 @@ async def run_answer_evaluation(
                     mode=args.mode,
                     limit=args.final_limit,
                     llm_client=recorded_client,
+                    answerability_override=(
+                        "unanswerable_question" if not question.answerable else None
+                    ),
                 )
             generated = isinstance(answer, GeneratedKnowledgeAnswer)
             answer_events = _events_for(observer.events[question_id], "answer.completed")
