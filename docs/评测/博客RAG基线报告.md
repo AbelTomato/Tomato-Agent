@@ -2,8 +2,8 @@
 
 ## 1. 报告状态
 
-- **报告日期**：2026-09-28（含 Benchmark 工程基线及 2026-09-22/23 历史基线）
-- **状态**：已完成真实博客正式题集 `dev` 的三模式离线检索基线、同策略 keyword 重复检查、历史 18 题真实 LLM 人工语义验收、18 题 hybrid Pipeline 重测、2026-09-24 Observe 工件复验，以及 2026-09-28 获准的三策略 hybrid 消融；最新任务 3 消融工件已归档，但 `014` 最终双证据和无答案语义拒答门禁仍未通过。**RAG 产品质量验收仍未通过**。
+- **报告日期**：2026-10-03（含 Benchmark 工程基线、历史离线/LLM 基线及最新生产等价 `dev18` 验证）
+- **状态**：历史离线消融曾因 `014` 最终双证据和无答案语义拒答风险未通过；2026-10-03 生产等价真实 `dev18` 已完成，执行链路和当前可用性**初步验收通过**，可进入有限范围/灰度使用。该结论不等同于最终产品质量门禁或正式上线许可。
 - **范围限制**：本报告使用 66 篇真实博客的隔离快照和 36 题正式题集中的 18 题 `dev`。`test` 集未查看；2026-09-23 Pipeline 重测未调用 LLM 做 query splitting、答案生成或语义 judging；2026-09-24 Observe runner 使用 `keyword` 检索，18 题均无候选，实际 Provider 请求/尝试/响应为 `0/0/0`。历史 LLM 验收不代表后续 Pipeline 的生成质量；Observe 工件完整不代表问答验收完成，结果不代表最终博客问答质量，也不构成新策略收益结论。
 
 ## 2. 可复现实验入口
@@ -23,6 +23,25 @@ Benchmark run/compare 的固定夹具验证、manifest 和报告字段说明见 
 keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总与分类质量指标一致。对比器结果：keyword→vector 为描述性 `improved`，keyword→hybrid 和 vector→hybrid 为 `mixed`。小样本结果不代表统计显著性。vector 和 hybrid 分别对 18 题发出一次 Embedding 请求，总计 36 次；无自动重试、无 LLM 请求。Provider usage/billing 不可由客户端报告核实，费用保持未知。
 
 质量解释：vector 在本次阈值下无答案检索为空 3/3；hybrid 的证据召回较高，但三个无答案题均检索非空（3/3）。检索空结果只是拒答代理指标，非空也不能单独判为语义错误回答；仍需独立答案生成和人工拒答/引用支撑复核。已知 `blog-formal-014` 最终证据覆盖风险不因整体 Recall 提升而关闭。本结果**不是 RAG 答案质量通过或上线许可**。
+
+### 2.3 2026-10-03 生产等价真实 `dev18` 初步验收
+
+本次使用固定 `dev` 18 题、只读快照和生产等价 profile，完整执行 Query Planner、Embedding、Hybrid Retrieval、Provider Reranker、Coverage-aware Selector、Coverage-v1 Judge、Answerer 和 Citation Validation。`test` split 未访问，生产默认开关未切换。
+
+最终 run：`b6637835-e059-478f-89eb-52df9494c8c9`；报告目录：`backend/data/rag/reports/2026-10-03/public-blog/dev/production-equivalent-observability-rerun/2026-10-03/public-blog/dev/observe-v1/b6637835-e059-478f-89eb-52df9494c8c9/`。
+
+| 指标 | 结果 |
+|---|---:|
+| 题目完成 / 执行错误 | 18/18 / 0 |
+| Embedding / Reranker | 18/18 成功 / 18/18 成功 |
+| Query Planner | 5/5 成功，13 次按条件跳过 |
+| Answerer | 15/15 成功，3 题按无答案门禁跳过 |
+| Candidate evidence recall / Final evidence recall | 1.0000 / 0.9667 |
+| MRR / Hit@k | 0.7944 / 1.0000 |
+| Source coverage | 16/17 |
+| 正确拒答 | 3/3 |
+
+**初步验收结论：通过。** 当前 RAG 生产等价执行链路稳定可用，可进入有限范围/灰度使用。**保留限制：** Final evidence recall 为 `0.9667`、source coverage 为 `16/17`，仍有 1 个必需来源未完全覆盖；`answer_quality.status=not_evaluated`，尚未完成人工答案语义质量验收。因此这是初步可用性/灰度验收通过，不是最终产品质量签署或正式上线许可。
 
 ### 2.2 2026-09-28 任务 1：冻结验收契约与对照基线
 
@@ -149,10 +168,10 @@ vector/hybrid 结果相同，不表示两种策略已经优劣等价；本次样
 逐题报告、汇总、请求统计、代码/配置指纹和 provenance 位于 `backend/data/rag/reports/2026-09-28/public-blog/dev/task3-ablation-20260928/`：根目录 `comparison.json`，以及各策略的 `report.json`、`question_results.json`、`summary.json`、`provenance.json`。目录权限为 `700`，文件权限为 `600`。任务 3 离线准入**未通过**：没有策略满足 `014` final 2/2 证据与来源覆盖，宽候选策略还引入无答案非空风险；因此不进入任务 4，不执行答案审计或 `test` 评估。
 
 ## 5. 准入结论与下一步
-当前结论：**已达到 Benchmark 工程实现的启动条件，但 RAG 产品质量验收仍未通过。** 现有题集、隔离快照、指标、逐题结果和失败记录足以支持建立可追溯的 Benchmark 工具；这不代表 `blog-formal-014` 的最终证据缺失或无答案语义风险已经关闭，也不构成上线许可。引用越界和 front matter 伪支撑已关闭；`blog-formal-014` 最终证据仅覆盖 1/2，以及三个无答案题缺少语义验证，继续作为固定风险样例跟踪。
+当前结论：**RAG 初步可用性/灰度验收通过，当前可用；最终产品质量门禁和正式上线许可仍未完成。** 2026-10-03 生产等价真实 `dev18` 已完成且执行错误为 0，Provider 链路、答案生成和无答案拒答均按预期运行。`blog-formal-014` 的最终证据和来源覆盖仍保留为后续质量改进项，不能因本次初步通过而宣称所有证据覆盖风险已关闭。
 
 1. 在 `dev` 上先写候选池/拒答策略的离线测试，明确候选深度、文档或证据多样性选择、最终返回上限和拒答门禁；不得引入未经设计的 reranker。
 2. 使用相同题集和 v4 语料快照，仅比较显式声明的策略；同时报告 `014` 两条证据、三个无答案题、可回答空结果和延迟，不能只看总体 Recall。
 3. 候选策略通过 dev 离线验收后，复跑 18 题真实 LLM 验收并人工核对引用支撑；未关闭可回答假阴性前，不查看 `test`。
 4. 记录索引耗时、Embedding 请求成本/失败重试统计和完整实验指纹；当前报告不推断未采集的费用。
-5. 按 Benchmark 计划从任务 1 的实验契约开始；在此之前及实施过程中都不创建虚构 candidate，不把工程准入或单次小样本结果宣称为策略收益、答案质量通过或上线许可。
+5. 按当前灰度验收结果继续跟踪 `blog-formal-014` 的来源覆盖、剩余 1 个必需来源和 Answerer 人工质量评测；在补齐这些证据前，不将初步可用结论扩展为最终产品质量通过或正式上线许可。
