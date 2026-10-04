@@ -1,130 +1,77 @@
-from contextlib import asynccontextmanager
-from pathlib import Path
-from uuid import UUID, uuid4
+"""Compatibility entrypoint for ``uvicorn app.main:app`` and legacy imports."""
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from types import SimpleNamespace
 
 from app.agent.context import ContextManager
 from app.agent.interfaces import LLMClient
 from app.agent.runtime import AgentRuntime
-from app.agent.models import Message, ToolDefinition, LLMResponse
-from app.settings import Settings, settings
-from app.sessions.repository import SessionRepository
-from app.tools.calculator import Calculator
-from app.tools.read_docs import ReadDocs
-from app.tools.read_knowledge import ReadKnowledge
-from app.tools.registry import ToolRegistry
-from app.tools.search import Search
-from app.tools.search_knowledge import SearchKnowledge
-from app.llm.compatible_client import OpenAICompatibleClient
+from app.application import create_app
+from app.dependencies import (
+    create_embedding_client,
+    create_knowledge_service,
+    create_llm_client,
+    create_runtime,
+)
 from app.knowledge.embeddings import EmbeddingClient
+from app.knowledge.pipeline_factory import runtime_config_from_settings
+from app.knowledge.reranking import NoopReranker
 from app.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import CitationSnapshot, KnowledgeAnswer, KnowledgeService
-from app.knowledge.pipeline_factory import (
-    build_knowledge_service,
-    runtime_config_from_settings,
-)
-from app.knowledge.reranking import NoopReranker
-from app.api.writing import router as writing_router
-from app.writing.repository import WritingRepository
-from app.writing.service import WritingService
+from app.sessions.repository import SessionRepository
+from app.settings import Settings, settings
+from app.tools.registry import ToolRegistry
 from app.writing.execution_models import ExecutionConfig
 from app.writing.execution_repository import WritingExecutionRepository
 from app.writing.executor import WritingTaskExecutor
-from app.writing.outline import OutlineGenerator
-from app.writing.research import WritingResearcher
-
-repo = SessionRepository(settings.database_path)
-knowledge_repository = KnowledgeRepository(settings.database_path)
-writing_repository = WritingRepository(settings.database_path)
-registry = ToolRegistry(
-    [
-        Calculator(),
-        Search(),
-        ReadDocs(Path(settings.docs_root)),
-        SearchKnowledge(knowledge_repository, max_result_chars=settings.max_tool_result_chars),
-        ReadKnowledge(knowledge_repository, max_result_chars=settings.max_tool_result_chars),
-    ]
+from app.writing.repository import WritingRepository
+from app.writing.service import WritingService
+from fastapi import FastAPI
+from app.api.knowledge import (
+    KnowledgeRunRequest,
+    create_knowledge_run as knowledge_run_route,
+    get_knowledge_document as knowledge_document_route,
+    knowledge_capabilities as knowledge_capabilities_route,
 )
-
-
-class UnconfiguredLLM:
-    async def complete(self, messages: list[Message], tools: list[ToolDefinition]) -> LLMResponse:
-        raise RuntimeError("No LLMClient has been configured")
-
-
-def create_llm_client() -> LLMClient:
-    if not settings.llm_api_key:
-        return UnconfiguredLLM()
-
-    return OpenAICompatibleClient(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds
-    )
-
-
-llm_client: LLMClient = create_llm_client()
-
-
-def create_embedding_client(config: Settings | None = None) -> EmbeddingClient | None:
-    config = config or settings
-    if (
-        not config.embedding_api_key.strip()
-        or not config.embedding_model.strip()
-        or config.embedding_dimensions <= 0
-    ):
-        return None
-    return EmbeddingClient(
-        api_key=config.embedding_api_key,
-        base_url=config.embedding_base_url,
-        model=config.embedding_model,
-        dimensions=config.embedding_dimensions,
-        timeout_seconds=config.embedding_timeout_seconds,
-    )
-
-
-def create_knowledge_service(
-    repository: KnowledgeRepository,
-    config: Settings | None = None,
-) -> KnowledgeService:
-    runtime_config = runtime_config_from_settings(config or settings)
-    return build_knowledge_service(repository, runtime_config)
-
-
-knowledge_service = create_knowledge_service(knowledge_repository)
-writing_service = WritingService(writing_repository, draft_directory=settings.draft_directory)
-writing_execution_repository = WritingExecutionRepository(settings.database_path)
-writing_research_service = KnowledgeService(
-    knowledge_repository,
-    query_embedder=knowledge_service.query_embedder,
-    embedding_model=knowledge_service.embedding_model,
-    embedding_dimensions=knowledge_service.embedding_dimensions,
-    min_vector_similarity=knowledge_service.min_vector_similarity,
-    pipeline=None,
-    candidate_limit=knowledge_service.candidate_limit,
+from app.api.sessions import (
+    CreateSessionRequest,
+    RunRequest,
+    create_run as create_run_route,
+    create_session as create_session_route,
+    list_messages as list_messages_route,
 )
-writing_executor = WritingTaskExecutor(
-    writing_service,
-    writing_execution_repository,
-    WritingResearcher(writing_research_service),
-    OutlineGenerator(llm_client),
-    config=ExecutionConfig(
-        retrieval_mode=settings.writing_retrieval_mode,
-        max_evidence=settings.writing_max_evidence,
-        max_context_tokens=settings.writing_max_context_tokens,
-        max_response_chars=settings.writing_max_response_chars,
-        timeout_seconds=settings.writing_timeout_seconds,
-    ),
-    model_id=settings.llm_model if settings.llm_api_key.strip() else "",
-)
+from app.api.writing import router as writing_router
 
 
-def create_runtime() -> AgentRuntime:
-    return AgentRuntime(
+app = create_app()
+
+# Temporary compatibility exports for callers/tests that used the former
+# module-level objects. Application routes read dependencies from app.state.
+repo = app.state.session_repository
+knowledge_repository = app.state.knowledge_repository
+writing_repository = app.state.writing_repository
+writing_execution_repository = app.state.writing_execution_repository
+registry = app.state.tool_registry
+llm_client: LLMClient = app.state.llm_client
+knowledge_service = app.state.knowledge_service
+writing_service = app.state.writing_service
+writing_executor = app.state.writing_executor
+
+
+async def tools():
+    return {"tools": [item.model_dump() for item in registry.definitions()]}
+
+
+async def health():
+    return {"status": "ok", "runtime": "runtime-implemented"}
+
+
+async def create_session(request: CreateSessionRequest):
+    session_id = await repo.create_session(request.metadata)
+    return {"session_id": str(session_id)}
+
+
+async def create_run(session_id: str, request: RunRequest):
+    runtime = AgentRuntime(
         llm=llm_client,
         context_manager=ContextManager(),
         tool_registry=registry,
@@ -132,217 +79,46 @@ def create_runtime() -> AgentRuntime:
         system_instruction="You are a concise assistant.",
         config=settings.runtime_config,
     )
+    state = SimpleNamespace(runtime=runtime)
+    return await create_run_route(
+        session_id,
+        request,
+        SimpleNamespace(app=SimpleNamespace(state=state)),
+    )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await repo.init()
-    await knowledge_repository.init()
-    await writing_repository.init()
-    await writing_execution_repository.init()
-    app.state.writing_service = writing_service
-    app.state.writing_execution_repository = writing_execution_repository
-    app.state.writing_executor = writing_executor
-    yield
-
-
-app = FastAPI(title="Tomato Agent Infrastructure", lifespan=lifespan)
-app.state.writing_service = writing_service
-app.state.writing_execution_repository = writing_execution_repository
-app.state.writing_executor = writing_executor
-app.include_router(writing_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
-
-class CreateSessionRequest(BaseModel):
-    metadata: dict = Field(default_factory=dict)
-
-
-class RunRequest(BaseModel):
-    message: str
-
-
-class KnowledgeRunRequest(BaseModel):
-    message: str
-    retrieval_mode: str = "keyword"
-    limit: int = Field(default=5, ge=1, le=20)
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "runtime": "runtime-implemented"}
-
-
-@app.get("/api/tools")
-async def tools():
-    return {"tools": [item.model_dump() for item in registry.definitions()]}
-
-
-@app.get("/api/knowledge/capabilities")
 async def knowledge_capabilities():
-    embedding_ready = (
-        getattr(knowledge_service, "query_embedder", None) is not None
-        and bool(getattr(knowledge_service, "embedding_model", "").strip())
-        and int(getattr(knowledge_service, "embedding_dimensions", 0)) > 0
+    state = SimpleNamespace(knowledge_service=knowledge_service)
+    return await knowledge_capabilities_route(
+        SimpleNamespace(app=SimpleNamespace(state=state))
     )
-    retrieval_modes = ["keyword", "vector", "hybrid"] if embedding_ready else ["keyword"]
-    return {
-        "retrieval_modes": retrieval_modes,
-        "embedding_configured": embedding_ready,
-        "embedding_model": (
-            getattr(knowledge_service, "embedding_model", None) if embedding_ready else None
-        ),
-        "embedding_dimensions": (
-            getattr(knowledge_service, "embedding_dimensions", None) if embedding_ready else None
-        ),
-    }
 
 
-@app.post("/api/sessions")
-async def create_session(request: CreateSessionRequest):
-    return {"session_id": str(await repo.create_session(request.metadata))}
-
-
-@app.post("/api/sessions/{session_id}/runs")
-async def create_run(session_id: str, request: RunRequest):
-    try:
-        ident = UUID(session_id)
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid session_id") from exc
-    if not await repo.session_exists(ident):
-        raise HTTPException(404, "Session not found")
-    result = await create_runtime().run(ident, request.message)
-    return result.model_dump(mode="json")
-
-
-@app.post("/api/sessions/{session_id}/knowledge-runs")
 async def create_knowledge_run(session_id: str, request: KnowledgeRunRequest):
-    if not request.message.strip():
-        raise HTTPException(400, "message cannot be empty")
-    try:
-        ident = UUID(session_id)
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid session_id") from exc
-    if not await repo.session_exists(ident):
-        raise HTTPException(404, "Session not found")
-    completed_events = await repo.list_completed_turn_events(ident)
-    history = [
-        {"role": event.payload.get("role", "user"), "content": event.payload.get("content", "")}
-        for event in completed_events
-        if event.event_type in {"user_message", "assistant_message"}
-        and isinstance(event.payload.get("content", ""), str)
-    ]
-    retrieval_query = request.message
-    run_id = await repo.create_run(ident)
-    trace_id = uuid4()
-    try:
-        if history:
-            retrieval_query = await knowledge_service.rewrite_query(
-                request.message,
-                history,
-                llm_client=llm_client,
-            )
-        await repo.append_event(
-            ident,
-            run_id,
-            "user_message",
-            {
-                "role": "user",
-                "content": request.message,
-                "original_query": request.message,
-                "retrieval_query": retrieval_query,
-                "retrieval_mode": request.retrieval_mode,
-            },
-        )
-        answer_kwargs = {
-            "mode": request.retrieval_mode,
-            "limit": request.limit,
-            "llm_client": llm_client,
-        }
-        if retrieval_query != request.message:
-            answer_kwargs["retrieval_query"] = retrieval_query
-        result = await knowledge_service.answer(request.message, **answer_kwargs)
-    except ValueError as exc:
-        await repo.update_run(run_id, "failed", {"error": str(exc)}, 0)
-        raise HTTPException(400, str(exc)) from exc
-    payload = result.model_dump(mode="json")
-    await repo.append_event(
-        ident,
-        run_id,
-        "assistant_message",
-        {
-            "role": "assistant",
-            "content": payload["answer"],
-            **payload,
-        },
+    dependencies = SimpleNamespace(
+        session_repository=repo,
+        knowledge_service=knowledge_service,
+        llm_client=llm_client,
     )
-    await repo.update_run(
-        run_id,
-        "completed",
-        {"answer": payload["answer"], "citations": payload["citations"]},
-        0,
+    state = SimpleNamespace(dependencies=dependencies)
+    return await knowledge_run_route(
+        session_id,
+        request,
+        SimpleNamespace(app=SimpleNamespace(state=state)),
     )
-    return {
-        "run_id": str(run_id),
-        "session_id": str(ident),
-        "status": "completed",
-        "trace_id": str(trace_id),
-        **payload,
-    }
 
 
-@app.get("/api/sessions/{session_id}/messages")
 async def list_messages(session_id: str):
-    try:
-        ident = UUID(session_id)
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid session_id") from exc
-    if not await repo.session_exists(ident):
-        raise HTTPException(404, "Session not found")
-    events = await repo.list_completed_turn_events(ident)
-    messages = []
-    for event in events:
-        payload = dict(event.payload)
-        payload.setdefault("role", "user" if event.event_type == "user_message" else "assistant")
-        payload["run_id"] = str(event.run_id)
-        messages.append(payload)
-    return {"messages": messages}
+    state = SimpleNamespace(session_repository=repo)
+    return await list_messages_route(
+        session_id,
+        SimpleNamespace(app=SimpleNamespace(state=state)),
+    )
 
 
-@app.get("/api/knowledge/documents/{document_id}")
 async def get_knowledge_document(document_id: str):
-    document = await knowledge_repository.get_document(document_id)
-    if document is None:
-        raise HTTPException(404, "Document not found")
-    chunks = await knowledge_repository.list_chunks(document_id)
-    return {
-        "document": {
-            "document_id": document.document_id,
-            "source_path": document.source_path,
-            "source_url": document.source_url,
-            "title": document.title,
-            "document_version": document.document_version,
-        },
-        "chunks": [
-            {
-                "chunk_id": chunk.chunk_id,
-                "document_version": chunk.document_version,
-                "heading_path": chunk.heading_path,
-                "start_line": chunk.start_line,
-                "end_line": chunk.end_line,
-                "text": chunk.text,
-                "token_count": chunk.token_count,
-            }
-            for chunk in chunks
-        ],
-    }
+    state = SimpleNamespace(knowledge_repository=knowledge_repository)
+    return await knowledge_document_route(
+        document_id,
+        SimpleNamespace(app=SimpleNamespace(state=state)),
+    )

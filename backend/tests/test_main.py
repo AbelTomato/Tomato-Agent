@@ -100,8 +100,9 @@ async def test_http_runs_pass_completed_history_to_second_request(monkeypatch, t
     repository = main.SessionRepository(tmp_path / "api.db")
     await repository.init()
     llm = RecordingLLM()
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "llm_client", llm)
+    monkeypatch.setattr(app.state, "session_repository", repository)
+    monkeypatch.setattr(app.state.runtime, "repository", repository)
+    monkeypatch.setattr(app.state.runtime, "llm", llm)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(

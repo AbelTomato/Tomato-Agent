@@ -1,0 +1,157 @@
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.agent.context import ContextManager
+from app.agent.interfaces import LLMClient
+from app.agent.models import LLMResponse, Message, ToolDefinition
+from app.agent.runtime import AgentRuntime
+from app.knowledge.embeddings import EmbeddingClient
+from app.knowledge.pipeline_factory import (
+    build_knowledge_service,
+    runtime_config_from_settings,
+)
+from app.knowledge.repository import KnowledgeRepository
+from app.knowledge.service import KnowledgeService
+from app.llm.compatible_client import OpenAICompatibleClient
+from app.sessions.repository import SessionRepository
+from app.settings import Settings
+from app.tools.calculator import Calculator
+from app.tools.read_docs import ReadDocs
+from app.tools.read_knowledge import ReadKnowledge
+from app.tools.registry import ToolRegistry
+from app.tools.search import Search
+from app.tools.search_knowledge import SearchKnowledge
+from app.writing.execution_models import ExecutionConfig
+from app.writing.execution_repository import WritingExecutionRepository
+from app.writing.executor import WritingTaskExecutor
+from app.writing.outline import OutlineGenerator
+from app.writing.repository import WritingRepository
+from app.writing.research import WritingResearcher
+from app.writing.service import WritingService
+
+
+class UnconfiguredLLM:
+    async def complete(self, messages: list[Message], tools: list[ToolDefinition]) -> LLMResponse:
+        raise RuntimeError("No LLMClient has been configured")
+
+
+@dataclass
+class AppDependencies:
+    session_repository: SessionRepository
+    knowledge_repository: KnowledgeRepository
+    writing_repository: WritingRepository
+    writing_execution_repository: WritingExecutionRepository
+    tool_registry: ToolRegistry
+    llm_client: LLMClient
+    knowledge_service: KnowledgeService
+    writing_service: WritingService
+    writing_research_service: KnowledgeService
+    writing_executor: WritingTaskExecutor
+
+
+def create_llm_client(config: Settings) -> LLMClient:
+    if not config.llm_api_key:
+        return UnconfiguredLLM()
+    return OpenAICompatibleClient(
+        api_key=config.llm_api_key,
+        base_url=config.llm_base_url,
+        model=config.llm_model,
+        timeout_seconds=config.llm_timeout_seconds,
+    )
+
+
+def create_embedding_client(config: Settings) -> EmbeddingClient | None:
+    if (
+        not config.embedding_api_key.strip()
+        or not config.embedding_model.strip()
+        or config.embedding_dimensions <= 0
+    ):
+        return None
+    return EmbeddingClient(
+        api_key=config.embedding_api_key,
+        base_url=config.embedding_base_url,
+        model=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+        timeout_seconds=config.embedding_timeout_seconds,
+    )
+
+
+def create_knowledge_service(
+    repository: KnowledgeRepository,
+    config: Settings,
+) -> KnowledgeService:
+    return build_knowledge_service(repository, runtime_config_from_settings(config))
+
+
+def build_app_dependencies(config: Settings) -> AppDependencies:
+    session_repository = SessionRepository(config.database_path)
+    knowledge_repository = KnowledgeRepository(config.database_path)
+    writing_repository = WritingRepository(config.database_path)
+    writing_execution_repository = WritingExecutionRepository(config.database_path)
+    llm_client = create_llm_client(config)
+    tool_registry = ToolRegistry(
+        [
+            Calculator(),
+            Search(),
+            ReadDocs(Path(config.docs_root)),
+            SearchKnowledge(
+                knowledge_repository,
+                max_result_chars=config.max_tool_result_chars,
+            ),
+            ReadKnowledge(
+                knowledge_repository,
+                max_result_chars=config.max_tool_result_chars,
+            ),
+        ]
+    )
+    knowledge_service = create_knowledge_service(knowledge_repository, config)
+    writing_service = WritingService(
+        writing_repository,
+        draft_directory=config.draft_directory,
+    )
+    writing_research_service = KnowledgeService(
+        knowledge_repository,
+        query_embedder=knowledge_service.query_embedder,
+        embedding_model=knowledge_service.embedding_model,
+        embedding_dimensions=knowledge_service.embedding_dimensions,
+        min_vector_similarity=knowledge_service.min_vector_similarity,
+        pipeline=None,
+        candidate_limit=knowledge_service.candidate_limit,
+    )
+    writing_executor = WritingTaskExecutor(
+        writing_service,
+        writing_execution_repository,
+        WritingResearcher(writing_research_service),
+        OutlineGenerator(llm_client),
+        config=ExecutionConfig(
+            retrieval_mode=config.writing_retrieval_mode,
+            max_evidence=config.writing_max_evidence,
+            max_context_tokens=config.writing_max_context_tokens,
+            max_response_chars=config.writing_max_response_chars,
+            timeout_seconds=config.writing_timeout_seconds,
+        ),
+        model_id=config.llm_model if config.llm_api_key.strip() else "",
+    )
+    return AppDependencies(
+        session_repository=session_repository,
+        knowledge_repository=knowledge_repository,
+        writing_repository=writing_repository,
+        writing_execution_repository=writing_execution_repository,
+        tool_registry=tool_registry,
+        llm_client=llm_client,
+        knowledge_service=knowledge_service,
+        writing_service=writing_service,
+        writing_research_service=writing_research_service,
+        writing_executor=writing_executor,
+    )
+
+
+def create_runtime(config: Settings, dependencies: AppDependencies) -> AgentRuntime:
+    return AgentRuntime(
+        llm=dependencies.llm_client,
+        context_manager=ContextManager(),
+        tool_registry=dependencies.tool_registry,
+        repository=dependencies.session_repository,
+        system_instruction="You are a concise assistant.",
+        config=config.runtime_config,
+    )

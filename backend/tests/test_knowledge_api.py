@@ -7,6 +7,19 @@ import app.main as main
 from app.knowledge.models import SearchResult
 
 
+def inject_api_dependencies(monkeypatch, *, session_repository=None,
+                            knowledge_repository=None, knowledge_service=None,
+                            llm_client=None):
+    if session_repository is not None:
+        monkeypatch.setattr(main.app.state, "session_repository", session_repository)
+    if knowledge_repository is not None:
+        monkeypatch.setattr(main.app.state, "knowledge_repository", knowledge_repository)
+    if knowledge_service is not None:
+        monkeypatch.setattr(main.app.state, "knowledge_service", knowledge_service)
+    if llm_client is not None:
+        monkeypatch.setattr(main.app.state, "llm_client", llm_client)
+
+
 class ThresholdKnowledgeRepository:
     def __init__(self, result: SearchResult):
         self.result = result
@@ -114,9 +127,12 @@ async def test_knowledge_run_returns_structured_answer_and_citations(monkeypatch
         ],
     )
     service = FakeKnowledgeService(answer)
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "knowledge_repository", knowledge_repository)
-    monkeypatch.setattr(main, "knowledge_service", service)
+    inject_api_dependencies(
+        monkeypatch,
+        session_repository=repository,
+        knowledge_repository=knowledge_repository,
+        knowledge_service=service,
+    )
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -179,9 +195,12 @@ async def test_knowledge_run_returns_no_results_without_citations_when_vector_sc
         embedding_dimensions=2,
         min_vector_similarity=0.5,
     )
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "knowledge_service", service)
-    monkeypatch.setattr(main, "llm_client", llm)
+    inject_api_dependencies(
+        monkeypatch,
+        session_repository=repository,
+        knowledge_service=service,
+        llm_client=llm,
+    )
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -233,9 +252,12 @@ async def test_knowledge_run_keeps_citation_when_vector_score_is_above_threshold
         embedding_dimensions=2,
         min_vector_similarity=0.5,
     )
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "knowledge_service", service)
-    monkeypatch.setattr(main, "llm_client", llm)
+    inject_api_dependencies(
+        monkeypatch,
+        session_repository=repository,
+        knowledge_service=service,
+        llm_client=llm,
+    )
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -263,9 +285,12 @@ async def test_messages_endpoint_returns_completed_knowledge_turn(tmp_path, monk
         evidence_status="no_results",
         citations=[],
     )
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "knowledge_repository", knowledge_repository)
-    monkeypatch.setattr(main, "knowledge_service", FakeKnowledgeService(answer))
+    inject_api_dependencies(
+        monkeypatch,
+        session_repository=repository,
+        knowledge_repository=knowledge_repository,
+        knowledge_service=FakeKnowledgeService(answer),
+    )
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -291,7 +316,7 @@ async def test_document_endpoint_resolves_only_known_document_id(tmp_path, monke
     document = Document("doc-1", "redis.md", "https://example.test/redis", "Redis", "v1")
     chunk = Chunk("chunk-1", "doc-1", "v1", "Redis > SETEX", 3, 5, "SETEX", 1)
     await knowledge_repository.replace_document(document, [chunk])
-    monkeypatch.setattr(main, "knowledge_repository", knowledge_repository)
+    inject_api_dependencies(monkeypatch, knowledge_repository=knowledge_repository)
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -310,8 +335,8 @@ async def test_knowledge_run_rejects_unknown_session_and_empty_message(tmp_path)
     await repository.init()
     import app.main as main_module
 
-    original = main_module.repo
-    main_module.repo = repository
+    original_state_repository = main_module.app.state.session_repository
+    main_module.app.state.session_repository = repository
     try:
         transport = httpx.ASGITransport(app=main_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -324,7 +349,7 @@ async def test_knowledge_run_rejects_unknown_session_and_empty_message(tmp_path)
                 json={"message": "   "},
             )
     finally:
-        main_module.repo = original
+        main_module.app.state.session_repository = original_state_repository
 
     assert unknown.status_code == 404
     assert empty.status_code == 400
@@ -362,9 +387,12 @@ async def test_knowledge_follow_up_rewrites_query_and_preserves_previous_citatio
         ],
     )
     service = FollowUpKnowledgeService(answer)
-    monkeypatch.setattr(main, "repo", repository)
-    monkeypatch.setattr(main, "knowledge_repository", knowledge_repository)
-    monkeypatch.setattr(main, "knowledge_service", service)
+    inject_api_dependencies(
+        monkeypatch,
+        session_repository=repository,
+        knowledge_repository=knowledge_repository,
+        knowledge_service=service,
+    )
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
