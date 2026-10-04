@@ -1,8 +1,15 @@
 from typing import Protocol
 
 from app.knowledge.pipeline_models import RetrievalMode
-from app.knowledge.service import KnowledgeAnswer
+from app.writing.citation_models import WritingCitation
 from app.writing.execution_models import ExecutionConfig, ResearchBundle
+
+
+class WritingResearchResult(Protocol):
+    evidence_status: str
+    retrieval_mode: RetrievalMode
+    retrieval_fallback_reason: str | None
+    citations: list[object]
 
 
 class WritingResearchQueryPort(Protocol):
@@ -12,7 +19,7 @@ class WritingResearchQueryPort(Protocol):
         *,
         mode: RetrievalMode,
         limit: int,
-    ) -> KnowledgeAnswer:
+    ) -> WritingResearchResult:
         ...
 
 
@@ -30,7 +37,7 @@ class WritingResearcher:
         )
         return ResearchBundle(
             evidence_status=answer.evidence_status,
-            citations=[citation.model_copy(deep=True) for citation in answer.citations],
+            citations=[WritingCitation.from_knowledge_snapshot(citation) for citation in answer.citations],
             retrieval_mode=answer.retrieval_mode,
             retrieval_fallback_reason=getattr(answer, "retrieval_fallback_reason", None),
         )

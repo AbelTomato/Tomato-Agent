@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.knowledge.service import CitationSnapshot
+from .citation_models import WritingCitation
 
 
 class WritingStatus(StrEnum):
@@ -27,7 +27,7 @@ class WritingTask(BaseModel):
     version: int = Field(ge=1)
     outline: dict[str, Any] = Field(default_factory=dict)
     draft: str | None = None
-    citations: list[CitationSnapshot] = Field(default_factory=list)
+    citations: list[WritingCitation] = Field(default_factory=list)
     research_run_id: UUID | None = None
     drafting_run_id: UUID | None = None
     saved_path: str | None = None

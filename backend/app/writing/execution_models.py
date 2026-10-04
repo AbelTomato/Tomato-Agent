@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.knowledge.pipeline_models import EvidenceStatus, RetrievalMode
-from app.knowledge.service import CitationSnapshot
+from .citation_models import WritingCitation
 
 
 class WritingExecutionError(Exception):
@@ -131,9 +131,20 @@ class ResearchBundle(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence_status: EvidenceStatus
-    citations: list[CitationSnapshot]
+    citations: list[WritingCitation]
     retrieval_mode: RetrievalMode
     retrieval_fallback_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def convert_legacy_citations(cls, value):
+        if isinstance(value, dict) and "citations" in value:
+            value = dict(value)
+            value["citations"] = [
+                WritingCitation.from_knowledge_snapshot(item)
+                for item in value["citations"]
+            ]
+        return value
 
 
 class ExecutionAttempt(BaseModel):

@@ -6,8 +6,7 @@ from uuid import UUID, uuid4
 
 import aiosqlite
 
-from app.knowledge.service import CitationSnapshot
-
+from .citation_models import WritingCitation
 from .models import WritingStatus, WritingTask
 
 
@@ -126,7 +125,7 @@ class WritingRepository:
             version=row[4],
             outline=json.loads(row[5]),
             draft=row[6],
-            citations=[CitationSnapshot.model_validate(item) for item in json.loads(row[7])],
+            citations=[WritingCitation.model_validate(item) for item in json.loads(row[7])],
             research_run_id=UUID(row[8]) if row[8] else None,
             drafting_run_id=UUID(row[9]) if row[9] else None,
             saved_path=row[10],
@@ -143,7 +142,7 @@ class WritingRepository:
         expected_version: int,
         status: WritingStatus,
         outline: dict[str, Any] | None = None,
-        citations: list[CitationSnapshot] | None = None,
+        citations: list[WritingCitation] | None = None,
         research_run_id: UUID | None = None,
         draft: str | None = None,
         drafting_run_id: UUID | None = None,

@@ -6,13 +6,13 @@ from pydantic import ValidationError
 
 from app.agent.interfaces import LLMClient
 from app.agent.models import Message
-from app.knowledge.service import CitationSnapshot
 from app.writing.execution_models import (
     DraftConfig,
     GeneratedDraft,
     GeneratedOutline,
     WritingExecutionError,
 )
+from app.writing.citation_models import WritingCitation
 
 
 _SYSTEM_PROMPT = (
@@ -40,7 +40,7 @@ def _reject_constant(value: str) -> Any:
 def build_draft_messages(
     topic: str,
     outline: GeneratedOutline,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
 ) -> list[Message]:
     payload = {
         "topic": topic,
@@ -68,7 +68,7 @@ def _message_token_count(messages: list[Message], encoding) -> int:
 def select_draft_context(
     topic: str,
     outline: GeneratedOutline,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
     *,
     max_context_tokens: int,
 ) -> list[Message]:
@@ -93,7 +93,7 @@ def _render_markdown(draft: GeneratedDraft) -> str:
 def validate_draft(
     raw: str,
     outline: GeneratedOutline,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
     *,
     max_response_chars: int = 50000,
 ) -> str:
@@ -110,7 +110,7 @@ def validate_draft(
         raise WritingExecutionError("invalid_model_response") from None
 
     outline_titles = {section.title for section in outline.sections}
-    snapshots_by_id: dict[str, CitationSnapshot] = {}
+    snapshots_by_id: dict[str, WritingCitation] = {}
     for snapshot in citations:
         existing = snapshots_by_id.get(snapshot.citation_id)
         if existing is not None and existing != snapshot:
@@ -138,7 +138,7 @@ class DraftGenerator:
         self,
         topic: str,
         outline: GeneratedOutline,
-        citations: list[CitationSnapshot],
+        citations: list[WritingCitation],
         *,
         config: DraftConfig,
     ) -> str:

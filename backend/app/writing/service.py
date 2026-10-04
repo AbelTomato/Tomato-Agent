@@ -4,8 +4,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from app.knowledge.service import CitationSnapshot
-
+from .citation_models import WritingCitation
 from .execution_models import WritingExecutionError
 from .models import WritingStatus, WritingTask
 from .outline import validate_outline_payload
@@ -44,12 +43,16 @@ class WritingService:
         self,
         task_id: UUID,
         outline: dict[str, Any],
-        citations: list[CitationSnapshot],
+        citations: list[WritingCitation],
         research_run_id: UUID | None = None,
     ) -> WritingTask:
         task = await self.get_task(task_id)
         if task.status != WritingStatus.RESEARCHING:
             raise WritingConflictError("writing task is not researching")
+        writing_citations = [
+            WritingCitation.from_knowledge_snapshot(citation)
+            for citation in citations
+        ]
         try:
             return await self.repository.transition(
                 task_id,
@@ -57,7 +60,7 @@ class WritingService:
                 expected_version=task.version,
                 status=WritingStatus.AWAITING_OUTLINE_CONFIRMATION,
                 outline=outline,
-                citations=citations,
+                citations=writing_citations,
                 research_run_id=research_run_id,
             )
         except RuntimeError as exc:

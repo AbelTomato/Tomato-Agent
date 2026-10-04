@@ -11,6 +11,7 @@ from app.agent.interfaces import LLMClient
 from app.tools.base import ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
 from app.writing.execution_models import ExecutionConfig, ResearchBundle
+from app.writing.citation_models import WritingCitation
 from app.writing.research import WritingResearcher
 
 ResearchMode = Literal["deterministic", "constrained_autonomous"]
@@ -170,12 +171,10 @@ class AutonomousResearcher:
             values = await resolve(self.autonomous_search(query, limit))
             citations = values if isinstance(values, list | tuple) else getattr(values, "citations", [])
             for item in citations:
-                if isinstance(item, dict):
-                    try:
-                        from app.knowledge.service import CitationSnapshot
-                        item = CitationSnapshot.model_validate(item)
-                    except ValidationError:
-                        continue
+                try:
+                    item = WritingCitation.from_knowledge_snapshot(item)
+                except (TypeError, ValueError, ValidationError):
+                    continue
                 if hasattr(item, "citation_id") and hasattr(item, "text"):
                     evidence[item.citation_id] = item
             return {"citation_ids": list(evidence)}

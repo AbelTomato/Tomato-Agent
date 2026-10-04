@@ -6,13 +6,13 @@ from pydantic import ValidationError
 
 from app.agent.interfaces import LLMClient
 from app.agent.models import Message
-from app.knowledge.service import CitationSnapshot
 from app.writing.execution_models import (
     ExecutionConfig,
     GeneratedOutline,
     ResearchBundle,
     WritingExecutionError,
 )
+from app.writing.citation_models import WritingCitation
 
 
 _SYSTEM_PROMPT = (
@@ -25,7 +25,7 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _evidence_message(topic: str, citations: list[CitationSnapshot]) -> str:
+def _evidence_message(topic: str, citations: list[WritingCitation]) -> str:
     evidence = [citation.model_dump(mode="json") for citation in citations]
     return json.dumps(
         {"topic": topic, "evidence": evidence},
@@ -35,7 +35,7 @@ def _evidence_message(topic: str, citations: list[CitationSnapshot]) -> str:
 
 
 def build_outline_messages(
-    topic: str, citations: list[CitationSnapshot]
+    topic: str, citations: list[WritingCitation]
 ) -> list[Message]:
     return [
         Message(role="system", content=_SYSTEM_PROMPT),
@@ -57,10 +57,10 @@ def _message_token_count(messages: list[Message], encoding) -> int:
 
 def select_outline_context(
     topic: str,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
     *,
     max_context_tokens: int,
-) -> tuple[list[Message], list[CitationSnapshot]]:
+) -> tuple[list[Message], list[WritingCitation]]:
     if max_context_tokens <= 0:
         raise WritingExecutionError("context_budget_exceeded")
 
@@ -87,7 +87,7 @@ class OutlineGenerator:
         bundle: ResearchBundle,
         *,
         config: ExecutionConfig,
-    ) -> tuple[str, list[CitationSnapshot]]:
+    ) -> tuple[str, list[WritingCitation]]:
         if bundle.evidence_status in {"no_results", "insufficient"} or not bundle.citations:
             raise WritingExecutionError("evidence_insufficient")
 
@@ -126,7 +126,7 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def validate_outline(
     raw: str,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
     *,
     max_response_chars: int = 20000,
 ) -> GeneratedOutline:
@@ -147,14 +147,14 @@ def validate_outline(
 
 def validate_outline_payload(
     payload: Any,
-    citations: list[CitationSnapshot],
+    citations: list[WritingCitation],
 ) -> GeneratedOutline:
     try:
         outline = GeneratedOutline.model_validate(payload, strict=True)
     except (ValueError, TypeError, ValidationError):
         raise WritingExecutionError("invalid_model_response") from None
 
-    snapshots_by_id: dict[str, CitationSnapshot] = {}
+    snapshots_by_id: dict[str, WritingCitation] = {}
     try:
         for snapshot in citations:
             existing = snapshots_by_id.get(snapshot.citation_id)
