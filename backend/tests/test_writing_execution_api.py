@@ -6,7 +6,7 @@ import pytest
 
 from app import main
 from app.agent.models import LLMResponse
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.sessions.repository import SessionRepository
 from app.writing.execution_models import ExecutionAttempt, ExecutionConfig, WritingExecutionError
 from app.writing.execution_repository import WritingExecutionRepository

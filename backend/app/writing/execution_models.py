@@ -137,7 +137,7 @@ class ResearchBundle(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def convert_legacy_citations(cls, value):
+    def convert_writing_citations(cls, value):
         if isinstance(value, dict) and "citations" in value:
             value = dict(value)
             value["citations"] = [

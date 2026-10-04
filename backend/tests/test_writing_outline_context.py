@@ -3,13 +3,13 @@ import json
 import pytest
 import tiktoken
 
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.writing.execution_models import WritingExecutionError
 from app.writing.outline import select_outline_context
 
 
-def citation(citation_id: str, text: str) -> CitationSnapshot:
-    return CitationSnapshot(
+def citation(citation_id: str, text: str) -> WritingCitation:
+    return WritingCitation(
         citation_id=citation_id,
         chunk_id=citation_id,
         document_id="doc-1",

@@ -34,9 +34,9 @@ async def components(tmp_path):
     writing = WritingRepository(path)
     await writing.init()
     service = WritingService(writing, draft_directory=tmp_path / "drafts")
-    from app.knowledge.service import CitationSnapshot
+    from app.writing.citation_models import WritingCitation
 
-    citation = CitationSnapshot(
+    citation = WritingCitation(
         citation_id="chunk-1", chunk_id="chunk-1", document_id="doc-1",
         document_version="v1", source_path="redis.md", source_url=None,
         title="Redis", heading_path="过期", start_line=1, end_line=1,

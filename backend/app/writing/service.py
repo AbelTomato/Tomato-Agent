@@ -50,7 +50,7 @@ class WritingService:
         if task.status != WritingStatus.RESEARCHING:
             raise WritingConflictError("writing task is not researching")
         writing_citations = [
-            WritingCitation.from_knowledge_snapshot(citation)
+            WritingCitation.model_validate(citation.model_dump(mode="python"))
             for citation in citations
         ]
         try:

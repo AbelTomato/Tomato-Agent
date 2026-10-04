@@ -4,15 +4,15 @@ import httpx
 import pytest
 
 from app import main
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.sessions.repository import SessionRepository
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingService
 from uuid import uuid4
 
 
-def citation() -> CitationSnapshot:
-    return CitationSnapshot(
+def citation() -> WritingCitation:
+    return WritingCitation(
         citation_id="chunk-1", chunk_id="chunk-1", document_id="doc-1",
         document_version="v1", source_path="redis.md", source_url=None,
         title="Redis", heading_path="过期", start_line=1, end_line=1,

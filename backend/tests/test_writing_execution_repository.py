@@ -4,7 +4,7 @@ from uuid import uuid4
 import aiosqlite
 import pytest
 
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.sessions.repository import SessionRepository
 from app.writing.execution_models import ExecutionConfig, GeneratedOutline, OutlineSection
 from app.writing.execution_repository import WritingExecutionRepository
@@ -28,7 +28,7 @@ async def repositories(tmp_path):
 
 
 def citation():
-    return CitationSnapshot(
+    return WritingCitation(
         citation_id="chunk-1", chunk_id="chunk-1", document_id="doc-1",
         document_version="v1", source_path="redis.md", source_url=None,
         title="Redis", heading_path="过期", start_line=1, end_line=1,

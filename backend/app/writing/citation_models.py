@@ -33,7 +33,7 @@ class WritingCitation(BaseModel):
         return self
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, BaseModel):
+        if isinstance(other, WritingCitation):
             return self.model_dump(mode="python") == other.model_dump(mode="python")
         return NotImplemented
 

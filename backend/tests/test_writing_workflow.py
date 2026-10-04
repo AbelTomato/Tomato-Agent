@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.sessions.repository import SessionRepository
 from app.writing.models import WritingStatus
 from app.writing.execution_models import WritingExecutionError
@@ -13,12 +13,12 @@ from app.writing.service import WritingConflictError, WritingService
 
 
 @pytest.fixture
-def citation() -> CitationSnapshot:
+def citation() -> WritingCitation:
     return citation_snapshot()
 
 
-def citation_snapshot() -> CitationSnapshot:
-    return CitationSnapshot(
+def citation_snapshot() -> WritingCitation:
+    return WritingCitation(
         citation_id="chunk-1",
         chunk_id="chunk-1",
         document_id="doc-1",
@@ -47,7 +47,7 @@ def confirmed_outline(citation_id: str = "chunk-1") -> dict:
 
 @pytest.mark.asyncio
 async def test_outline_confirmation_is_server_controlled_and_versioned(
-    tmp_path: Path, citation: CitationSnapshot
+    tmp_path: Path, citation: WritingCitation
 ):
     session_repo = SessionRepository(tmp_path / "agent.db")
     await session_repo.init()
@@ -124,7 +124,7 @@ async def test_stale_outline_confirmation_returns_conflict_without_mutation(
     ],
 )
 async def test_outline_confirmation_rejects_untrusted_or_invalid_payloads(
-    tmp_path: Path, citation: CitationSnapshot, payload: dict, code: str
+    tmp_path: Path, citation: WritingCitation, payload: dict, code: str
 ):
     session_repo = SessionRepository(tmp_path / "agent.db")
     await session_repo.init()
@@ -152,7 +152,7 @@ async def test_outline_confirmation_rejects_untrusted_or_invalid_payloads(
 
 @pytest.mark.asyncio
 async def test_draft_publication_requires_confirmed_outline_and_preserves_evidence(
-    tmp_path: Path, citation: CitationSnapshot
+    tmp_path: Path, citation: WritingCitation
 ):
     session_repo = SessionRepository(tmp_path / "agent.db")
     await session_repo.init()
@@ -200,7 +200,7 @@ async def test_draft_publication_requires_confirmed_outline_and_preserves_eviden
 
 @pytest.mark.asyncio
 async def test_save_is_idempotent_and_uses_configured_directory(
-    tmp_path: Path, citation: CitationSnapshot
+    tmp_path: Path, citation: WritingCitation
 ):
     session_repo = SessionRepository(tmp_path / "agent.db")
     await session_repo.init()

@@ -3,13 +3,13 @@ import json
 import pytest
 
 from app.agent.models import LLMResponse
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.writing.execution_models import GeneratedOutline, WritingExecutionError
 from app.writing.draft import DraftConfig, DraftGenerator, validate_draft
 
 
-def citation(citation_id: str = "chunk-1", *, text: str = "证据正文") -> CitationSnapshot:
-    return CitationSnapshot(
+def citation(citation_id: str = "chunk-1", *, text: str = "证据正文") -> WritingCitation:
+    return WritingCitation(
         citation_id=citation_id,
         chunk_id=citation_id,
         document_id="doc-1",

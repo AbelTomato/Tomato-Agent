@@ -11,7 +11,7 @@ from app.writing.models import WritingStatus
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingConflictError, WritingService
 from app.sessions.repository import SessionRepository
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 
 
 class FakeDraftExecutor:
@@ -108,7 +108,7 @@ async def test_draft_attempt_api_returns_latest_draft_attempt_only(monkeypatch, 
     assert empty.json() is None
     assert missing.status_code == 404
 
-    citation = CitationSnapshot(
+    citation = WritingCitation(
         citation_id="chunk-1",
         chunk_id="chunk-1",
         document_id="doc-1",

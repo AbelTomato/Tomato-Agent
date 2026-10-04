@@ -2,6 +2,7 @@ import pytest
 
 from app.agent.models import LLMResponse
 from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.writing.execution_models import ExecutionConfig, ResearchBundle, WritingExecutionError
 from app.writing.outline import OutlineGenerator
 from app.writing.research import WritingResearcher
@@ -48,6 +49,7 @@ async def test_research_collect_forwards_mode_limit_and_copies_snapshots():
         type("Answer", (), {
             "evidence_status": "supported",
             "retrieval_mode": "vector",
+            "retrieval_fallback_reason": None,
             "citations": [original],
         })()
     )
@@ -57,9 +59,70 @@ async def test_research_collect_forwards_mode_limit_and_copies_snapshots():
     )
 
     assert service.calls == [("Redis", "vector", 3)]
-    assert bundle.citations == [original]
+    assert bundle.citations[0].model_dump(mode="python") == original.model_dump(mode="python")
     assert bundle.citations[0] is not original
     assert bundle.citations[0].text == "证据正文"
+
+
+@pytest.mark.asyncio
+async def test_research_collect_converts_structural_citation_without_model_dump():
+    class CitationRecord:
+        citation_id = "chunk-2"
+        chunk_id = "chunk-2"
+        document_id = "doc-2"
+        document_version = "v2"
+        source_path = "agent.md"
+        source_url = None
+        title = "Agent"
+        heading_path = "Runtime"
+        start_line = 4
+        end_line = 5
+        text = "证据记录"
+
+    service = FakeKnowledgeService(
+        type("Answer", (), {
+            "evidence_status": "supported",
+            "retrieval_mode": "keyword",
+            "retrieval_fallback_reason": None,
+            "citations": [CitationRecord()],
+        })()
+    )
+
+    bundle = await WritingResearcher(service).collect("Agent", config=ExecutionConfig())
+
+    assert bundle.citations == [WritingCitation.model_validate({
+        "citation_id": "chunk-2",
+        "chunk_id": "chunk-2",
+        "document_id": "doc-2",
+        "document_version": "v2",
+        "source_path": "agent.md",
+        "source_url": None,
+        "title": "Agent",
+        "heading_path": "Runtime",
+        "start_line": 4,
+        "end_line": 5,
+        "text": "证据记录",
+    })]
+
+
+def test_research_result_protocol_declares_citation_fields_without_knowledge_model():
+    from app.writing.research import WritingCitationResult
+
+    class CitationRecord:
+        citation_id = "chunk-2"
+        chunk_id = "chunk-2"
+        document_id = "doc-2"
+        document_version = "v2"
+        source_path = "agent.md"
+        source_url = None
+        title = "Agent"
+        heading_path = "Runtime"
+        start_line = 4
+        end_line = 5
+        text = "证据记录"
+
+    citation_record = CitationRecord()
+    assert all(hasattr(citation_record, field) for field in WritingCitationResult.__annotations__)
 
 
 @pytest.mark.asyncio

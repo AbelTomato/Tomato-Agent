@@ -37,6 +37,21 @@ def test_writing_citation_accepts_legacy_dict_payload():
     assert citation.text == "设置过期时间。"
 
 
+def test_research_bundle_stores_writing_owned_citation_dto():
+    from app.writing.execution_models import ResearchBundle
+
+    snapshot = CitationSnapshot.model_validate(citation_payload())
+    bundle = ResearchBundle(
+        evidence_status="supported",
+        citations=[snapshot],
+        retrieval_mode="keyword",
+    )
+
+    assert isinstance(bundle.citations[0], WritingCitation)
+    assert bundle.citations[0] is not snapshot
+    assert bundle.citations[0].model_dump(mode="json") == citation_payload()
+
+
 @pytest.mark.parametrize(
     "payload",
     [

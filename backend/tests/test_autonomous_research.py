@@ -1,14 +1,14 @@
 import pytest
 
 from app.agent.models import LLMResponse
-from app.knowledge.service import CitationSnapshot
+from app.writing.citation_models import WritingCitation
 from app.writing.execution_models import ExecutionConfig
 from app.writing.research import WritingResearcher
 from app.writing.autonomous_research import AutonomousResearcher
 
 
-def citation(citation_id: str = "chunk-1", *, text: str = "可信证据") -> CitationSnapshot:
-    return CitationSnapshot(
+def citation(citation_id: str = "chunk-1", *, text: str = "可信证据") -> WritingCitation:
+    return WritingCitation(
         citation_id=citation_id,
         chunk_id=citation_id,
         document_id="doc-1",
