@@ -20,6 +20,59 @@ from app.tools.search_knowledge import SearchKnowledge
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "knowledge"
 
 
+class FakeKnowledgeQueryPort:
+    def __init__(self, chunks, results):
+        self.chunks = chunks
+        self.results = results
+        self.calls = []
+
+    async def search_chunks(self, query, *, limit=10, mode="keyword", query_embedder=None, **kwargs):
+        self.calls.append(("search", query, limit))
+        return self.results[:limit]
+
+    async def get_chunk(self, chunk_id):
+        self.calls.append(("read", chunk_id))
+        return self.chunks.get(chunk_id)
+
+
+@pytest.mark.asyncio
+async def test_knowledge_tools_consume_minimal_query_port_without_sqlite(tmp_path):
+    result = type("Result", (), {
+        "chunk_id": "chunk-1",
+        "document_id": "doc-1",
+        "document_version": "v1",
+        "source_path": "redis.md",
+        "source_url": None,
+        "title": "Redis",
+        "heading_path": "SETEX",
+        "start_line": 1,
+        "end_line": 2,
+        "text": "SETEX evidence",
+        "score": 1.0,
+    })()
+    chunk = type("Chunk", (), {
+        "chunk_id": "chunk-1",
+        "document_id": "doc-1",
+        "document_version": "v1",
+        "heading_path": "SETEX",
+        "start_line": 1,
+        "end_line": 2,
+        "text": "SETEX evidence",
+    })()
+    port = FakeKnowledgeQueryPort({"chunk-1": chunk}, [result])
+
+    search = await SearchKnowledge(port).execute(
+        {"query": "SETEX", "top_k": 1}, ToolContext(session_id="s", run_id="r")
+    )
+    read = await ReadKnowledge(port).execute(
+        {"chunk_id": "chunk-1"}, ToolContext(session_id="s", run_id="r")
+    )
+
+    assert search.success and search.data["results"][0]["chunk_id"] == "chunk-1"
+    assert read.success and read.data["chunk_id"] == "chunk-1"
+    assert port.calls == [("search", "SETEX", 1), ("read", "chunk-1")]
+
+
 class FakeLLM:
     def __init__(self, *responses: LLMResponse):
         self.responses = list(responses)

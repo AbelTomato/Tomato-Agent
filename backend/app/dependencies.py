@@ -9,6 +9,7 @@ from app.knowledge.embeddings import EmbeddingClient
 from app.knowledge.pipeline_factory import (
     build_knowledge_retrieval_service,
     build_knowledge_service,
+    create_embedding_client as create_knowledge_embedding_client,
     runtime_config_from_settings,
 )
 from app.knowledge.repository import KnowledgeRepository
@@ -62,19 +63,9 @@ def create_llm_client(config: Settings) -> LLMClient:
 
 
 def create_embedding_client(config: Settings) -> EmbeddingClient | None:
-    if (
-        not config.embedding_api_key.strip()
-        or not config.embedding_model.strip()
-        or config.embedding_dimensions <= 0
-    ):
-        return None
-    return EmbeddingClient(
-        api_key=config.embedding_api_key,
-        base_url=config.embedding_base_url,
-        model=config.embedding_model,
-        dimensions=config.embedding_dimensions,
-        timeout_seconds=config.embedding_timeout_seconds,
-    )
+    """Compatibility facade delegating embedding construction to the factory."""
+
+    return create_knowledge_embedding_client(runtime_config_from_settings(config))
 
 
 def create_knowledge_service(

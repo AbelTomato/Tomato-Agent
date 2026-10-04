@@ -3,7 +3,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agent.models import ToolDefinition
-from app.knowledge.repository import KnowledgeRepository
+from app.knowledge.ports import KnowledgeQueryPort
 
 from .base import ToolContext, ToolResult
 
@@ -18,7 +18,7 @@ class SearchKnowledge:
     description = "Search the local knowledge base and return bounded evidence metadata."
     input_model = SearchKnowledgeInput
 
-    def __init__(self, repository: KnowledgeRepository, max_result_chars: int = 20_000):
+    def __init__(self, repository: KnowledgeQueryPort, max_result_chars: int = 20_000):
         if max_result_chars <= 0:
             raise ValueError("max_result_chars must be positive")
         self.repository = repository
