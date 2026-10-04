@@ -36,6 +36,11 @@ class FakeKnowledgeService:
         raise AssertionError("研究阶段不得调用 answer()")
 
 
+def test_writing_research_accepts_the_minimal_retrieve_port():
+    assert hasattr(FakeKnowledgeService, "retrieve")
+    assert not hasattr(FakeKnowledgeService, "pipeline")
+
+
 @pytest.mark.asyncio
 async def test_research_collect_forwards_mode_limit_and_copies_snapshots():
     original = citation()

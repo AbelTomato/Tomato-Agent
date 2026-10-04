@@ -309,3 +309,19 @@ def build_knowledge_service(
         candidate_limit=config.candidate_limit,
         allow_insufficient_llm=config.allow_insufficient_llm,
     )
+
+
+def build_knowledge_retrieval_service(
+    repository: Any,
+    config: KnowledgeRuntimeConfig,
+    *,
+    embedding_client: EmbeddingClient | None = None,
+) -> KnowledgeService:
+    """Build a deterministic retrieval-only service without the online pipeline."""
+
+    retrieval_config = config.model_copy(update={"pipeline_enabled": False})
+    return build_knowledge_service(
+        repository,
+        retrieval_config,
+        embedding_client=embedding_client,
+    )

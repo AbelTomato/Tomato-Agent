@@ -1,11 +1,25 @@
-from app.knowledge.service import KnowledgeService
+from typing import Protocol
+
+from app.knowledge.pipeline_models import RetrievalMode
+from app.knowledge.service import KnowledgeAnswer
 from app.writing.execution_models import ExecutionConfig, ResearchBundle
+
+
+class WritingResearchQueryPort(Protocol):
+    async def retrieve(
+        self,
+        query: str,
+        *,
+        mode: RetrievalMode,
+        limit: int,
+    ) -> KnowledgeAnswer:
+        ...
 
 
 class WritingResearcher:
     """Deterministic, single-pass research adapter for writing tasks."""
 
-    def __init__(self, knowledge_service: KnowledgeService) -> None:
+    def __init__(self, knowledge_service: WritingResearchQueryPort) -> None:
         self.knowledge_service = knowledge_service
 
     async def collect(self, topic: str, *, config: ExecutionConfig) -> ResearchBundle:

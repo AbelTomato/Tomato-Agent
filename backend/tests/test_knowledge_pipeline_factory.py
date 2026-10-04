@@ -8,6 +8,7 @@ from app.knowledge.evidence_selection import CoverageAwareEvidenceSelector
 from app.knowledge.pipeline_factory import (
     KnowledgeRuntimeConfig,
     build_knowledge_pipeline,
+    build_knowledge_retrieval_service,
     build_knowledge_service,
     runtime_config_from_settings,
 )
@@ -52,6 +53,29 @@ def test_service_factory_keeps_pipeline_and_embedding_disabled_by_default():
     assert service.query_embedder is None
     assert service.embedding_model == ""
     assert service.embedding_dimensions == 0
+
+
+def test_retrieval_factory_disables_pipeline_without_changing_embedding_settings():
+    config = runtime_config_from_settings(
+        Settings(
+            embedding_api_key="embedding-key",
+            embedding_base_url="https://embedding.example/v1",
+            embedding_model="test-embedding",
+            embedding_dimensions=3,
+            knowledge_pipeline_enabled=True,
+            knowledge_candidate_limit=17,
+        )
+    )
+
+    online = build_knowledge_service(object(), config)
+    retrieval = build_knowledge_retrieval_service(object(), config)
+
+    assert online.pipeline is not None
+    assert retrieval.pipeline is None
+    assert retrieval.embedding_model == online.embedding_model == "test-embedding"
+    assert retrieval.embedding_dimensions == online.embedding_dimensions == 3
+    assert retrieval.candidate_limit == online.candidate_limit == 17
+    assert retrieval.query_embedder is not None
 
 
 def test_pipeline_factory_wires_the_same_production_component_types():

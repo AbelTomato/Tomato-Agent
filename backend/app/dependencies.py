@@ -7,6 +7,7 @@ from app.agent.models import LLMResponse, Message, ToolDefinition
 from app.agent.runtime import AgentRuntime
 from app.knowledge.embeddings import EmbeddingClient
 from app.knowledge.pipeline_factory import (
+    build_knowledge_retrieval_service,
     build_knowledge_service,
     runtime_config_from_settings,
 )
@@ -26,7 +27,7 @@ from app.writing.execution_repository import WritingExecutionRepository
 from app.writing.executor import WritingTaskExecutor
 from app.writing.outline import OutlineGenerator
 from app.writing.repository import WritingRepository
-from app.writing.research import WritingResearcher
+from app.writing.research import WritingResearchQueryPort, WritingResearcher
 from app.writing.service import WritingService
 
 
@@ -45,7 +46,7 @@ class AppDependencies:
     llm_client: LLMClient
     knowledge_service: KnowledgeService
     writing_service: WritingService
-    writing_research_service: KnowledgeService
+    writing_research_service: WritingResearchQueryPort
     writing_executor: WritingTaskExecutor
 
 
@@ -79,8 +80,14 @@ def create_embedding_client(config: Settings) -> EmbeddingClient | None:
 def create_knowledge_service(
     repository: KnowledgeRepository,
     config: Settings,
+    *,
+    embedding_client: EmbeddingClient | None = None,
 ) -> KnowledgeService:
-    return build_knowledge_service(repository, runtime_config_from_settings(config))
+    return build_knowledge_service(
+        repository,
+        runtime_config_from_settings(config),
+        embedding_client=embedding_client,
+    )
 
 
 def build_app_dependencies(config: Settings) -> AppDependencies:
@@ -89,6 +96,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
     writing_repository = WritingRepository(config.database_path)
     writing_execution_repository = WritingExecutionRepository(config.database_path)
     llm_client = create_llm_client(config)
+    embedding_client = create_embedding_client(config)
     tool_registry = ToolRegistry(
         [
             Calculator(),
@@ -104,19 +112,20 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
             ),
         ]
     )
-    knowledge_service = create_knowledge_service(knowledge_repository, config)
+    runtime_config = runtime_config_from_settings(config)
+    knowledge_service = build_knowledge_service(
+        knowledge_repository,
+        runtime_config,
+        embedding_client=embedding_client,
+    )
     writing_service = WritingService(
         writing_repository,
         draft_directory=config.draft_directory,
     )
-    writing_research_service = KnowledgeService(
+    writing_research_service = build_knowledge_retrieval_service(
         knowledge_repository,
-        query_embedder=knowledge_service.query_embedder,
-        embedding_model=knowledge_service.embedding_model,
-        embedding_dimensions=knowledge_service.embedding_dimensions,
-        min_vector_similarity=knowledge_service.min_vector_similarity,
-        pipeline=None,
-        candidate_limit=knowledge_service.candidate_limit,
+        runtime_config,
+        embedding_client=embedding_client,
     )
     writing_executor = WritingTaskExecutor(
         writing_service,
