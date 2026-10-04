@@ -6,6 +6,7 @@ import pytest
 from app.agent.config import RuntimeConfig
 from app.agent.context import ContextManager
 from app.agent.models import LLMResponse, ToolCall
+from app.agent.state_store import RunStateStore
 from app.agent.runtime import AgentRuntime
 from app.sessions.repository import SessionRepository
 from app.tools.calculator import Calculator
@@ -45,6 +46,7 @@ async def make_runtime(
 async def test_runtime_completes_and_persists_user_and_assistant_messages(tmp_path):
     llm = FakeLLM(LLMResponse(kind="final", content="done"))
     runtime, repository, session_id = await make_runtime(tmp_path, llm)
+    assert isinstance(repository, RunStateStore)
 
     result = await runtime.run(session_id, "hello")
 
@@ -59,6 +61,16 @@ async def test_runtime_completes_and_persists_user_and_assistant_messages(tmp_pa
         "assistant_message",
         "run_completed",
     ]
+    assert [event.sequence for event in events] == [1, 2, 3, 4]
+    assert events[0].payload.keys() == {"trace_id"}
+    assert events[1].payload["content"] == "hello"
+    assert events[1].payload.keys() == {"content", "trace_id"}
+    assert events[2].payload["content"] == "done"
+    assert events[3].payload.keys() == {"trace_id"}
+    checkpoint = await repository.get_checkpoint(result.run_id)
+    assert checkpoint is not None
+    assert checkpoint.sequence == 4
+    assert checkpoint.state["counters"]["loop_count"] == 1
     assert [message.content for message in (await runtime._load_runtime_state(session_id, result.run_id))[0]] == [
         "hello",
         "done",
@@ -89,6 +101,13 @@ async def test_runtime_executes_tool_then_completes(tmp_path):
         "assistant_message",
         "run_completed",
     ]
+    assert [event.sequence for event in events] == [1, 2, 3, 4, 5, 6]
+    assert events[3].payload["tool_name"] == "calculator"
+    assert events[3].payload["success"] is True
+    checkpoint = await repository.get_checkpoint(result.run_id)
+    assert checkpoint is not None
+    assert checkpoint.sequence == 6
+    assert checkpoint.state["counters"]["tool_call_count"] == 1
     assert '"value": 5' in events[3].payload["content"]
 
 

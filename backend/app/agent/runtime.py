@@ -4,14 +4,15 @@ from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.sessions.repository import SessionRepository
 from app.tools.base import ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
 
 from .config import RuntimeConfig
 from .context import ContextManager
 from .interfaces import LLMClient
+from .loop import AgentLoop
 from .models import ContextState, LLMResponse, Message, RunResult
+from .state_store import RunStateStore
 
 
 @dataclass
@@ -32,7 +33,7 @@ class AgentRuntime:
         llm: LLMClient,
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
-        repository: SessionRepository,
+        repository: RunStateStore,
         system_instruction: str,
         config: RuntimeConfig | None = None,
     ):
@@ -42,6 +43,13 @@ class AgentRuntime:
         self.repository = repository
         self.system_instruction = system_instruction
         self.config = config or RuntimeConfig()
+        self.loop = AgentLoop(
+            self.llm,
+            self.context_manager,
+            self.system_instruction,
+            self.config,
+            self.tool_registry.definitions(),
+        )
 
     async def _start_or_resume_run(
         self,
@@ -167,36 +175,6 @@ class AgentRuntime:
             "user_message",
             {"content": message, "trace_id": str(trace_id)},
         )
-
-    def _check_budget(
-        self,
-        loop_count: int,
-        tool_call_count: int,
-        started_at: float,
-        persisted_elapsed: float,
-    ) -> None:
-        elapsed = max(monotonic() - started_at, persisted_elapsed)
-        if loop_count >= self.config.max_loops:
-            raise RuntimeError("Maximum loop count exceeded")
-        if tool_call_count >= self.config.max_tool_calls:
-            raise RuntimeError("Maximum tool call count exceeded")
-        if elapsed >= self.config.max_duration_seconds:
-            raise TimeoutError("Maximum runtime duration exceeded")
-
-    def _validate_response(self, response: LLMResponse) -> None:
-        if response.kind in {"final", "clarification"}:
-            if not response.content or not response.content.strip():
-                raise ValueError(f"LLM {response.kind} response must contain content")
-            return
-        if response.kind == "tool_call":
-            if response.tool_call is None:
-                raise ValueError("LLM tool_call response must contain a tool call")
-            if not response.tool_call.name:
-                raise ValueError("Tool call name cannot be empty")
-            if not isinstance(response.tool_call.arguments, dict):
-                raise ValueError("Tool call arguments must be an object")
-            return
-        raise ValueError(f"Unsupported LLM response kind: {response.kind}")
 
     async def _execute_tool_call(
         self,
@@ -447,24 +425,17 @@ class AgentRuntime:
 
         try:
             while True:
-                self._check_budget(
+                decision = await self.loop.next_response(
+                    messages,
+                    state,
                     loop_count=counters.loop_count,
                     tool_call_count=counters.tool_call_count,
                     started_at=started_at,
                     persisted_elapsed=counters.elapsed_seconds,
                 )
-                counters.loop_count += 1
-                state = self.context_manager.compact(state, messages)
-                context_messages = self.context_manager.build(
-                    self.system_instruction,
-                    state,
-                    messages,
-                )
-                response = await self.llm.complete(
-                    context_messages,
-                    self.tool_registry.definitions(),
-                )
-                self._validate_response(response)
+                state = decision.state
+                counters.loop_count = decision.loop_count
+                response = decision.response
 
                 if response.kind == "final":
                     return await self._complete_run(
