@@ -1,0 +1,16 @@
+{
+  "schema_version": "harness-stage-2-taskset/v1",
+  "dataset": "backend/evals/blog_questions.jsonl",
+  "dataset_sha256": "ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992",
+  "knowledge_snapshot": "backend/data/rag/databases/public-blog-2026-09-23-v1.db",
+  "knowledge_snapshot_sha256": "20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4",
+  "split": "dev",
+  "max_provider_calls": 10,
+  "tasks": [
+    {"task_id": "research-alembic-core-001", "source_question_id": "blog-formal-001", "task_type": "research"},
+    {"task_id": "research-no-answer-001", "source_question_id": "blog-formal-017", "task_type": "research"},
+    {"task_id": "writing-alembic-flow-001", "source_question_id": "blog-formal-006", "task_type": "writing"},
+    {"task_id": "writing-agent-stream-001", "source_question_id": "blog-formal-015", "task_type": "writing"},
+    {"task_id": "writing-attention-001", "source_question_id": "blog-formal-014", "task_type": "writing"}
+  ]
+}

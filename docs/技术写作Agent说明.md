@@ -1,5 +1,13 @@
 # 技术写作 Agent 说明
 
+## Harness 阶段二：共享边界与当前限制
+
+阶段二新增了可供受控任务复用的 `app.agent.harness` 编排契约，以及 `Budget`、`ToolPolicy`、`HarnessState`、`ExecutionResult` 和审计模型。Harness 管理模型决策循环、上下文预算、工具白名单/参数校验、工具调用与时长限制、输出限制和执行结果；它不迁移或直接修改写作任务状态。现有确定性研究仍由 `WritingResearcher.collect()` 单次检索，`AutonomousResearcher.collect()` 默认 `mode="deterministic"`，只有显式指定 `constrained_autonomous` 才进入有界研究循环；未配置模型时自主模式失败关闭。自主研究工具只允许知识检索/阅读，不提供写入、保存或 Sandbox Policy 工具。
+
+模型可在服务端批准的只读工具范围内选择检索、阅读或停止；程序强制工具白名单、参数 schema、循环/工具/时长/上下文/响应预算、错误停止，以及写作业务状态、版本冲突和用户提纲/保存确认。证据和主题作为不可信动态内容处理，研究结果仍须经过既有证据和写作校验。`CapabilityProfile` 默认拒绝网络、进程和凭据能力；本地 Sandbox 无隔离后端时拒绝执行，OpenShell 适配器当前也只返回不可用。注入的本地测试 backend 仅用于确定性契约测试，不代表真实隔离或 OpenShell 集成。
+
+阶段二评测入口为 `backend/evals/harness_stage2.py`，正式固定任务集定义在 `backend/evals/harness_stage2_taskset.json`，由 `harness_stage2_taskset.py` 从冻结 `dev` 题集和只读 RAG 快照加载 5 题（研究 2 题、写作 3 题），包含 1 个无答案拒答样本；真实 Provider 对照使用 deterministic 与 constrained_autonomous 两组、最多 10 次调用。加载器校验题集/快照 SHA-256、文档版本、证据行范围和完整引用文本，并记录任务/快照 provenance。阶段二固定样本人工验收结果为 deterministic 9.2/10、constrained_autonomous 9.6/10，无答案拒答 2/2；结果记录在 `backend/data/rag/reports/2026-10-03/harness-stage-2-real/human-review.json`。两种策略均通过固定样本基本语义验收，但样本量不足以证明稳定质量收益，且阶段三仍需生产路径接入证据和更大范围质量评审。
+
 ## 当前已实现范围
 
 技术写作任务由服务端状态机控制，当前支持：

@@ -27,6 +27,7 @@ class OpenAICompatibleClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = httpx.Timeout(timeout_seconds)
         self.transport = transport
+        self.last_token_usage: dict[str, int] | None = None
 
     async def complete(
         self,
@@ -75,6 +76,17 @@ class OpenAICompatibleClient(LLMClient):
         if not isinstance(data, dict):
             raise RuntimeError("LLM provider returned an invalid response object")
 
+        usage = data.get("usage")
+        self.last_token_usage = (
+            {
+                key: value
+                for key, value in usage.items()
+                if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                and isinstance(value, int)
+            }
+            if isinstance(usage, dict)
+            else None
+        )
         return self._response_from_provider(data)
 
     def _message_to_provider(self, message: Message) -> dict[str, Any]:

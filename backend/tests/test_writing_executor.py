@@ -10,6 +10,7 @@ from app.sessions.repository import SessionRepository
 from app.writing.execution_models import ExecutionConfig, ResearchBundle, WritingExecutionError
 from app.writing.execution_repository import WritingExecutionRepository
 from app.writing.executor import WritingTaskExecutor
+from app.writing.draft import DraftGenerator
 from app.writing.outline import OutlineGenerator
 from app.writing.repository import WritingRepository
 from app.writing.service import WritingConflictError, WritingService
@@ -111,6 +112,13 @@ async def test_success_stops_at_outline_confirmation(components):
     assert researcher.calls == llm.calls == 1
     assert not (tmp_path / "drafts").exists()
 
+    # Harness execution results do not advance the writing business state;
+    # explicit user confirmation remains required before draft generation.
+    executor.draft_generator = DraftGenerator(FakeLLM())
+    with pytest.raises(WritingConflictError):
+        await executor.execute_draft(result.task_id, expected_version=result.version)
+    assert researcher.calls == llm.calls == 1
+
 
 @pytest.mark.asyncio
 async def test_provider_failure_is_persisted_without_outline(components):
@@ -126,6 +134,13 @@ async def test_provider_failure_is_persisted_without_outline(components):
     assert current.status == "failed" and current.outline == {} and current.citations == []
     assert attempt.status == "failed" and attempt.error_code == "provider_failed"
     assert current.draft is None and not (tmp_path / "drafts").exists()
+    with pytest.raises(WritingConflictError):
+        await service.save(
+            task.task_id,
+            expected_version=current.version,
+            idempotency_key="failed-task-save",
+        )
+    assert not (tmp_path / "drafts").exists()
 
 
 @pytest.mark.asyncio

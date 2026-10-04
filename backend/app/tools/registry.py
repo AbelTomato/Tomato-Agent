@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.agent.models import ToolDefinition
+from app.agent.policies import ToolDeclaration
 from app.errors import ToolNotFoundError
 from .base import ToolContext, ToolResult, run_with_timeout
 
@@ -19,6 +20,23 @@ class ToolRegistry:
 
     def definitions(self) -> list[ToolDefinition]:
         return [tool.definition() for tool in self._tools.values()]
+
+    def declarations(self) -> tuple[ToolDeclaration, ...]:
+        """Expose policy metadata without changing the legacy definitions API."""
+
+        declarations = []
+        for tool in self._tools.values():
+            definition = tool.definition()
+            declarations.append(
+                ToolDeclaration(
+                    name=definition.name,
+                    description=definition.description,
+                    input_schema=definition.parameters,
+                    capabilities=frozenset({"resource"}),
+                    side_effect="read",
+                )
+            )
+        return tuple(declarations)
 
     async def execute(
         self, name: str, arguments: dict, context: ToolContext, timeout: float = 20
