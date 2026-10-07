@@ -23,6 +23,7 @@ from app.tools.read_knowledge import ReadKnowledge
 from app.tools.registry import ToolRegistry
 from app.tools.search import Search
 from app.tools.search_knowledge import SearchKnowledge
+from app.writing.draft import DraftGenerator
 from app.writing.execution_models import ExecutionConfig
 from app.writing.execution_repository import WritingExecutionRepository
 from app.writing.executor import WritingTaskExecutor
@@ -123,6 +124,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         writing_execution_repository,
         WritingResearcher(writing_research_service),
         OutlineGenerator(llm_client),
+        draft_generator=DraftGenerator(llm_client),
         config=ExecutionConfig(
             retrieval_mode=config.writing_retrieval_mode,
             max_evidence=config.writing_max_evidence,
