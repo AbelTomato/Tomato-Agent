@@ -2,7 +2,7 @@
 
 ## 1. 报告状态
 
-- **报告日期**：2026-10-03（含 Benchmark 工程基线、历史离线/LLM 基线及最新生产等价 `dev18` 验证）
+- **报告日期**：2026-10-07（含 Benchmark 工程基线、历史离线/LLM 基线及收尾真实 `dev18` 验证）
 - **状态**：历史离线消融曾因 `014` 最终双证据和无答案语义拒答风险未通过；2026-10-03 生产等价真实 `dev18` 已完成，执行链路和当前可用性**初步验收通过**，可进入有限范围/灰度使用。该结论不等同于最终产品质量门禁或正式上线许可。
 - **范围限制**：本报告使用 66 篇真实博客的隔离快照和 36 题正式题集中的 18 题 `dev`。`test` 集未查看；2026-09-23 Pipeline 重测未调用 LLM 做 query splitting、答案生成或语义 judging；2026-09-24 Observe runner 使用 `keyword` 检索，18 题均无候选，实际 Provider 请求/尝试/响应为 `0/0/0`。历史 LLM 验收不代表后续 Pipeline 的生成质量；Observe 工件完整不代表问答验收完成，结果不代表最终博客问答质量，也不构成新策略收益结论。
 
@@ -42,6 +42,29 @@ keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总�
 | 正确拒答 | 3/3 |
 
 **初步验收结论：通过。** 当前 RAG 生产等价执行链路稳定可用，可进入有限范围/灰度使用。**保留限制：** Final evidence recall 为 `0.9667`、source coverage 为 `16/17`，仍有 1 个必需来源未完全覆盖；`answer_quality.status=not_evaluated`，尚未完成人工答案语义质量验收。因此这是初步可用性/灰度验收通过，不是最终产品质量签署或正式上线许可。
+
+### 2.4 2026-10-07 RAG 收尾真实 dev18
+
+完整 run：`4ba7c70c-0615-4ec6-a240-42fef4e09657`；工件目录：`/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/reports/2026-10-07/public-blog/dev/production-equivalent-real-final/2026-10-07/public-blog/dev/observe-v1/4ba7c70c-0615-4ec6-a240-42fef4e09657/`。使用既有只读快照和 `production-equivalent` profile，未修改算法、配置文件或生产开关。LLM 为 `gpt-5.6-luna`，Embedding 为 `qwen3.7-text-embedding-flash`（1024 维），Reranker 为 `qwen3.7-text-rerank`。
+
+| 检查 | 本次结果 |
+|---|---|
+| 完成 / 执行错误 | 18/18 / 0 |
+| Embedding / Reranker | 各 18 次成功，失败 0 |
+| Planner / Answerer | 5 次 / 15 次成功，分别跳过 13 / 3 次 |
+| Candidate / Final evidence recall | 1.0000 / 0.9667 |
+| MRR@5 / Hit@5 / 来源覆盖 | 0.7944 / 1.0000 / 16/17 |
+| 可回答空结果 / 引用白名单校验 | 0/15 / 15/15 通过 |
+| `014` candidate / final / 来源 | 2/2 / 2/2 / 2/2；Answerer 请求上下文及输出引用均含两篇必需来源 |
+| 剩余覆盖缺口 | `015` final recall 0.5，来源 1/2 |
+| Trace / 输入完整性 | 22 个工件校验通过；题集与快照运行前后 hash 一致；SQLite integrity 为 `ok` |
+| 端到端延迟 p50 / p95 | 16.61 秒 / 47.64 秒 |
+
+三道无答案题 `013/017/018` 均为 `insufficient`、未生成答案，Answerer 跳过。但 runner 在 `service.answer()` 中依据题集 `answerable` 标注传入 `answerability_override="unanswerable_question"`，因此报告中的 `correct_refusal=3/3` 是标注驱动门禁结果，不能证明系统独立识别无答案问题；三题检索结果仍非空。人工语义验收为 0/18，`answer_quality.status=not_evaluated`。费用未知，客户端不提供 usage/billing，调用数上限不等于货币预算。
+
+前台尝试 `6d754373-f0a7-47d4-b51c-48aed176d966` 因工具 30 秒超时中断：第 1 题完成，第 2 题在 Answerer 请求后中断；保留原目录，manifest 仍为 `running`，进程已结束，该 run 不计入完整验收。其额外请求为 Embedding 2、Reranker 2、Planner 1、Answerer 2（最后一次响应未记录）；完整 run 使用新 UUID 后台执行，无自动重试。
+
+**收尾结论：本次执行链路验证通过，RAG 转入维护，不再作为重点迭代方向。** `014` 本次覆盖达标，但 `015` 缺口、人工答案语义验收和不使用标注 override 的拒答验证仍未关闭，不宣称最终产品质量通过或正式上线许可。后续仅在实际使用暴露问题、语料/模型/检索配置变化时开展针对性验证。
 
 ### 2.2 2026-09-28 任务 1：冻结验收契约与对照基线
 
