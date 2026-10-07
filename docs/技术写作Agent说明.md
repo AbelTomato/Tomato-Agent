@@ -156,4 +156,12 @@ cd backend
 
 工程验证结果（2026-09-27）：完整执行 `backend/tests/` 下全部 `test_writing*.py`，共 `94 passed`；执行器测试 `14/14`；二次取消回归连续 `5/5`；`py_compile`、`git diff --check` 和前端 `npm run build` 通过。测试覆盖正常闭环（含用户编辑提纲、未确认边界、重复生成及幂等保存）、材料不足不调用模型/不落盘、草稿 Provider 失败不保存、运行中 attempt 冲突和二次取消清理。
 
-机器报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/machine-baseline.md`。真实样例使用 `gpt-5.6-luna` 和 `public-blog-2026-09-23-v1.db` 完成研究、草稿和保存，状态与引用校验通过；但 `Transformer架构` 的 keyword 样例召回 React Fiber 材料，人工主题覆盖不通过，报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/507127c4579c4118b8c63cf60ccc24c9/real-model-quality-review.md`。修正后的 hybrid runner 实际使用 hybrid 且未回退，但因当前快照证据不足以 `evidence_insufficient` 停止，报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/7adf911a9d3342208b00828b2d2d6e6c/hybrid-retrieval-acceptance.md`。因此工程机器验收通过，真实模型内容质量仍不通过；不宣称硬崩溃自动恢复、分布式执行、自动重试或公开多租户安全隔离。
+机器报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/machine-baseline.md`。真实样例使用 `gpt-5.6-luna` 和 `public-blog-2026-09-23-v1.db` 完成研究、草稿和保存，状态与引用校验通过；但 `Transformer架构` 的 keyword 样例召回 React Fiber 材料，人工主题覆盖不通过，报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/507127c4579c4118b8c63cf60ccc24c9/real-model-quality-review.md`。修正后的 hybrid runner 实际使用 hybrid 且未回退，但因当前快照证据不足以 `evidence_insufficient` 停止，报告位于 `backend/data/rag/reports/2026-09-27/writing-stage1/dev/7adf911a9d3342208b00828b2d2d6e6c/hybrid-retrieval-acceptance.md`。2026-09-27 的工程机器验收通过，但该次真实主题样例未通过内容质量验收；这一历史结论保留。不宣称硬崩溃自动恢复、分布式执行、自动重试或公开多租户安全隔离。
+
+### 默认应用闭环与真实样例验收（2026-10-07）
+
+默认应用依赖装配已补齐 `DraftGenerator(llm_client)`，修复已配置模型时草稿接口仍返回 `503 model_unconfigured` 的问题（commit `1d93c14`）。`test_application_writing_flow.py` 通过 `create_app()` 和 HTTP API 覆盖创建会话/任务、真实 keyword 检索、提纲生成与用户编辑确认、草稿生成和确认保存，验证重复研究/生成不重复调用模型、确认前不落盘、幂等保存，以及空知识库和草稿 Provider 失败的停止边界。应用、完整流程、草稿 API 与 executor 相关测试共 **17/17 通过**，使用 Fake LLM 和隔离数据库。
+
+真实样例主题为“Alembic 的三个核心组成及迁移流程”，使用 `gpt-5.6-luna` 和独立只读博客快照，经默认应用与 ASGI HTTP API 完成研究、提纲确认和草稿生成；研究/确认/草稿接口均返回 200，5/5 证据与快照一致，正文 7 次引用使用 4 个合法证据 ID。用户于 2026-10-07 20:29（Asia/Shanghai）明确确认“验收通过”。报告位于 `backend/data/rag/reports/2026-10-07/public-blog/dev/writing-default-app/8ee4bd74a53b47d6854318c87b2108dd/quality-review.md`，原始草稿为同目录的 `draft-preview.md`；快照位于 `backend/data/rag/databases/writing-acceptance-2026-10-07-8ee4bd74a53b47d6854318c87b2108dd.db`。
+
+本次只调整存储位置，将已装配的知识 Repository 指向只读快照；提纲由 AI 核对后确认，不是浏览器交互验收。任务仍处于 `awaiting_save_confirmation`，未调用业务保存 API 或发布。保留正文补充材料缺口说明、精确描述 `env.py` 和改善引用展示的编辑建议。单个窄主题验收通过不覆盖历史 Transformer 失败样例，也不证明稳定质量或自主研究收益；token 总量、费用及 Embedding 次数未独立核实。
