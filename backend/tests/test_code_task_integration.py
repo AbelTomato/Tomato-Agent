@@ -81,6 +81,7 @@ async def test_cancel_api_stops_active_execution_and_waits_for_cleanup(tmp_path,
                 response = await asyncio.wait_for(execution, 2)
                 assert response.status_code == 409
                 assert response.json()["detail"]["code"] == "cancelled"
+                assert response.json()["detail"]["result"]["status"] == "cancelled"
                 assert model_calls == 1
                 repeated = await client.post(f"/api/code-tasks/{run_id}/cancel", json={})
                 assert repeated.json()["status"] == "cancelled"
@@ -251,6 +252,7 @@ async def test_unsafe_or_unsuccessful_execution_never_completes(
             response = await client.post(f"/api/code-tasks/{run_id}/execute")
             assert response.status_code == 409, response.text
             assert response.json()["detail"]["code"] == expected_code
+            assert response.json()["detail"]["result"]["status"] == expected_status
             persisted = (await client.get(f"/api/code-tasks/{run_id}")).json()
             assert persisted["status"] == expected_status
             assert persisted["error"]["code"] == expected_code

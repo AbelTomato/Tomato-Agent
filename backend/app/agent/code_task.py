@@ -407,7 +407,7 @@ class CodeTaskService:
         except asyncio.CancelledError:
             current = await self.run_repository.get_run(run.id)
             if str(run.id) in self._cancel_requested and current is not None and current.status == "cancelled":
-                return {"status": "failed", "error": {"code": "cancelled"},
+                return {"status": "cancelled", "error": {"code": "cancelled"},
                         **await self._result_details(run_id)}
             await self._fail(run, "cancelled", "cancelled")
             raise
@@ -449,4 +449,5 @@ class CodeTaskService:
         if current and current.status in {"running", "waiting"}:
             await self._fail(run, "failed", code)
         details = await self._result_details(run_id, usage=result.usage, tool_calls=result.tool_calls)
-        return {"status": "failed", "error": {"code": code}, **details}
+        status = current.status if current and current.status in {"cancelled", "timed_out"} else "failed"
+        return {"status": status, "error": {"code": code}, **details}

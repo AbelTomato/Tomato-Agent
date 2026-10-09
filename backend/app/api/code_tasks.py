@@ -60,7 +60,7 @@ async def execute_code_task(run_id: str, http_request: Request):
         strategy=http_request.app.state.code_task_strategy,
         test_tool=getattr(http_request.app.state, "code_task_test_tool", None),
     )
-    if result.get("status") == "failed":
+    if result.get("status") in {"failed", "cancelled", "timed_out"}:
         code = result.get("error", {}).get("code", "execution_failed")
         raise HTTPException(409, {"code": code, "result": result})
     return result
