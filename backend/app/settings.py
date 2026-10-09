@@ -6,6 +6,8 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.agent.config import RuntimeConfig
+from app.agent.models import CodeTaskBudget
+from app.agent.policies import CodeTaskCapabilityProfile
 
 
 class Settings(BaseSettings):
@@ -54,7 +56,43 @@ class Settings(BaseSettings):
     writing_max_context_tokens: int = Field(default=8000, gt=0)
     writing_max_response_chars: int = Field(default=20000, gt=0)
     writing_timeout_seconds: float = Field(default=120.0, gt=0)
+    code_task_allow_network: Literal[False] = False
+    code_task_allow_credentials: Literal[False] = False
+    code_task_max_loops: int = Field(default=12, gt=0)
+    code_task_max_tool_calls: int = Field(default=8, gt=0)
+    code_task_max_duration_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
+    code_task_max_context_tokens: int = Field(default=8000, gt=0)
+    code_task_max_response_chars: int = Field(default=20000, gt=0)
+    code_task_tool_timeout_seconds: float = Field(default=20.0, gt=0, allow_inf_nan=False)
+    code_task_max_tool_result_chars: int = Field(default=20000, gt=0)
+    code_task_max_file_bytes: int = Field(default=100000, gt=0)
+    code_task_max_artifact_bytes: int = Field(default=1000000, gt=0)
+    code_task_workspace_root: Path = Path("data/code-workspaces")
+    code_task_artifact_root: Path = Path("data/code-artifacts")
+    code_task_sandbox_backend: Literal["local", "docker", "openshell"] = "local"
+    code_task_docker_image: str = ""
+    code_task_docker_binary: str = "docker"
+    code_task_openshell_image: str = ""
+    code_task_openshell_binary: str = "openshell"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def code_task_budget(self) -> CodeTaskBudget:
+        return CodeTaskBudget(
+            max_loops=self.code_task_max_loops,
+            max_tool_calls=self.code_task_max_tool_calls,
+            max_duration_seconds=self.code_task_max_duration_seconds,
+            max_context_tokens=self.code_task_max_context_tokens,
+            max_response_chars=self.code_task_max_response_chars,
+        )
+
+    def code_task_capability_profile(self, workspace_root: Path) -> CodeTaskCapabilityProfile:
+        return CodeTaskCapabilityProfile(
+            sandbox_backend=self.code_task_sandbox_backend,
+            allowed_paths=(str(workspace_root.resolve()),),
+            timeout_seconds=self.code_task_tool_timeout_seconds,
+            max_output_chars=self.code_task_max_tool_result_chars,
+        )
 
     @property
     def runtime_config(self) -> RuntimeConfig:

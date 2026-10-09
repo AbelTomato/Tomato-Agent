@@ -2,7 +2,35 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+TaskRunStatus = Literal[
+    "queued", "running", "waiting", "completed", "failed", "cancelled", "timed_out"
+]
+
+
+class CodeTaskBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    max_loops: int = Field(default=12, gt=0)
+    max_tool_calls: int = Field(default=8, gt=0)
+    max_duration_seconds: float = Field(default=120.0, gt=0)
+    max_context_tokens: int = Field(default=8000, gt=0)
+    max_response_chars: int = Field(default=20000, gt=0)
+
+
+class CodeTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    task: str = Field(min_length=1)
+
+    @field_validator("task")
+    @classmethod
+    def require_non_empty_task(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("task must contain non-whitespace text")
+        return value
 
 
 class ToolCall(BaseModel):

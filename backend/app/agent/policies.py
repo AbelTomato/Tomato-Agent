@@ -67,6 +67,28 @@ class CapabilityProfile(_PolicyModel):
         return self
 
 
+CODE_TASK_TOOLS = frozenset({
+    "list_files", "read_file", "search_files", "write_file", "apply_patch",
+    "run_tests", "get_diff", "collect_artifact",
+})
+
+
+class CodeTaskCapabilityProfile(CapabilityProfile):
+    """Server-owned contract; does not authorize host process execution."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    allowed_tools: frozenset[str] = CODE_TASK_TOOLS
+    sandbox_backend: Literal["local", "docker", "openshell"] = "local"
+
+    @field_validator("allowed_tools")
+    @classmethod
+    def registered_tools_only(cls, value: frozenset[str]) -> frozenset[str]:
+        if not value <= CODE_TASK_TOOLS:
+            raise ValueError("code tasks only allow registered code tools")
+        return value
+
+
 class ToolExecutionError(Exception):
     def __init__(self, code: ErrorCode, public_message: str, *, retryable: bool = False):
         super().__init__(public_message)
