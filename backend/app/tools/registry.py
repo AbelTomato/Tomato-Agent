@@ -26,6 +26,9 @@ class ToolRegistry:
 
         declarations = []
         for tool in self._tools.values():
+            if callable(getattr(tool, "declaration", None)):
+                declarations.append(tool.declaration())
+                continue
             definition = tool.definition()
             declarations.append(
                 ToolDeclaration(

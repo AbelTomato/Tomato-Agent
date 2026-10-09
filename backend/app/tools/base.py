@@ -9,6 +9,10 @@ from app.agent.models import ToolDefinition
 class ToolContext(BaseModel):
     session_id: str
     run_id: str
+    workspace_id: str | None = None
+    # policies imports ToolResult; code tools validate this server-owned value
+    # at their boundary to avoid a circular import for ordinary Session tools.
+    profile: Any = None
     read_chunk_ids: set[str] = Field(default_factory=set)
     read_document_versions: set[str] = Field(default_factory=set)
 
