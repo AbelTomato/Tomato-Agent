@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from app.agent.harness import Harness
 from app.agent.harness_models import Budget, HarnessState, ToolPolicy
-from app.agent.models import ContextState, LLMResponse, ToolDefinition
+from app.agent.models import ContextState, LLMResponse, ToolCall, ToolDefinition
 from app.tools.base import ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
 
@@ -52,6 +52,16 @@ class FakeLLM:
         return self.responses[min(self.calls - 1, len(self.responses) - 1)]
 
 
+class RecordingLLM(FakeLLM):
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        super().__init__(responses)
+        self.message_batches = []
+
+    async def complete(self, messages, tools):
+        self.message_batches.append([message.model_copy(deep=True) for message in messages])
+        return await super().complete(messages, tools)
+
+
 @dataclass
 class ScriptedStrategy:
     decisions: list
@@ -93,6 +103,52 @@ async def test_harness_completes_and_preserves_model_usage():
     assert result.status == "completed"
     assert result.output == "done"
     assert result.usage.model_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_harness_injects_task_into_model_context():
+    llm = RecordingLLM([LLMResponse(kind="final", content="done")])
+    initial_state = HarnessState(
+        structured_state={"task": "Fix the calculator"},
+        context_state=ContextState(),
+    )
+    result = await Harness().run(
+        initial_state,
+        ScriptedStrategy([{"kind": "respond", "output": "done"}]),
+        llm=llm, tools=ToolRegistry(), policy=policy(), budget=budget(),
+    )
+
+    assert result.status == "completed"
+    assert [message.role for message in llm.message_batches[0]] == ["system", "user"]
+    assert llm.message_batches[0][-1].content == "Fix the calculator"
+
+
+@pytest.mark.asyncio
+async def test_harness_preserves_tool_call_id_and_result_for_next_model_call():
+    call = ToolCall(call_id="provider-call-1", name="add", arguments={"value": 1})
+    llm = RecordingLLM([
+        LLMResponse(kind="tool_call", tool_call=call),
+        LLMResponse(kind="final", content="done"),
+    ])
+    initial_state = HarnessState(
+        structured_state={"task": "Inspect the calculator"},
+        context_state=ContextState(),
+    )
+    result = await Harness().run(
+        initial_state,
+        ScriptedStrategy([
+            {"kind": "call_tool", "tool_name": "add", "arguments": {"value": 1}},
+            {"kind": "respond", "output": "done"},
+        ]),
+        llm=llm, tools=ToolRegistry([FakeTool()]), policy=policy(), budget=budget(),
+    )
+
+    assert result.status == "completed"
+    second_call_messages = llm.message_batches[1]
+    assistant = next(message for message in second_call_messages if message.role == "assistant")
+    tool = next(message for message in second_call_messages if message.role == "tool")
+    assert assistant.tool_calls == [call]
+    assert tool.tool_call_id == call.call_id
 
 
 @pytest.mark.asyncio
