@@ -7,10 +7,17 @@ from app.settings import Settings
 from app.writing.citation_models import WritingCitation
 
 
-def test_create_app_uses_supplied_settings_and_registers_routers(tmp_path):
+@pytest.mark.asyncio
+async def test_create_app_uses_supplied_settings_and_registers_routers(tmp_path):
     config = Settings(
         database_path=tmp_path / "app.db",
         docs_root=tmp_path,
+        code_task_tool_timeout_seconds=3.5,
+        code_task_max_tool_result_chars=123,
+        code_task_max_loops=2,
+        code_task_max_tool_calls=4,
+        code_task_max_context_tokens=456,
+        code_task_max_response_chars=789,
         knowledge_pipeline_enabled=False,
         knowledge_rerank_enabled=False,
     )
@@ -23,9 +30,33 @@ def test_create_app_uses_supplied_settings_and_registers_routers(tmp_path):
     assert "/api/knowledge/capabilities" in paths
     assert "/api/sessions/{session_id}/writing-tasks" in paths
     assert app.state.dependencies.session_repository.path == config.database_path
+    assert app.state.dependencies.run_repository.path == config.database_path
+    workspace = await app.state.dependencies.workspace_service.create()
+    run = type("Run", (), {"workspace_id": workspace.workspace_id})()
+    profile = app.state.dependencies.code_task_service.build_capability_profile(run)
+    assert profile.timeout_seconds == 3.5
+    assert profile.max_output_chars == 123
+    budget = app.state.dependencies.code_task_service.budget
+    assert budget.max_loops == 2
+    assert budget.max_tool_calls == 4
+    assert budget.max_context_tokens == 456
+    assert budget.max_response_chars == 789
     assert app.state.dependencies.knowledge_service.pipeline is None
     assert app.state.dependencies.writing_research_service.pipeline is None
     assert "/api/tools" in paths
+
+
+@pytest.mark.asyncio
+async def test_create_app_initializes_run_repository(tmp_path):
+    config = Settings(database_path=tmp_path / "app.db", docs_root=tmp_path)
+    app = create_app(config)
+
+    async with app.router.lifespan_context(app):
+        run = await app.state.run_repository.create_run(
+            "code_task", {"task": "verify"}, "workspace-1"
+        )
+
+    assert run.status == "queued"
 
 
 def test_create_app_keeps_writing_research_deterministic_when_online_pipeline_enabled(tmp_path):
