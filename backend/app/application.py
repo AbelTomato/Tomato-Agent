@@ -41,7 +41,17 @@ def create_app(config: Settings | None = None) -> FastAPI:
         await dependencies.writing_repository.init()
         await dependencies.writing_execution_repository.init()
         await dependencies.code_task_service.initialize()
-        yield
+        worker = dependencies.execution_worker
+        try:
+            if app_settings.code_task_worker_enabled:
+                while True:
+                    recovered = await worker.recover_on_startup()
+                    if len(recovered) < worker.recovery_scan_limit:
+                        break
+                await worker.start()
+            yield
+        finally:
+            await worker.stop()
 
     app = FastAPI(title="Tomato Agent Infrastructure", lifespan=lifespan)
     app.state.config = app_settings

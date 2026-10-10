@@ -28,6 +28,10 @@ def _service(request: Request) -> CodeTaskService:
     return request.app.state.code_task_service
 
 
+def _dispatch_status(request: Request) -> str:
+    return "worker_enabled" if request.app.state.config.code_task_worker_enabled else "worker_disabled"
+
+
 def _run_id(value: str) -> str:
     try:
         return str(UUID(value))
@@ -45,33 +49,23 @@ async def _run_payload(service: CodeTaskService, run_id: str) -> dict:
             "error": run.error, "version": run.version, **details}
 
 
-@router.post("/api/code-tasks", status_code=status.HTTP_201_CREATED)
+@router.post("/api/code-tasks", status_code=status.HTTP_202_ACCEPTED)
 async def create_code_task(request: CodeTaskRequest, http_request: Request):
     run = await _service(http_request).create(request)
     return {"run_id": str(run.id), "workspace_id": run.workspace_id,
-            "status": run.status, "task_type": run.task_type}
+            "status": run.status, "task_type": run.task_type,
+            "dispatch_status": _dispatch_status(http_request)}
 
 
-@router.post("/api/code-tasks/{run_id}/execute")
+@router.post("/api/code-tasks/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
 async def execute_code_task(run_id: str, http_request: Request):
     run_id = _run_id(run_id)
     service = _service(http_request)
     run = await service.run_repository.get_run(run_id)
     if run is None:
         raise HTTPException(404, "Run not found")
-    if not getattr(http_request.app.state, "code_task_llm", None):
-        await service.run_repository.update_status(run_id, "failed", error={"code": "model_unconfigured"})
-        raise HTTPException(503, {"code": "model_unconfigured"})
-    result = await service.execute(
-        run_id,
-        llm=http_request.app.state.code_task_llm,
-        strategy=http_request.app.state.code_task_strategy,
-        test_tool=getattr(http_request.app.state, "code_task_test_tool", None),
-    )
-    if result.get("status") in {"failed", "cancelled", "timed_out"}:
-        code = result.get("error", {}).get("code", "execution_failed")
-        raise HTTPException(409, {"code": code, "result": result})
-    return result
+    return {**await _run_payload(service, run_id),
+            "dispatch_status": _dispatch_status(http_request)}
 
 
 @router.post("/api/code-tasks/{run_id}/recover")
@@ -93,16 +87,20 @@ async def recover_code_task(run_id: str, request: RecoverCodeTaskRequest, http_r
 
 @router.get("/api/code-tasks/{run_id}")
 async def get_code_task(run_id: str, http_request: Request):
-    return await _run_payload(_service(http_request), _run_id(run_id))
+    return {**await _run_payload(_service(http_request), _run_id(run_id)),
+            "dispatch_status": _dispatch_status(http_request)}
 
 
 @router.get("/api/code-tasks/{run_id}/events")
-async def list_code_task_events(run_id: str, http_request: Request):
+async def list_code_task_events(run_id: str, http_request: Request, after: int = 0):
     run_id = _run_id(run_id)
     service = _service(http_request)
     if await service.run_repository.get_run(run_id) is None:
         raise HTTPException(404, "Run not found")
-    events = await service.run_repository.list_events(run_id)
+    try:
+        events = await service.run_repository.list_events(run_id, after=after)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     return {"events": [event.model_dump(mode="json") for event in events]}
 
 

@@ -280,7 +280,8 @@ class CodeTaskService:
         }
 
     async def execute(self, run_id: str, *, llm=None, strategy=None,
-                      test_tool: RunTestsTool | None = None, budget: Budget | None = None):
+                      test_tool: RunTestsTool | None = None, budget: Budget | None = None,
+                      execution_lease=None):
         run = await self.run_repository.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
@@ -289,9 +290,13 @@ class CodeTaskService:
         test_tool = test_tool or self.test_tool
         budget = budget or self.budget
         if llm is None or strategy is None:
-            await self.execution_repository.fail_unclaimed(run.id, "model_not_configured")
+            if execution_lease is None:
+                await self.execution_repository.fail_unclaimed(run.id, "model_not_configured")
+            else:
+                await self.execution_repository.finish(execution_lease, "failed",
+                    event_type="code_task.failed", error={"code": "model_not_configured"})
             return {"status": "failed", "error": {"code": "model_not_configured"},
                     **await self._result_details(run_id)}
         from app.agent.code_execution import execute_code
         return await execute_code(self, run, llm=llm, strategy=strategy,
-                                  test_tool=test_tool, budget=budget)
+                                  test_tool=test_tool, budget=budget, execution_lease=execution_lease)

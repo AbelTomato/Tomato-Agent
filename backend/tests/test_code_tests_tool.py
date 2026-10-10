@@ -9,6 +9,7 @@ from app.agent.sandbox import LocalSandboxExecutor, SandboxResult
 from app.artifacts.service import ArtifactService
 from app.runs.repository import RunRepository
 from app.tools.base import ToolContext
+from app.tools.registry import ToolRegistry
 from app.tools.code_tests import RegisteredTestTarget, RunTestsTool, TestTargetRegistry
 from app.workspaces.service import WorkspaceService
 
@@ -181,3 +182,49 @@ def test_registry_rejects_duplicate_and_unsafe_server_templates():
     assert registry.resolve("unit") == target
     with pytest.raises(ValueError):
         registry.resolve("unknown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_failed", [False, True])
+async def test_registry_deadline_is_timeout_even_when_executor_swallows_cancel(environment, cleanup_failed):
+    tool, context, artifacts, _, _ = environment
+
+    class Executor:
+        async def execute(self, request, profile):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return SandboxResult(status="cancelled", error_code=(
+                    "cleanup_failed" if cleanup_failed else "cancelled"))
+
+    tool.executor = Executor()
+    result = await ToolRegistry([tool]).execute("run_tests", {"target": "unit"}, context, timeout=0.01)
+    code = "cleanup_failed" if cleanup_failed else "timeout"
+    assert result.error == code
+    assert result.data["status"] == "timed_out"
+    report = json.loads(await artifacts.read(result.data["artifact"]["artifact_id"], 10000))
+    assert report["status"] == "timed_out" and report["error_code"] == code
+
+
+@pytest.mark.asyncio
+async def test_registry_explicit_cancel_remains_cancelled(environment):
+    tool, context, artifacts, _, _ = environment
+    started = asyncio.Event()
+
+    class Executor:
+        async def execute(self, request, profile):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return SandboxResult(status="cancelled", error_code="cancelled")
+
+    tool.executor = Executor()
+    task = asyncio.create_task(ToolRegistry([tool]).execute(
+        "run_tests", {"target": "unit"}, context, timeout=10))
+    await started.wait()
+    task.cancel()
+    result = await task
+    assert result.error == "cancelled"
+    report = json.loads(await artifacts.read(result.data["artifact"]["artifact_id"], 10000))
+    assert report["status"] == "cancelled"

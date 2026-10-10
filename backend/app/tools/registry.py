@@ -44,4 +44,7 @@ class ToolRegistry:
     async def execute(
         self, name: str, arguments: dict, context: ToolContext, timeout: float = 20
     ) -> ToolResult:
-        return await run_with_timeout(self.get(name), arguments, context, timeout)
+        tool = self.get(name)
+        if callable(getattr(tool, "execute_with_timeout", None)):
+            return await tool.execute_with_timeout(arguments, context, timeout)
+        return await run_with_timeout(tool, arguments, context, timeout)

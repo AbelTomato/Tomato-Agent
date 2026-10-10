@@ -104,7 +104,12 @@ class RunTestsTool:
             data[key] = data[key][:max(0, len(data[key]) - max(1, excess))]
         return ToolResult(success=True, data=data)
 
-    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute_with_timeout(self, arguments: dict[str, Any], context: ToolContext,
+                                   timeout: float) -> ToolResult:
+        return await self.execute(arguments, context, timeout=timeout)
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext,
+                      *, timeout: float | None = None) -> ToolResult:
         try:
             args = self.input_model.model_validate(arguments)
             target = self.targets.resolve(args.target)
@@ -129,14 +134,24 @@ class RunTestsTool:
                 arguments={"target": target.name, "argv": [*target.command, *args.arguments],
                            "cwd": str(cwd)},
             )
+            deadline = asyncio.timeout(min(timeout, profile.timeout_seconds)
+                                       if timeout is not None else profile.timeout_seconds)
             try:
-                result = await self.executor.execute(request, profile)
+                async with deadline:
+                    result = await self.executor.execute(request, profile)
             except asyncio.CancelledError:
                 result = SandboxResult(status="cancelled", error_code="cancelled")
             except TimeoutError:
                 result = SandboxResult(status="timed_out", error_code="timeout")
             except Exception:
                 result = SandboxResult(status="failed", error_code="execution_failed")
+            # Adapters may consume CancelledError while finishing cleanup. The
+            # timeout context retains the cause even when cancellation is swallowed.
+            if deadline.expired():
+                result = result.model_copy(update={
+                    "status": "timed_out", "exit_code": None,
+                    "error_code": "cleanup_failed" if result.error_code == "cleanup_failed" else "timeout",
+                })
             # Enforce output bounds even for injected adapters returning oversized text.
             stdout = result.stdout[:profile.max_output_chars]
             stderr = result.stderr[:max(0, profile.max_output_chars - len(stdout))]

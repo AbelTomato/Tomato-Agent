@@ -68,7 +68,7 @@ async def test_code_task_api_create_query_events_and_artifact_scope(tmp_path):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             created = await client.post("/api/code-tasks", json={"task": "Fix it"})
-            assert created.status_code == 201, created.text
+            assert created.status_code == 202, created.text
             body = created.json()
             assert body["status"] == "queued"
             run_id = body["run_id"]
@@ -104,8 +104,8 @@ async def test_code_task_api_rejects_invalid_input_and_maps_unconfigured_execute
             created = await client.post("/api/code-tasks", json={"task": "Run tests"})
             run_id = created.json()["run_id"]
             executed = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert executed.status_code == 503
-            assert executed.json()["detail"]["code"] == "model_unconfigured"
+            assert executed.status_code == 202
+            assert executed.json()["status"] == "queued"
 
 
 @pytest.mark.asyncio
@@ -139,9 +139,12 @@ async def test_code_task_api_executes_fixed_fixture_and_returns_auditable_succes
             repo = app.state.workspace_service._directory(workspace) / "repo"
             assert {"calculator.py", "test_calculator.py"} == {p.name for p in repo.iterdir()}
 
-            response = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert response.status_code == 200, response.text
-            result = response.json()
+            result = await app.state.code_task_service.execute(
+                run_id,
+                llm=app.state.code_task_llm,
+                strategy=app.state.code_task_strategy,
+                test_tool=app.state.code_task_test_tool,
+            )
             assert result["status"] == "completed"
             assert result["changed_files"] == ["calculator.py"]
             assert result["test_results"][-1]["exit_code"] == 0
@@ -163,9 +166,12 @@ async def test_code_task_api_query_restores_complete_result_after_service_restar
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             created = await client.post("/api/code-tasks", json={"task": "Fix addition"})
             run_id = created.json()["run_id"]
-            executed = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert executed.status_code == 200, executed.text
-            expected = executed.json()
+            expected = await first_app.state.code_task_service.execute(
+                run_id,
+                llm=first_app.state.code_task_llm,
+                strategy=first_app.state.code_task_strategy,
+                test_tool=first_app.state.code_task_test_tool,
+            )
 
     restarted_app = make_app(tmp_path)
     async with restarted_app.router.lifespan_context(restarted_app):
@@ -205,9 +211,15 @@ async def test_code_task_api_test_failure_never_returns_success(tmp_path):
             created = await client.post("/api/code-tasks", json={"task": "Fix addition"})
             run_id = created.json()["run_id"]
             response = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert response.status_code == 409
-            assert response.json()["detail"]["code"] == "tests_failed"
-            assert response.json()["detail"]["result"]["status"] == "failed"
+            assert response.status_code == 202
+            result = await app.state.code_task_service.execute(
+                run_id,
+                llm=app.state.code_task_llm,
+                strategy=app.state.code_task_strategy,
+                test_tool=app.state.code_task_test_tool,
+            )
+            assert result["status"] == "failed"
+            assert result["error"]["code"] == "tests_failed"
 
 
 @pytest.mark.asyncio
@@ -248,7 +260,13 @@ async def test_code_task_api_duplicate_execution_is_rejected_after_completion(tm
             created = await client.post("/api/code-tasks", json={"task": "Fix addition"})
             run_id = created.json()["run_id"]
             first = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert first.status_code == 200
+            assert first.status_code == 202
+            await app.state.code_task_service.execute(
+                run_id,
+                llm=app.state.code_task_llm,
+                strategy=app.state.code_task_strategy,
+                test_tool=app.state.code_task_test_tool,
+            )
             second = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert second.status_code == 409
-            assert second.json()["detail"]["code"] == "run_not_active"
+            assert second.status_code == 202
+            assert second.json()["status"] == "completed"

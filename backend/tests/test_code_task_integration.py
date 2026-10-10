@@ -34,6 +34,8 @@ async def test_cancel_api_stops_active_execution_and_waits_for_cleanup(tmp_path,
         _env_file=None, database_path=tmp_path / "agent.db", docs_root=tmp_path,
         code_task_workspace_root=tmp_path / "workspaces",
         code_task_artifact_root=tmp_path / "artifacts", llm_api_key="",
+        code_task_worker_enabled=True,
+        code_task_worker_poll_interval_seconds=0.01,
         knowledge_pipeline_enabled=False, knowledge_rerank_enabled=False,
     ))
     started = asyncio.Event()
@@ -63,6 +65,8 @@ async def test_cancel_api_stops_active_execution_and_waits_for_cleanup(tmp_path,
     service.test_tool.executor = LocalSandboxExecutor(backend)
     app.state.code_task_llm = LLM()
     app.state.code_task_strategy = CodeTaskStrategy()
+    service.llm = app.state.code_task_llm
+    service.strategy = app.state.code_task_strategy
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
@@ -79,9 +83,7 @@ async def test_cancel_api_stops_active_execution_and_waits_for_cleanup(tmp_path,
                 assert cancelled.json()["status"] == "cancelled"
                 assert cleaned.is_set()
                 response = await asyncio.wait_for(execution, 2)
-                assert response.status_code == 409
-                assert response.json()["detail"]["code"] == "cancelled"
-                assert response.json()["detail"]["result"]["status"] == "cancelled"
+                assert response.status_code == 202
                 assert model_calls == 1
                 repeated = await client.post(f"/api/code-tasks/{run_id}/cancel", json={})
                 assert repeated.json()["status"] == "cancelled"
@@ -119,6 +121,8 @@ async def test_failing_fixture_can_be_read_repaired_and_retested_through_api(tmp
         _env_file=None, database_path=tmp_path / "agent.db",
         docs_root=tmp_path, code_task_workspace_root=tmp_path / "workspaces",
         code_task_artifact_root=tmp_path / "artifacts", llm_api_key="",
+        code_task_worker_enabled=True,
+        code_task_worker_poll_interval_seconds=0.01,
         knowledge_pipeline_enabled=False, knowledge_rerank_enabled=False,
     ))
     llm = ScriptedLLM([
@@ -158,16 +162,23 @@ async def test_failing_fixture_can_be_read_repaired_and_retested_through_api(tmp
     service.test_tool.executor = LocalSandboxExecutor(backend)
     app.state.code_task_llm = llm
     app.state.code_task_strategy = CodeTaskStrategy()
+    service.llm = app.state.code_task_llm
+    service.strategy = app.state.code_task_strategy
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
         ) as client:
             created = await client.post("/api/code-tasks", json={"task": "Fix addition"})
-            assert created.status_code == 201, created.text
+            assert created.status_code == 202, created.text
             run_id = created.json()["run_id"]
             executed = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert executed.status_code == 200, executed.text
-            result = executed.json()
+            assert executed.status_code == 202, executed.text
+            async with asyncio.timeout(3):
+                while (await client.get(f"/api/code-tasks/{run_id}")).json()["status"] not in {
+                    "completed", "failed", "cancelled", "timed_out",
+                }:
+                    await asyncio.sleep(0.01)
+            result = (await client.get(f"/api/code-tasks/{run_id}")).json()
             assert result["status"] == "completed"
             assert observed_exit_codes[0] == 1 and observed_exit_codes[-1] == 0
             assert observed_exit_codes == [1, 0]
@@ -220,6 +231,8 @@ async def test_unsafe_or_unsuccessful_execution_never_completes(
         _env_file=None, database_path=tmp_path / "agent.db", docs_root=tmp_path,
         code_task_workspace_root=tmp_path / "workspaces",
         code_task_artifact_root=tmp_path / "artifacts", llm_api_key="",
+        code_task_worker_enabled=True,
+        code_task_worker_poll_interval_seconds=0.01,
         knowledge_pipeline_enabled=False, knowledge_rerank_enabled=False,
     ))
     first = call("run_tests", {"target": "unit"})
@@ -242,17 +255,22 @@ async def test_unsafe_or_unsuccessful_execution_never_completes(
 
     if scenario != "unavailable":
         app.state.code_task_service.test_tool.executor = LocalSandboxExecutor(backend)
+    app.state.code_task_service.llm = llm
+    app.state.code_task_service.strategy = app.state.code_task_strategy
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
         ) as client:
             created = await client.post("/api/code-tasks", json={"task": "Fix addition"})
-            assert created.status_code == 201
+            assert created.status_code == 202
             run_id = created.json()["run_id"]
             response = await client.post(f"/api/code-tasks/{run_id}/execute")
-            assert response.status_code == 409, response.text
-            assert response.json()["detail"]["code"] == expected_code
-            assert response.json()["detail"]["result"]["status"] == expected_status
+            assert response.status_code == 202, response.text
+            async with asyncio.timeout(3):
+                while (await client.get(f"/api/code-tasks/{run_id}")).json()["status"] not in {
+                    "completed", "failed", "cancelled", "timed_out",
+                }:
+                    await asyncio.sleep(0.01)
             persisted = (await client.get(f"/api/code-tasks/{run_id}")).json()
             assert persisted["status"] == expected_status
             assert persisted["error"]["code"] == expected_code

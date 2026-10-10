@@ -40,6 +40,10 @@ from app.writing.research import WritingResearchQueryPort, WritingResearcher
 from app.writing.service import WritingService
 from app.workspaces.service import WorkspaceService
 from app.execution.repository import ExecutionRepository
+from app.execution.worker import ExecutionWorker
+from app.execution.recovery import RecoveryObservation
+from app.execution.ports import canonical_digest
+from app.agent.code_execution import execution_config
 
 
 class UnconfiguredLLM:
@@ -64,6 +68,7 @@ class AppDependencies:
     artifact_service: ArtifactService
     code_task_service: CodeTaskService
     execution_repository: ExecutionRepository
+    execution_worker: ExecutionWorker
 
 
 def create_llm_client(config: Settings) -> LLMClient:
@@ -190,6 +195,23 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         capability_profile_factory=lambda repo: config.code_task_capability_profile(repo),
         execution_repository=ExecutionRepository(config.database_path),
     )
+    async def execute_claimed(run, lease, port):
+        return await code_task_service.execute(str(run.id), execution_lease=lease)
+
+    async def observe_recovery(candidate):
+        run = await run_repository.get_run(candidate.run_id)
+        _, _, policy = execution_config(code_task_service, run)
+        return RecoveryObservation(
+            policy_digest=canonical_digest(policy.model_dump(mode="json")),
+            executor_exited=False,
+        )
+
+    execution_worker = ExecutionWorker(
+        code_task_service.execution_repository, execute_claimed,
+        poll_interval_seconds=config.code_task_worker_poll_interval_seconds,
+        max_concurrency=config.code_task_worker_max_concurrency,
+        recovery_observation_factory=observe_recovery,
+    )
     return AppDependencies(
         session_repository=session_repository,
         run_repository=run_repository,
@@ -206,6 +228,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         artifact_service=artifact_service,
         code_task_service=code_task_service,
         execution_repository=code_task_service.execution_repository,
+        execution_worker=execution_worker,
     )
 
 

@@ -1,5 +1,6 @@
 """Explicit opt-in real provider and sandbox HTTP acceptance."""
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ async def test_real_provider_repairs_fixture_through_http():
         knowledge_pipeline_enabled=False, knowledge_rerank_enabled=False,
         code_task_tool_timeout_seconds=60, code_task_max_duration_seconds=300,
         code_task_max_loops=20, code_task_max_tool_calls=16,
+        code_task_worker_enabled=True,
     )
     assert config.llm_api_key.strip(), "real provider configuration required"
     assert config.code_task_sandbox_backend in {"docker", "openshell"}
@@ -53,6 +55,7 @@ async def test_real_provider_repairs_fixture_through_http():
                 raise
 
     app.state.code_task_llm = ObservedProvider()
+    app.state.code_task_service.llm = app.state.code_task_llm
     try:
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -65,17 +68,24 @@ async def test_real_provider_repairs_fixture_through_http():
                     "target again and call get_diff before your final response. "
                     "Do not modify the test or add files."
                 )})
-                assert created.status_code == 201
+                assert created.status_code == 202
                 run_id = created.json()["run_id"]
                 response = await client.post(f"/api/code-tasks/{run_id}/execute")
-                persisted = await client.get(f"/api/code-tasks/{run_id}")
-                payload = persisted.json()
+                assert response.status_code == 202
+                async with asyncio.timeout(330):
+                    while True:
+                        persisted = await client.get(f"/api/code-tasks/{run_id}")
+                        assert persisted.status_code == 200
+                        payload = persisted.json()
+                        if payload["status"] in {"completed", "failed", "cancelled", "timed_out", "waiting"}:
+                            break
+                        await asyncio.sleep(0.25)
                 summary.update({"run_id": run_id, "http_status": response.status_code,
                                 "status": payload["status"], "error": payload.get("error"),
                                 "usage": payload["usage"], "tool_calls": payload["tool_calls"],
                                 "changed_files": payload["changed_files"],
                                 "test_results": payload["test_results"]})
-                assert response.status_code == 200, summary
+                assert response.status_code == 202, summary
                 assert payload["status"] == "completed", summary
                 assert payload["changed_files"] == ["calculator.py"]
                 assert [r["exit_code"] for r in payload["test_results"]] == [1, 0]

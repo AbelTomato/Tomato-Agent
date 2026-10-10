@@ -97,23 +97,29 @@ class CodeExecutionPort(LeaseExecutionPort):
         return await super().commit_step(step_id, result, snapshot)
 
 
-async def execute_code(service, run, *, llm, strategy, test_tool, budget):
+async def execute_code(service, run, *, llm, strategy, test_tool, budget, execution_lease=None):
     repository = service.execution_repository
     key = str(run.id)
+    async def reject(code):
+        if execution_lease is not None:
+            await repository.finish(execution_lease, "failed", event_type="code_task.failed",
+                                    error={"code": code})
+        return {"status": "failed", "error": {"code": code}, **await service._result_details(key)}
+
     if run.status in {"completed", "failed", "cancelled", "timed_out"}:
         return {"status": "failed", "error": {"code": "run_not_active"}, **await service._result_details(key)}
     checkpoint = await service.run_repository.get_checkpoint(run.id)
     if not checkpoint or checkpoint.state.get("protocol_version") != 1:
-        return {"status": "failed", "error": {"code": "legacy_snapshot"}, **await service._result_details(key)}
+        return await reject("legacy_snapshot")
     profile, budget, policy = execution_config(service, run, budget)
     snapshot = await repository.get_snapshot(run.id)
     if snapshot.policy_digest != canonical_digest(policy.model_dump(mode="json")):
-        return {"status": "failed", "error": {"code": "policy_mismatch"}, **await service._result_details(key)}
+        return await reject("policy_mismatch")
     # Execution must use the budget frozen in the creation snapshot.
     if snapshot.budget_limits != budget.model_dump(mode="json"):
-        return {"status": "failed", "error": {"code": "budget_mismatch"}, **await service._result_details(key)}
+        return await reject("budget_mismatch")
     try:
-        lease = await repository.claim(run.id, str(uuid4()), lease_seconds=service.lease_seconds)
+        lease = execution_lease or await repository.claim(run.id, str(uuid4()), lease_seconds=service.lease_seconds)
     except RecoveryConflict as exc:
         return {"status": "failed", "error": {"code": str(exc)}, **await service._result_details(key)}
     except RuntimeError:
@@ -185,8 +191,10 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget):
 
     task = asyncio.create_task(work())
     service._execution_tasks[key] = task
-    pulse = asyncio.create_task(heartbeat())
-    service._heartbeat_tasks[key] = pulse
+    pulse = None
+    if execution_lease is None:
+        pulse = asyncio.create_task(heartbeat())
+        service._heartbeat_tasks[key] = pulse
     try:
         return await task
     except StaleExecutionOwner:
@@ -216,7 +224,8 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget):
                     **await service._result_details(key)}
         raise
     finally:
-        pulse.cancel()
-        await asyncio.gather(pulse, return_exceptions=True)
+        if pulse is not None:
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
         service._heartbeat_tasks.pop(key, None)
         service._execution_tasks.pop(key, None)

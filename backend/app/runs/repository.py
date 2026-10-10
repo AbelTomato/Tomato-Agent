@@ -218,14 +218,16 @@ class RunRepository:
             created_at=_parse_datetime(timestamp),
         )
 
-    async def list_events(self, run_id: str | UUID) -> list[RunEvent]:
+    async def list_events(self, run_id: str | UUID, *, after: int = 0) -> list[RunEvent]:
+        if after < 0:
+            raise ValueError("after must be non-negative")
         if await self.get_run(run_id) is None:
             raise KeyError(f"Run not found: {run_id}")
         async with aiosqlite.connect(self.path) as db:
             cursor = await db.execute(
                 "SELECT id, run_id, sequence, event_type, payload, created_at "
-                "FROM task_run_events WHERE run_id = ? ORDER BY sequence",
-                (str(run_id),),
+                "FROM task_run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
+                (str(run_id), after),
             )
             rows = await cursor.fetchall()
         return [
