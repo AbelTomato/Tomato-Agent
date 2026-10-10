@@ -230,3 +230,44 @@ export function isSafeExternalUrl(value: string | null): value is string {
     return false;
   }
 }
+
+export type CodeTaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'timed_out';
+export type CodeTaskEvent = { id: string; sequence: number; event_type: string; payload: Record<string, unknown>; created_at: string };
+export type CodeTaskArtifactRef = {
+  artifact_id: string; run_id: string; kind: string; size_bytes: number;
+  sha256: string; created_at: string; relative_path: string | null;
+};
+export type CodeTask = {
+  run_id: string; workspace_id: string; status: CodeTaskStatus; task_type: string;
+  dispatch_status: 'worker_enabled' | 'worker_disabled'; version: number;
+  error: Record<string, unknown> | null; artifacts: CodeTaskArtifactRef[];
+  test_results: Array<{ passed: boolean; exit_code: number | null; [key: string]: unknown }>;
+  changed_files: string[]; diff_artifact: CodeTaskArtifactRef | null;
+};
+export type CodeTaskSubmission = Pick<CodeTask, 'run_id' | 'workspace_id' | 'status' | 'task_type' | 'dispatch_status'>;
+export type CodeTaskRecovery = { status: CodeTaskStatus; recovery_reason?: string; recovery_action?: string };
+export type CodeTaskArtifact = { artifact: CodeTaskArtifactRef; content: string };
+
+const codeTaskPath = (runId: string) => `/api/code-tasks/${encodeURIComponent(runId)}`;
+
+export function createCodeTask(task: string, signal?: AbortSignal): Promise<CodeTaskSubmission> {
+  return request('/api/code-tasks', { ...jsonRequest({ task }), signal });
+}
+export function getCodeTask(runId: string, signal?: AbortSignal): Promise<CodeTask> {
+  return request(codeTaskPath(runId), { signal });
+}
+export function listCodeTaskEvents(runId: string, after = 0, signal?: AbortSignal): Promise<{ events: CodeTaskEvent[] }> {
+  return request(`${codeTaskPath(runId)}/events?after=${after}`, { signal });
+}
+export function executeCodeTask(runId: string, signal?: AbortSignal): Promise<CodeTask> {
+  return request(`${codeTaskPath(runId)}/execute`, { ...jsonRequest({}), signal });
+}
+export function cancelCodeTask(runId: string, signal?: AbortSignal): Promise<Pick<CodeTask, 'run_id' | 'status' | 'error'>> {
+  return request(`${codeTaskPath(runId)}/cancel`, { ...jsonRequest({ reason: 'user' }), signal });
+}
+export function recoverCodeTask(runId: string, expectedVersion: number, action: 'inspect' | 'continue', confirm = false, signal?: AbortSignal): Promise<CodeTaskRecovery> {
+  return request(`${codeTaskPath(runId)}/recover`, { ...jsonRequest({ expected_version: expectedVersion, action, confirm }), signal });
+}
+export function loadCodeTaskArtifact(runId: string, artifactId: string, signal?: AbortSignal): Promise<CodeTaskArtifact> {
+  return request(`${codeTaskPath(runId)}/artifacts/${encodeURIComponent(artifactId)}`, { signal });
+}

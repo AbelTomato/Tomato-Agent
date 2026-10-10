@@ -15,6 +15,7 @@ import {
 } from './api';
 import { CitationList } from './components/CitationList';
 import { WritingPanel } from './components/WritingPanel';
+import { CodeTaskPanel } from './components/CodeTaskPanel';
 import './style.css';
 
 type ChatMode = 'knowledge' | 'basic';
@@ -143,6 +144,7 @@ function App() {
       {sessionId && <small>当前 Session：{sessionId}</small>}
     </section>
     <WritingPanel sessionId={sessionId} onRequireSession={ensureSession} />
+    <CodeTaskPanel />
     {(document || documentError) && <section className="document-panel" aria-label="已导入原文"><button className="close-button" type="button" onClick={() => { setDocument(null); setDocumentError(''); }}>关闭</button>{documentError ? <p className="notice error">{documentError}</p> : document && <><h2>{document.document.title}</h2><p className="document-meta">{document.document.source_path} · 版本 {document.document.document_version}</p>{document.chunks.map((chunk) => <article className="document-chunk" key={chunk.chunk_id}>{chunk.heading_path && <h3>{chunk.heading_path}</h3>}<span>第 {chunk.start_line}–{chunk.end_line} 行</span><p>{chunk.text}</p></article>)}</>}</section>}
   </main>;
 }
