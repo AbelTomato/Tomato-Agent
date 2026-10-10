@@ -1,0 +1,32 @@
+name: tomato-openshell
+services:
+  gateway:
+    container_name: tomato-openshell-gateway
+    image: ghcr.io/nvidia/openshell/gateway@sha256:2fe4dad9118e14ab80a8258b545ea6e6cd74c3469e24ad4e6610f964d98913a2
+    restart: unless-stopped
+    user: "0"
+    command: [--config, /etc/openshell/gateway.toml]
+    environment:
+      OPENSHELL_TELEMETRY_ENABLED: "false"
+      OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml
+      OPENSHELL_DB_URL: sqlite:/var/lib/tomato-openshell/gateway.db?mode=rwc
+      XDG_DATA_HOME: /var/lib/tomato-openshell
+      HOME: /var/lib/tomato-openshell
+    ports:
+      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:18081:18081"
+    volumes:
+      - ${OPENSHELL_GATEWAY_CONFIG_PATH:-/home/abeltomato/.local/state/openshell/tomato-local/gateway.toml}:/etc/openshell/gateway.toml:ro
+      - /var/lib/tomato-openshell:/var/lib/tomato-openshell
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      gateway:
+        ipv4_address: 172.30.240.2
+networks:
+  gateway:
+    name: tomato-openshell-gateway
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.240.0/24
+          gateway: 172.30.240.1
