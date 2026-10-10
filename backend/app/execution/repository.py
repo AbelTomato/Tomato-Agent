@@ -30,8 +30,30 @@ class ExecutionRepository:
             await db.executescript(_RECOVERY_SCHEMA)
             await db.commit()
 
+    async def claim_next(self, owner_id: str, *, lease_seconds: int) -> tuple[RunRecord, LeaseHandle] | None:
+        """Atomically claim the oldest queued run, retrying if another worker wins."""
+        while True:
+            async with aiosqlite.connect(self.path) as db:
+                await self._configure(db)
+                row = await (await db.execute(
+                    "SELECT r.id FROM task_runs r LEFT JOIN execution_run_heads h ON h.run_id=r.id "
+                    "WHERE r.status='queued' AND r.task_type='code_task' "
+                    "AND (h.run_id IS NULL OR h.active_attempt_id IS NULL) "
+                    "ORDER BY r.created_at, r.id LIMIT 1"
+                )).fetchone()
+            if row is None:
+                return None
+            run_id = UUID(row[0])
+            try:
+                lease = await self.claim(run_id, owner_id, lease_seconds=lease_seconds, queued_only=True)
+            except RecoveryConflict:
+                continue
+            run = await self.get_run(run_id)
+            if run is not None:
+                return run, lease
+
     async def claim(
-        self, run_id: UUID, owner_id: str, *, lease_seconds: int
+        self, run_id: UUID, owner_id: str, *, lease_seconds: int, queued_only: bool = False
     ) -> LeaseHandle:
         now = self._aware_now()
         expires = now + timedelta(seconds=lease_seconds)
@@ -43,6 +65,8 @@ class ExecutionRepository:
                 run = await self._run_row(db, run_id)
                 if run is None:
                     raise KeyError(str(run_id))
+                if queued_only and run[4] != "queued":
+                    raise RecoveryConflict("run_not_queued")
                 if run[4] in {"completed", "failed", "cancelled", "timed_out"}:
                     raise RecoveryConflict("terminal_run")
                 head = await self._head_row(db, run_id)

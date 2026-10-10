@@ -21,6 +21,15 @@ class ExecutionPort(Protocol):
     async def commit_step(self, step_id, result, snapshot) -> ExecutionSnapshot: ...
 
 
+class WorkerRepository(Protocol):
+    async def claim_next(self, owner_id: str, *, lease_seconds: int) -> tuple[object, LeaseHandle] | None: ...
+    async def heartbeat(self, lease: LeaseHandle, *, lease_seconds: int) -> LeaseHandle: ...
+    async def scan_expired(self, limit: int) -> list[object]: ...
+    async def expire_and_classify(self, attempt_id): ...
+    async def get_recovery_candidate(self, run_id): ...
+    async def apply_recovery(self, candidate, decision): ...
+
+
 class LeaseExecutionPort:
     """Lease-bound persistence; side-effect metadata must be supplied by an adapter."""
 
@@ -31,6 +40,13 @@ class LeaseExecutionPort:
 
     async def save_snapshot(self, snapshot):
         return await self.repository.save_snapshot(self.lease, snapshot)
+
+    async def heartbeat(self, *, lease_seconds):
+        self.lease = await self.repository.heartbeat(self.lease, lease_seconds=lease_seconds)
+        return self.lease
+
+    async def finish(self, status, **kwargs):
+        return await self.repository.finish(self.lease, status, **kwargs)
 
     async def describe_operation(self, logical_index, tool_name, arguments):
         # Unknown tools are conservatively treated as writes, never safe reads.
