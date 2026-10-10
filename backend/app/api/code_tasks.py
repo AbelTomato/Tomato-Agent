@@ -16,6 +16,14 @@ class CancelCodeTaskRequest(BaseModel):
     reason: str = "cancelled"
 
 
+class RecoverCodeTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_version: int
+    action: str
+    confirm: bool = False
+
+
 def _service(request: Request) -> CodeTaskService:
     return request.app.state.code_task_service
 
@@ -63,6 +71,23 @@ async def execute_code_task(run_id: str, http_request: Request):
     if result.get("status") in {"failed", "cancelled", "timed_out"}:
         code = result.get("error", {}).get("code", "execution_failed")
         raise HTTPException(409, {"code": code, "result": result})
+    return result
+
+
+@router.post("/api/code-tasks/{run_id}/recover")
+async def recover_code_task(run_id: str, request: RecoverCodeTaskRequest, http_request: Request):
+    run_id = _run_id(run_id)
+    service = _service(http_request)
+    try:
+        if request.action == "continue" and not request.confirm:
+            raise ValueError("confirmation_required")
+        result = await service.recover(run_id, expected_version=request.expected_version,
+                                       action=request.action)
+    except KeyError as exc:
+        raise HTTPException(404, "Run not found") from exc
+    except Exception as exc:
+        code = str(exc) or "recovery_rejected"
+        raise HTTPException(409, {"code": code}) from exc
     return result
 
 

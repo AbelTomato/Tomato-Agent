@@ -70,12 +70,14 @@ async def test_code_task_api_create_query_events_and_artifact_scope(tmp_path):
             created = await client.post("/api/code-tasks", json={"task": "Fix it"})
             assert created.status_code == 201, created.text
             body = created.json()
-            assert body["status"] == "running"
+            assert body["status"] == "queued"
             run_id = body["run_id"]
 
             queried = await client.get(f"/api/code-tasks/{run_id}")
             assert queried.status_code == 200
             assert queried.json()["run_id"] == run_id
+            assert queried.json()["status"] == "queued"
+            assert await app.state.code_task_service.execution_repository.get_snapshot(run_id) is not None
 
             events = await client.get(f"/api/code-tasks/{run_id}/events")
             assert events.status_code == 200

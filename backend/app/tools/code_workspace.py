@@ -52,13 +52,14 @@ class CollectArguments(FileArguments):
 class CodeWorkspaceTool:
     def __init__(self, name: str, input_model: type[BaseModel],
                  workspaces: WorkspaceService, artifacts: ArtifactService,
-                 runs: RunRepository):
+                 runs: RunRepository, *, persist_events: bool = True):
         self.name = name
         self.description = f"{name} within the current authorized code workspace."
         self.input_model = input_model
         self.workspaces = workspaces
         self.artifacts = artifacts
         self.runs = runs
+        self.persist_events = persist_events
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(name=self.name, description=self.description,
@@ -169,9 +170,10 @@ class CodeWorkspaceTool:
             diff = await self.workspaces.diff(workspace_id)
             ref = await self.artifacts.register_text(context.run_id, "diff", diff)
             await self.workspaces.record_artifact_ref(workspace_id, ref.model_dump(mode="json"))
-            await self.runs.append_event(context.run_id, "code_task.diff_created", {
-                "artifact_id": str(ref.artifact_id),
-            })
+            if self.persist_events:
+                await self.runs.append_event(context.run_id, "code_task.diff_created", {
+                    "artifact_id": str(ref.artifact_id),
+                })
             return {"diff": diff, "artifact": ref.model_dump(mode="json")}
         if self.name == "collect_artifact":
             ref = await self.artifacts.register_file(context.run_id, workspace_id, args.path, args.kind)
@@ -180,7 +182,7 @@ class CodeWorkspaceTool:
 
 
 def create_code_workspace_registry(workspaces: WorkspaceService, artifacts: ArtifactService,
-                                   runs: RunRepository) -> ToolRegistry:
+                                   runs: RunRepository, *, persist_events: bool = True) -> ToolRegistry:
     """Explicit factory; ordinary Session registries never receive these tools."""
     models = {
         "list_files": DirectoryArguments, "read_file": FileArguments,
@@ -188,5 +190,6 @@ def create_code_workspace_registry(workspaces: WorkspaceService, artifacts: Arti
         "apply_patch": PatchArguments, "get_diff": Arguments,
         "collect_artifact": CollectArguments,
     }
-    return ToolRegistry([CodeWorkspaceTool(name, model, workspaces, artifacts, runs)
+    return ToolRegistry([CodeWorkspaceTool(name, model, workspaces, artifacts, runs,
+                                           persist_events=persist_events)
                          for name, model in models.items()])

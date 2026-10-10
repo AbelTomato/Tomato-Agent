@@ -133,6 +133,19 @@ class RunRepository:
             updated_at=_parse_datetime(row[8]),
         )
 
+    async def _reject_managed_write(self, db, run_id: str | UUID) -> None:
+        table = await (await db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_run_heads'"
+        )).fetchone()
+        if table is None:
+            return
+        head = await (await db.execute(
+            "SELECT 1 FROM execution_run_heads WHERE run_id=?", (str(run_id),)
+        )).fetchone()
+        if head is not None:
+            await db.rollback()
+            raise RuntimeError("execution owner must commit managed runs")
+
     async def update_status(
         self,
         run_id: str | UUID,
@@ -150,6 +163,7 @@ class RunRepository:
                 await db.rollback()
                 raise KeyError(f"Run not found: {run_id}")
             current_status, current_version = row
+            await self._reject_managed_write(db, run_id)
             if status not in _TRANSITIONS[current_status]:
                 await db.rollback()
                 raise ValueError(f"Invalid run status transition: {current_status} -> {status}")
@@ -176,6 +190,7 @@ class RunRepository:
         timestamp = _now()
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
+            await self._reject_managed_write(db, run_id)
             cursor = await db.execute(
                 "SELECT 1 FROM task_runs WHERE id = ?",
                 (str(run_id),),
@@ -229,6 +244,7 @@ class RunRepository:
         timestamp = _now()
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
+            await self._reject_managed_write(db, run_id)
             cursor = await db.execute(
                 "SELECT 1 FROM task_runs WHERE id = ?",
                 (str(run_id),),

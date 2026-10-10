@@ -39,6 +39,7 @@ from app.writing.repository import WritingRepository
 from app.writing.research import WritingResearchQueryPort, WritingResearcher
 from app.writing.service import WritingService
 from app.workspaces.service import WorkspaceService
+from app.execution.repository import ExecutionRepository
 
 
 class UnconfiguredLLM:
@@ -62,6 +63,7 @@ class AppDependencies:
     workspace_service: WorkspaceService
     artifact_service: ArtifactService
     code_task_service: CodeTaskService
+    execution_repository: ExecutionRepository
 
 
 def create_llm_client(config: Settings) -> LLMClient:
@@ -186,6 +188,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         test_tool=code_task_test_tool,
         budget=config.code_task_budget,
         capability_profile_factory=lambda repo: config.code_task_capability_profile(repo),
+        execution_repository=ExecutionRepository(config.database_path),
     )
     return AppDependencies(
         session_repository=session_repository,
@@ -202,6 +205,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         workspace_service=workspace_service,
         artifact_service=artifact_service,
         code_task_service=code_task_service,
+        execution_repository=code_task_service.execution_repository,
     )
 
 
