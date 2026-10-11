@@ -14,9 +14,15 @@ const labels: Record<CodeTaskStatus, string> = {
 const active = (status: CodeTaskStatus) => status === 'queued' || status === 'running';
 const terminal = (status: CodeTaskStatus) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
 const message = (reason: unknown) => reason instanceof Error ? reason.message : '代码任务请求失败。';
+const runStorageKey = 'tomato-agent.code-task.run-id';
+function savedRunId() {
+  try { return localStorage.getItem(runStorageKey)?.trim() ?? ''; }
+  catch { return ''; }
+}
 
 export function CodeTaskPanel() {
   const [input, setInput] = useState('');
+  const [openId, setOpenId] = useState(savedRunId);
   const [run, setRun] = useState<CodeTaskSubmission | CodeTask | null>(null);
   const [events, setEvents] = useState<CodeTaskEvent[]>([]);
   const [artifact, setArtifact] = useState<CodeTaskArtifact | null>(null);
@@ -36,6 +42,8 @@ export function CodeTaskPanel() {
 
   useEffect(() => {
     mounted.current = true;
+    const saved = savedRunId();
+    if (saved) open(saved);
     return () => {
       mounted.current = false;
       generation.current += 1;
@@ -93,9 +101,25 @@ export function CodeTaskPanel() {
     void act(async (signal, current) => {
       const created = await createCodeTask(input.trim(), signal);
       if (!current()) return;
-      cursor.current = 0;
-      setEvents([]); setArtifact(null); setRecovery(null); setConfirmed(false); setUpdatedAt('');
-      setRun(created);
+      selectRun(created);
+    });
+  }
+
+  function selectRun(selected: CodeTaskSubmission | CodeTask) {
+    cursor.current = 0;
+    setEvents([]); setArtifact(null); setRecovery(null); setConfirmed(false); setUpdatedAt('');
+    setRun(selected);
+    setOpenId(selected.run_id);
+    try { localStorage.setItem(runStorageKey, selected.run_id); }
+    catch { /* 手动按 ID 打开仍可使用。 */ }
+  }
+
+  function open(id: string) {
+    const requestedId = id.trim();
+    if (!requestedId) return;
+    void act(async (signal, current) => {
+      const loaded = await getCodeTask(requestedId, signal);
+      if (current()) selectRun(loaded);
     });
   }
 
@@ -112,6 +136,10 @@ export function CodeTaskPanel() {
       <div><h2><Code2 size={20} aria-hidden="true" /> 受控代码任务</h2><p>在固定 python_calculator fixture 中修复代码，查看隔离测试和 diff。</p></div>
       {run && <span className={`task-status task-status-${run.status}`} role="status">{labels[run.status]}</span>}
     </div>
+    <form onSubmit={(event) => { event.preventDefault(); open(openId); }}>
+      <label>Run ID<input value={openId} onChange={(event) => setOpenId(event.target.value)} placeholder="输入已有任务的 Run ID" disabled={busy} /></label>
+      <button className="secondary-button" type="submit" disabled={busy || !openId.trim()}>打开已有任务</button>
+    </form>
     <label>任务描述<textarea rows={3} value={input} onChange={(event) => setInput(event.target.value)} placeholder="例如：修复 calculator 的加法错误并运行登记测试" disabled={busy || (run !== null && !terminal(run.status))} /></label>
     <button type="button" onClick={start} disabled={busy || !input.trim() || (run !== null && !terminal(run.status))}>{busy ? '请求中…' : '提交代码任务'}</button>
     {!run && <p className="code-empty">提交后自动观察后台状态。需要启用 Worker 并配置隔离执行环境。</p>}
