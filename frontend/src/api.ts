@@ -237,12 +237,20 @@ export type CodeTaskArtifactRef = {
   artifact_id: string; run_id: string; kind: string; size_bytes: number;
   sha256: string; created_at: string; relative_path: string | null;
 };
+export type CodeTaskSnapshotSummary = {
+  sequence: number; created_at: string;
+  protocol_version: number | null; schema_version: number | null;
+  checkpoint_revision: number | null; last_event_sequence: number | null;
+  phase: 'ready_model' | 'pending_tool' | 'ready_finish' | 'waiting' | null;
+  logical_index: number | null;
+};
 export type CodeTask = {
   run_id: string; workspace_id: string; status: CodeTaskStatus; task_type: string;
   dispatch_status: 'worker_enabled' | 'worker_disabled'; version: number;
   error: Record<string, unknown> | null; artifacts: CodeTaskArtifactRef[];
   test_results: Array<{ passed: boolean; exit_code: number | null; [key: string]: unknown }>;
   changed_files: string[]; diff_artifact: CodeTaskArtifactRef | null;
+  snapshot_summary: CodeTaskSnapshotSummary | null; event_cursor: number;
 };
 export type CodeTaskSubmission = Pick<CodeTask, 'run_id' | 'workspace_id' | 'status' | 'task_type' | 'dispatch_status'>;
 export type CodeTaskRecovery = { status: CodeTaskStatus; recovery_reason?: string; recovery_action?: string };

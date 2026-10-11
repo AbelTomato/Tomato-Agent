@@ -43,7 +43,7 @@ async def _run_payload(service: CodeTaskService, run_id: str) -> dict:
     run = await service.run_repository.get_run(run_id)
     if run is None:
         raise HTTPException(404, "Run not found")
-    details = await service._result_details(run_id)
+    details = await service._result_details(run_id, include_events=False)
     return {"run_id": str(run.id), "task_type": run.task_type,
             "workspace_id": run.workspace_id, "status": run.status,
             "error": run.error, "version": run.version, **details}

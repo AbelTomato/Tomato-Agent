@@ -218,6 +218,15 @@ class RunRepository:
             created_at=_parse_datetime(timestamp),
         )
 
+    async def get_event_cursor(self, run_id: str | UUID) -> int:
+        """Return the latest persisted event sequence without loading event payloads."""
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM task_run_events WHERE run_id = ?",
+                (str(run_id),),
+            )
+            return (await cursor.fetchone())[0]
+
     async def list_events(self, run_id: str | UUID, *, after: int = 0) -> list[RunEvent]:
         if after < 0:
             raise ValueError("after must be non-negative")

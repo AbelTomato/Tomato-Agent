@@ -92,7 +92,8 @@ async def test_cancel_api_stops_active_execution_and_waits_for_cleanup(tmp_path,
                 assert repeated.json()["status"] == "cancelled"
                 persisted = (await client.get(f"/api/code-tasks/{run_id}")).json()
                 assert persisted["status"] == "cancelled"
-                assert not any(e["event_type"] == "code_task.completed" for e in persisted["events"])
+                events = (await client.get(f"/api/code-tasks/{run_id}/events")).json()["events"]
+                assert not any(e["event_type"] == "code_task.completed" for e in events)
             finally:
                 if not execution.done():
                     execution.cancel()
@@ -214,7 +215,8 @@ async def test_failing_fixture_can_be_read_repaired_and_retested_through_api(tmp
             assert queried.status_code == 200
             assert queried.json()["status"] == "completed"
             events = (await client.get(f"/api/code-tasks/{run_id}/events")).json()["events"]
-            assert events == result["events"]
+            assert "events" not in result
+            assert result["event_cursor"] == events[-1]["sequence"]
             assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
             assert events[0]["event_type"] == "code_task.created"
             assert events[-1]["event_type"] == "code_task.completed"
@@ -294,9 +296,10 @@ async def test_unsafe_or_unsuccessful_execution_never_completes(
             persisted = (await client.get(f"/api/code-tasks/{run_id}")).json()
             assert persisted["status"] == expected_status
             assert persisted["error"]["code"] == expected_code
-            assert persisted["events"][-1]["event_type"] == "code_task.failed"
+            events = (await client.get(f"/api/code-tasks/{run_id}/events")).json()["events"]
+            assert events[-1]["event_type"] == "code_task.failed"
             assert not any(event["event_type"] == "code_task.completed"
-                           for event in persisted["events"])
+                           for event in events)
             if scenario in {"escape", "unknown_target", "unavailable"}:
                 assert calls == []
             else:
@@ -390,7 +393,8 @@ async def test_real_background_sandbox_boundaries(scenario, monkeypatch):
                 assert payload["status"] == expected[0], summary
                 assert (payload.get("error") or {}).get("code") == expected[1], summary
                 if scenario == "cancelled":
-                    assert any(event["event_type"] == "execution.cancelled" for event in payload["events"])
+                    events = (await client.get(f"/api/code-tasks/{run_id}/events")).json()["events"]
+                    assert any(event["event_type"] == "execution.cancelled" for event in events)
                 for ref in payload["artifacts"]:
                     artifact = await client.get(f"/api/code-tasks/{run_id}/artifacts/{ref['artifact_id']}")
                     assert artifact.status_code == 200

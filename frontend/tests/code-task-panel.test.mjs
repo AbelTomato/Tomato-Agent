@@ -35,11 +35,15 @@ globalThis.__codePanelHooks = {
 };
 const calls = [];
 let fail = false;
+let eventCursor = 1;
+let eventReader = null;
 const task = (id) => ({ run_id: id, status: 'completed', workspace_id: `ws-${id}`, version: 2,
+  event_cursor: eventCursor, snapshot_summary: { sequence: 3, checkpoint_revision: 3,
+    phase: 'ready_finish', logical_index: 7, created_at: '2026-10-11T10:00:00Z' },
   artifacts: [{ artifact_id: `diff-${id}`, kind: 'diff', size_bytes: 4 }], test_results: [], changed_files: ['calculator.py'] });
 globalThis.__codePanelApi = {
   async getCodeTask(id) { calls.push(['state', id]); if (fail || id === 'missing') throw new Error('Run 不存在'); return task(id); },
-  async listCodeTaskEvents(id, after) { calls.push(['events', id, after]); return { events: [{ sequence: 1, event_type: id, payload: {} }] }; },
+  async listCodeTaskEvents(id, after) { calls.push(['events', id, after]); return eventReader ? eventReader(id, after) : { events: [{ sequence: 1, event_type: id, payload: {} }] }; },
   async loadCodeTaskArtifact(id, artifactId) { calls.push(['artifact', id, artifactId]); return { artifact: { kind: 'diff' }, content: `content-${id}` }; },
   async createCodeTask() { return task('created'); },
 };
@@ -78,6 +82,9 @@ test('刷新恢复状态和完整事件，读取产物，切换 ID 清空旧产�
   try {
     mount(); await flush();
     assert.match(text(harness.tree), /Run：saved/);
+    assert.match(text(harness.tree), /执行阶段：准备完成 · 逻辑步骤：7/);
+    assert.match(text(harness.tree), /检查点：#3 · 修订：3/);
+    assert.match(text(harness.tree), /事件游标：1 · 已读取：1/);
     assert.ok(calls.some((call) => call.join() === 'events,saved,0'));
     const artifactButton = elements().find((node) => node.type === 'button' && text(node).includes('查看 diff'));
     artifactButton.props.onClick(); await flush();
@@ -123,4 +130,34 @@ test('已有任务轮询成功不会清除打开其他任务失败的操作错�
     assert.match(text(harness.tree), /Run 不存在/);
     assert.match(text(harness.tree), /Run：saved/);
   } finally { unmount(); globalThis.localStorage = originalStorage; }
+});
+
+test('终态游标领先时继续增量读取，游标只推进到已收到的事件', async () => {
+  const originalStorage = globalThis.localStorage;
+  const originalTimeout = globalThis.setTimeout;
+  const timers = [];
+  const afterValues = [];
+  globalThis.localStorage = { getItem: () => 'saved', setItem() {} };
+  globalThis.setTimeout = (callback) => { timers.push(callback); return 0; };
+  eventCursor = 2;
+  eventReader = async (id, after) => {
+    afterValues.push(after);
+    return { events: [{ sequence: after + 1, event_type: id, payload: {} }] };
+  };
+  try {
+    mount(); await flush();
+    assert.deepEqual(afterValues, [0]);
+    assert.match(text(harness.tree), /事件游标：2 · 已读取：1/);
+    assert.equal(timers.length, 1);
+    timers.shift()(); await flush();
+    assert.deepEqual(afterValues, [0, 1]);
+    assert.match(text(harness.tree), /事件游标：2 · 已读取：2/);
+    assert.equal(timers.length, 0);
+  } finally {
+    unmount();
+    globalThis.localStorage = originalStorage;
+    globalThis.setTimeout = originalTimeout;
+    eventCursor = 1;
+    eventReader = null;
+  }
 });

@@ -13,6 +13,10 @@ const labels: Record<CodeTaskStatus, string> = {
 };
 const active = (status: CodeTaskStatus) => status === 'queued' || status === 'running';
 const terminal = (status: CodeTaskStatus) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(status);
+const phaseLabels = {
+  ready_model: '等待模型调用', pending_tool: '等待工具执行',
+  ready_finish: '准备完成', waiting: '等待人工核对',
+};
 const message = (reason: unknown) => reason instanceof Error ? reason.message : '代码任务请求失败。';
 const runStorageKey = 'tomato-agent.code-task.run-id';
 function savedRunId() {
@@ -72,7 +76,9 @@ export function CodeTaskPanel() {
         setUpdatedAt(new Date().toLocaleString());
         setPollError('');
         failures = 0;
-        if (!terminal(loaded.status)) timer = setTimeout(() => void poll(), 1000);
+        if (!terminal(loaded.status) || cursor.current < loaded.event_cursor) {
+          timer = setTimeout(() => void poll(), 1000);
+        }
       } catch (reason) {
         if (controller.signal.aborted) return;
         failures += 1;
@@ -149,6 +155,10 @@ export function CodeTaskPanel() {
     {pollError && <p className="notice error" role="alert">{pollError}</p>}
     {run && <>
       <p className="code-meta">Run：{run.run_id}<br />Workspace：{run.workspace_id}<br />版本：{details?.version ?? '待查询'} · 最近查询：{updatedAt || '尚未查询'}</p>
+      {details && <p className="code-meta">事件游标：{details.event_cursor} · 已读取：{cursor.current}<br />
+        {details.snapshot_summary ? <>执行阶段：{details.snapshot_summary.phase ? phaseLabels[details.snapshot_summary.phase] : '未知'} · 逻辑步骤：{details.snapshot_summary.logical_index ?? '未知'}<br />
+          检查点：#{details.snapshot_summary.sequence} · 修订：{details.snapshot_summary.checkpoint_revision ?? '未知'} · 保存时间：{details.snapshot_summary.created_at}</> : '尚无检查点'}
+      </p>}
       {run.dispatch_status === 'worker_disabled' && <p className="notice">后台 Worker 未启用，任务不会自动执行。请在后端配置 CODE_TASK_WORKER_ENABLED=true 并重启服务。</p>}
       {details?.error && <pre className="notice error">{JSON.stringify(details.error, null, 2)}</pre>}
       <div className="code-actions">

@@ -246,14 +246,25 @@ class CodeTaskService:
             await asyncio.shield(asyncio.gather(task, return_exceptions=True))
         return await self.run_repository.get_run(run.id)
 
-    async def _result_details(self, run_id: str, *, usage=None, tool_calls: int = 0) -> dict[str, Any]:
+    async def _result_details(self, run_id: str, *, usage=None, tool_calls: int = 0,
+                              include_events: bool = True) -> dict[str, Any]:
         """Assemble the auditable result shared by success and failure responses."""
         run = await self.run_repository.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
-        events = await self.run_repository.list_events(run.id)
+        events = await self.run_repository.list_events(run.id) if include_events else None
         artifacts = await self.artifact_service.list_for_run(run.id)
         checkpoint = await self.run_repository.get_checkpoint(run.id)
+        snapshot_summary = None
+        if checkpoint is not None:
+            snapshot_summary = {
+                "sequence": checkpoint.sequence,
+                "created_at": checkpoint.created_at.isoformat(),
+                **{key: checkpoint.state.get(key) for key in (
+                    "protocol_version", "schema_version", "checkpoint_revision",
+                    "last_event_sequence", "phase", "logical_index",
+                )},
+            }
         state = dict(checkpoint.state) if checkpoint else {}
         if state.get("protocol_version") == 1:
             state = {**state, **state.get("harness_state", {})}
@@ -282,7 +293,11 @@ class CodeTaskService:
         return {
             "usage": usage_payload,
             "tool_calls": tool_calls,
-            "events": [event.model_dump(mode="json") for event in events],
+            "snapshot_summary": snapshot_summary,
+            "event_cursor": (events[-1].sequence if events else 0) if include_events
+                            else await self.run_repository.get_event_cursor(run.id),
+            **({"events": [event.model_dump(mode="json") for event in events]}
+               if events is not None else {}),
             "artifacts": [ref.model_dump(mode="json") for ref in artifacts],
             "test_results": state.get("test_results", []),
             "diff_artifact": diff_artifact,
