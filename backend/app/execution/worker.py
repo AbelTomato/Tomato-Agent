@@ -44,6 +44,7 @@ class ExecutionWorker:
         self._owner_id = f"worker-{uuid4()}"
         self._active: dict[asyncio.Task, object] = {}
         self._loop_task: asyncio.Task | None = None
+        self._recovery_task: asyncio.Task | None = None
         self._stop_event: asyncio.Event | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._run_lock = asyncio.Lock()
@@ -56,10 +57,12 @@ class ExecutionWorker:
             self._stop_event = asyncio.Event()
             self._stopped = False
             self._loop_task = asyncio.create_task(self._run_loop())
+            self._recovery_task = asyncio.create_task(self._recovery_loop())
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
             loop_task = self._loop_task
+            recovery_task = self._recovery_task
             self._stopped = True
             if loop_task is None:
                 tasks = list(self._active)
@@ -69,13 +72,32 @@ class ExecutionWorker:
                 tasks = list(self._active)
         if loop_task is not None:
             await loop_task
+        if recovery_task is not None:
+            await recovery_task
         tasks = list(self._active)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         async with self._lifecycle_lock:
             if self._loop_task is loop_task:
                 self._loop_task = None
+                self._recovery_task = None
                 self._stop_event = None
+
+    async def _recovery_loop(self) -> None:
+        assert self._stop_event is not None
+        while not self._stop_event.is_set():
+            try:
+                # Drain expired attempts in bounded batches, independently of execution.
+                while not self._stop_event.is_set():
+                    recovered = await self.recover_on_startup()
+                    if len(recovered) < self.recovery_scan_limit:
+                        break
+            except Exception:
+                logger.error("Worker recovery iteration failed")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_interval_seconds)
+            except asyncio.TimeoutError:
+                pass
 
     async def _run_loop(self) -> None:
         assert self._stop_event is not None
@@ -150,6 +172,7 @@ class ExecutionWorker:
             execution.cancel()
 
     async def recover_on_startup(self, *, observation_factory=None) -> list[RecoveryResult]:
+        """Recover one expired batch at startup or during periodic scanning."""
         factory = observation_factory or self.recovery_observation_factory
         expired = await self.repository.scan_expired(self.recovery_scan_limit)
         if expired and factory is None:

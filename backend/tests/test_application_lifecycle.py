@@ -136,8 +136,10 @@ async def test_startup_recovers_expired_run_with_current_policy(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_startup_requeues_safe_run_and_waits_unknown_file_write(tmp_path):
-    app = make_app(tmp_path, code_task_worker_enabled=True)
+@pytest.mark.parametrize("expired_at_startup", [True, False])
+async def test_restart_recovers_safe_run_and_waits_unknown_file_write(tmp_path, expired_at_startup):
+    app = make_app(tmp_path, code_task_worker_enabled=True,
+                   code_task_worker_poll_interval_seconds=0.01)
     service = app.state.code_task_service
     await service.initialize()
     safe = await service.create(CodeTaskRequest(task="Safe restart"))
@@ -152,7 +154,7 @@ async def test_startup_requeues_safe_run_and_waits_unknown_file_write(tmp_path):
 
     clock = Clock()
     repository.clock = clock
-    await repository.claim(safe.id, "safe-old", lease_seconds=30)
+    old_safe_lease = await repository.claim(safe.id, "safe-old", lease_seconds=30)
     lease = await repository.claim(unknown.id, "unknown-old", lease_seconds=30)
     snapshot = await repository.get_snapshot(unknown.id)
     payload = {"path": "calculator.py", "content": "unknown"}
@@ -165,12 +167,45 @@ async def test_startup_requeues_safe_run_and_waits_unknown_file_write(tmp_path):
     snapshot = snapshot.model_copy(update={"pending_operation_id": operation.id})
     await repository.prepare_operation(lease, operation, snapshot)
     await repository.start_step(lease, operation.id, snapshot)
-    clock.value += timedelta(seconds=31)
+    executed = []
+
+    async def execute(run, lease, port):
+        executed.append(run.id)
+        await port.finish("completed", event_type="execution.completed")
+
+    app.state.execution_worker.executor_factory = execute
+    if expired_at_startup:
+        clock.value += timedelta(seconds=31)
     async with app.router.lifespan_context(app):
-        # start() only schedules the loop; recovery is complete before its first claim.
+        if not expired_at_startup:
+            # Observe a background scan before expiry, then cross the lease boundary.
+            scanned = asyncio.Event()
+            scan_expired = repository.scan_expired
+
+            async def scan(limit):
+                result = await scan_expired(limit)
+                scanned.set()
+                return result
+
+            repository.scan_expired = scan
+            await asyncio.wait_for(scanned.wait(), 2)
+            assert (await repository.get_run(safe.id)).status == "running"
+            assert (await repository.get_run(unknown.id)).status == "running"
+            assert executed == []
+            assert (await repository.get_attempt(old_safe_lease.attempt_id)).status == "running"
+            clock.value += timedelta(seconds=31)
+        async with asyncio.timeout(3):
+            while ((await repository.get_run(safe.id)).status != "completed"
+                   or (await repository.get_run(unknown.id)).status != "waiting"):
+                await asyncio.sleep(0.01)
         assert (await repository.get_run(unknown.id)).status == "waiting"
         events = await service.run_repository.list_events(safe.id)
-        assert any(event.event_type == "execution.recovered" for event in events)
+        assert sum(event.event_type == "execution.recovered" for event in events) == 1
+        assert (await repository.get_attempt(old_safe_lease.attempt_id)).status == "expired"
+        assert (await repository.latest_attempt(safe.id)).fencing_token == 2
+        assert executed == [safe.id]
+    assert app.state.execution_worker._loop_task is None
+    assert not app.state.execution_worker._active
 
 
 @pytest.mark.asyncio

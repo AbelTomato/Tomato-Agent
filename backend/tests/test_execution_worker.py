@@ -267,3 +267,33 @@ async def test_worker_rejects_non_single_concurrency(tmp_path):
     from app.execution.worker import ExecutionWorker
     with pytest.raises(ValueError):
         ExecutionWorker(execution, factory, max_concurrency=2)
+
+
+@pytest.mark.asyncio
+async def test_recovery_scan_retries_while_executor_is_busy_and_stops_with_worker(tmp_path, monkeypatch):
+    worker, _, execution, factory, _ = await make_worker(tmp_path, block=True)
+    scanned = asyncio.Event()
+    scan_expired = execution.scan_expired
+    calls = 0
+
+    async def scan(limit):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary scan failure")
+        result = await scan_expired(limit)
+        if factory.started:
+            scanned.set()
+        return result
+
+    monkeypatch.setattr(execution, "scan_expired", scan)
+    await worker.start()
+    try:
+        await asyncio.wait_for(factory.started_event.wait(), 2)
+        await asyncio.wait_for(scanned.wait(), 2)
+        assert not factory.release.is_set()
+        assert calls >= 2
+    finally:
+        factory.release.set()
+        await worker.stop()
+    assert worker._recovery_task is None
