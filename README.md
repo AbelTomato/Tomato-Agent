@@ -56,13 +56,13 @@ pnpm dev
 
 ## 当前使用边界
 
-当前按本地可信单用户、一次一个任务场景使用。写作流程由用户显式推进；代码任务限定固定 `python_calculator` fixture，需另行配置 Docker/OpenShell 隔离后端。设置 `CODE_TASK_WORKER_ENABLED=true` 后，应用启动会先初始化执行仓储、处理安全恢复，再由单机单 Worker 自动领取 queued Run；关闭时会停止 Worker。创建/查询响应包含 `dispatch_status`，禁用时明确为 `worker_disabled`。SQLite 执行内核已通过 fake LLM/工具的独立进程硬崩溃、显式恢复、竞争领取与旧执行者 fencing 验证；未知写入/Sandbox 副作用进入等待，不盲目重放。后台调度、多机/生产多 Worker、真实外部故障矩阵与公开多租户安全仍未验收，测试与单次真实闭环不代表生产放行。
+当前按本地可信单用户、一次一个任务场景使用。写作流程由用户显式推进；代码任务限定固定 `python_calculator` fixture，需另行配置 Docker/OpenShell 隔离后端。设置 `CODE_TASK_WORKER_ENABLED=true` 后，应用启动会先初始化执行仓储、处理安全恢复，再由单机单 Worker 自动领取 queued Run；关闭时会停止 Worker。创建/查询响应包含 `dispatch_status`，禁用时明确为 `worker_disabled`。SQLite 执行内核已通过 fake LLM/工具的独立进程硬崩溃、显式恢复、竞争领取与旧执行者 fencing 验证；未知写入/Sandbox 副作用进入等待，不盲目重放。当前后台能力已在代码任务范围内完成单 Worker 交付验收，但写作尚未接入该恢复内核；多 Worker、背压/限流、生产规模、真实 Gateway 断连与资源故障矩阵、公开多租户安全仍未验收，测试与单次真实闭环不代表生产放行。
 
 ## 文档导航
 
 后台执行计划任务 1～6 已完成功能与交付门禁（2026-10-11，未提交 Git）。最终后端目标回归 133 passed、6 个真实 opt-in 场景跳过；聊天/知识/写作目标回归 33 passed，前端 5/5 与 TypeScript/Vite 构建通过。任务 5 已有 Docker 五场景、OpenShell 五场景及后台 HTTP/独立进程六场景通过证据，本轮核实并复用；跳过不计通过。后台故障验收使用脚本模型，清理失败采用显式注入；真实 Sandbox 未知副作用重启保持 waiting。工具集合序列化顺序已固定，旧 Run 摘要不自动迁移。具体命令、资源检查和未验收边界见[受控代码任务说明](docs/受控代码任务说明.md)。
 
-后台执行计划任务 1～3 已提供并接入独立 `ExecutionWorker` 协调器：单并发领取、租约心跳、启动恢复、关闭等待和异步代码任务 API 均由应用管理。代码任务创建和 execute 请求返回 `202`，前端可通过状态与事件游标轮询，执行结果、取消、恢复和 artifact 通过后续 API 获取；目标验证为任务 3 API/Worker 38/38 及执行内核 72/72，通过范围与限制见[受控代码任务说明](docs/受控代码任务说明.md)。
+独立 `ExecutionWorker` 协调器负责单并发领取、租约心跳、启动恢复和关闭等待。代码任务创建和 execute 请求返回 `202`；前端提供状态/事件轮询、取消、人工恢复确认和 artifact/diff 查看。该能力仍限代码任务、单机单 Worker 和固定 fixture，不代表写作或其他业务已接入同一后台执行内核。
 
 | 文档 | 内容 |
 | --- | --- |
