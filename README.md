@@ -61,11 +61,11 @@ pnpm dev
 
 ## 文档导航
 
-统一会话与原目录代码任务 MVP 计划任务 1～7 已完成（2026-10-11）：公共 Run、原目录注册、分轮 diff/冲突、服务层 pytest、四类适配器/单 Worker 分派及统一 API/只读历史已实现。任务 6 直接影响 14 文件回归 194 passed（无失败/跳过）；覆盖 HTTP 确认/保存重放、游标分页、legacy 历史去重、默认工作区持久化和显式原目录绑定。新入口为 `POST /api/sessions/{id}/tasks`，Web 已使用统一会话壳，旧代码任务 HTTP 入口仍使用 fixture。任务 7 前端 19/19、TypeScript/Vite 构建及后端 API/历史 23/23 通过；真实 Provider/Docker/浏览器原目录闭环留任务 8。`TASK_WORKER_ENABLED` 显式优先，未设置回退 `CODE_TASK_WORKER_ENABLED`，只启动一个 Worker。聊天/RAG/写作仅阶段恢复，未知保存保持等待；原目录服务限定 Python/pytest、digest 固定 Docker，不代表完整 MVP 交付，详见[实施计划](docs/实施计划/2026.10.11-统一会话与原目录代码任务MVP实施计划.md)及[受控代码任务说明](docs/受控代码任务说明.md)。
+统一会话与原目录代码任务 MVP 计划任务 1～8 已完成（2026-10-11）：公共 Run、原目录注册、分轮 diff/冲突、四类适配器/单 Worker、统一 API 与前端通过独立验收。任务 8 后端19文件268 passed（无失败/跳过），前端19 passed与TypeScript/Vite构建通过；真实Provider+Docker两轮原目录1 passed，Chrome完成同Session聊天、带引用RAG/原文、提纲编辑确认/保存、代码测试/diff、刷新/切换、主动取消和外部冲突拒绝。错误测试目标保留failed记录，继续后成功；跳过不计通过。新入口为 `POST /api/sessions/{id}/tasks`，旧代码HTTP入口保留fixture。`TASK_WORKER_ENABLED` 显式优先，未设置回退 `CODE_TASK_WORKER_ENABLED`，只启动一个Worker。聊天/RAG/写作仅阶段恢复，未知保存保持等待；原目录限定Python/pytest、预置依赖、digest固定Docker与只读测试。关键词中文改写对英文语料可能无结果；本地可信单用户MVP验收不代表跨语言检索质量或生产放行，详见[实施计划](docs/实施计划/2026.10.11-统一会话与原目录代码任务MVP实施计划.md)及[受控代码任务说明](docs/受控代码任务说明.md)。
 
 后台执行计划任务 1～6 已完成功能与交付门禁（2026-10-11，未提交 Git）。最终后端目标回归 133 passed、6 个真实 opt-in 场景跳过；聊天/知识/写作目标回归 33 passed，前端 5/5 与 TypeScript/Vite 构建通过。任务 5 已有 Docker 五场景、OpenShell 五场景及后台 HTTP/独立进程六场景通过证据，本轮核实并复用；跳过不计通过。后台故障验收使用脚本模型，清理失败采用显式注入；真实 Sandbox 未知副作用重启保持 waiting。工具集合序列化顺序已固定，旧 Run 摘要不自动迁移。具体命令、资源检查和未验收边界见[受控代码任务说明](docs/受控代码任务说明.md)。
 
-独立 `ExecutionWorker` 协调器负责单并发领取、租约心跳、启动恢复和关闭等待。代码任务创建和 execute 请求返回 `202`；前端提供状态/事件轮询、取消、人工恢复确认和 artifact/diff 查看。该历史代码入口继续保留；统一入口已共享单机单 Worker 外层执行内核，聊天/RAG/写作仅阶段恢复，完整 MVP 真实验收留任务 8。
+独立 `ExecutionWorker` 协调器负责单并发领取、租约心跳、启动恢复和关闭等待。代码任务创建和 execute 请求返回 `202`；前端提供状态/事件轮询、取消、人工恢复确认和 artifact/diff 查看。该历史代码入口继续保留；统一入口已共享单机单 Worker 外层执行内核，聊天/RAG/写作仅阶段恢复，任务 8 已取得独立真实验收证据。
 
 | 文档 | 内容 |
 | --- | --- |

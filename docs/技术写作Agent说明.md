@@ -1,5 +1,9 @@
 # 技术写作 Agent 说明
 
+## 统一 MVP 任务 8 增量证据（2026-10-11）
+
+真实 Provider/Chrome 在独立 Session 与独立 SETEX 知识库中完成研究、用户编辑提纲、确认生成和显式保存。知识库位于 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases/unified-mvp-2026-10-11.db`，草稿及浏览器工件位于 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/unified-mvp-acceptance/browser-2026-10-11/`；未迁移现有业务库。恢复测试新增独立进程硬退出，验证已发布提纲/已保存结果补齐且不再次生成或保存，生成中断 failed/interrupted，未知保存 waiting/save_outcome_unknown。仅外层阶段恢复，不支持领域内部逐操作接管。完整任务 8 状态以实施计划检查点为准。
+
 ## 统一会话前端（2026-10-11，MVP 任务 7）
 
 在统一会话中选择“技术写作”并提交主题，研究由 Worker 执行；等待提纲确认时编辑 JSON，点击“确认提纲并生成草稿”；草稿出现后点击“确认保存草稿”。所有操作使用统一 Run 的 pending_action/版本，服务端固定保存幂等键；不会单独创建 Panel 领域任务。刷新从服务端恢复，切模式保留完整时间线；legacy 写作仅展示，无统一操作能力。保存未知时可核查事实，界面不会自动重试或默认确认恢复。
