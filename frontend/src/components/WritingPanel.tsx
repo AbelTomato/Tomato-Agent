@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { WritingDraft } from './TaskCard';
 import {
   ApiError,
   confirmWritingOutline,
@@ -250,7 +251,7 @@ export function WritingPanel({ sessionId, onRequireSession }: WritingPanelProps)
             <button type="button" onClick={() => void generateDraft()} disabled={busy}>{busy ? '生成中…' : '生成草稿'}</button>
           </>}
           {task.status === 'awaiting_save_confirmation' && <>
-            <label>草稿<textarea value={task.draft ?? ''} readOnly rows={14} /></label>
+            <WritingDraft draft={task.draft} />
             <p className="evidence-summary">引用归属：{task.citations.length} 条服务端证据</p>
             <button type="button" onClick={() => void saveDraft()} disabled={busy}>{busy ? '保存中…' : '确认保存草稿'}</button>
           </>}

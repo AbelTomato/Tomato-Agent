@@ -28,3 +28,22 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .code-test-result { border-top: 1px solid #e2e8f0; padding: 10px 0; }
 .task-status-completed { color: #15803d; }.task-status-cancelled, .task-status-timed_out { color: #b91c1c; }.task-status-waiting { color: #a16207; }
 @media (max-width: 600px) { .code-task-panel { padding: 16px; }.code-actions { flex-direction: column; } }
+.conversation-layout { grid-template-columns: 240px minmax(0, 900px); align-items: start; }
+.session-sidebar { display: grid; gap: 16px; position: sticky; top: 24px; min-width: 0; }
+.session-sidebar nav { display: grid; gap: 8px; max-height: 70vh; overflow: auto; }
+.session-sidebar nav button { text-align: left; overflow-wrap: anywhere; }
+.session-sidebar button[aria-current="true"] { background: #dbeafe; border-color: #2563eb; }
+.conversation-shell { min-width: 0; }
+.workspace-picker, .task-timeline, .task-card { display: grid; gap: 12px; }
+.workspace-picker { padding: 12px; border: 1px solid #d9e0e7; border-radius: 8px; }
+.workspace-picker:not([open]) { display: block; }
+.task-card { border: 1px solid #d9e0e7; border-radius: 12px; padding: 16px; min-width: 0; }
+.task-card textarea { width: 100%; }
+.task-card pre, .task-events pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; font: 12px/1.5 ui-monospace, monospace; }
+.task-card small, .task-answer, .task-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-prompt { background: #dbeafe; padding: 12px; border-radius: 8px; }
+.task-events { margin: 8px 0 16px; }
+.task-events ol { max-height: 320px; overflow: auto; }
+.conversation-shell .composer textarea { flex: 1; min-width: 0; }
+.conversation-layout > .document-panel { grid-column: 2; }
+@media (max-width: 800px) { .conversation-layout { grid-template-columns: minmax(0, 1fr); }.session-sidebar { position: static; }.session-sidebar nav { max-height: 160px; }.conversation-layout > .document-panel { grid-column: 1; } }

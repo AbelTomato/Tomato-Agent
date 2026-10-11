@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Code2, RefreshCw, Square, Play, FileText } from 'lucide-react';
+import { CodeTestResults } from './TaskCard';
 import {
   createCodeTask, getCodeTask, listCodeTaskEvents, executeCodeTask, cancelCodeTask,
   recoverCodeTask, loadCodeTaskArtifact,
@@ -180,7 +181,7 @@ export function CodeTaskPanel() {
         <button type="button" disabled={busy || !details || !confirmed} onClick={() => recover('continue')}>确认请求恢复</button>
       </div>}
       <div><h3>事件</h3>{events.length ? <ol className="code-events">{events.map((event) => <li key={event.sequence}><b>#{event.sequence} {event.event_type}</b><small>{event.created_at}</small><pre>{JSON.stringify(event.payload, null, 2)}</pre></li>)}</ol> : <p className="code-empty">暂无事件</p>}</div>
-      <div><h3>测试结果</h3>{details?.test_results.length ? details.test_results.map((result, index) => <div key={index} className="code-test-result"><p>测试 {index + 1}：{result.passed ? '通过' : '未通过'} · 退出码 {result.exit_code ?? '未知'}</p><details><summary>结构化报告</summary><pre>{JSON.stringify(result, null, 2)}</pre></details></div>) : <p className="code-empty">尚无测试报告</p>}</div>
+      <CodeTestResults results={details?.test_results ?? []} />
       <div><h3>Diff 与 Artifact</h3><p className="code-meta">修改文件：{details?.changed_files.join('、') || '暂无'}</p>
         <ul className="code-artifacts">{details?.artifacts.map((ref) => <li key={ref.artifact_id}><button className="secondary-button" type="button" disabled={busy} onClick={() => void act(async (signal, current) => {
           const loaded = await loadCodeTaskArtifact(run.run_id, ref.artifact_id, signal);

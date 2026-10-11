@@ -6,6 +6,7 @@ import { transformWithOxc } from 'vite';
 // 无 DOM 的组件 Hook 驱动器：执行真实组件的挂载、重渲染及卸载逻辑。
 let harness;
 const source = readFileSync(new URL('../src/components/CodeTaskPanel.tsx', import.meta.url), 'utf8')
+  .replace("import { CodeTestResults } from './TaskCard';", 'const CodeTestResults = "test-results";')
   .replace(/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__codePanelHooks;')
   .replace(/import \{.*?\} from 'lucide-react';/s, 'const Code2 = "icon", RefreshCw = "icon", Square = "icon", Play = "icon", FileText = "icon";')
   .replace(/import \{.*?\} from '..\/api';/s, 'const { createCodeTask, getCodeTask, listCodeTaskEvents, executeCodeTask, cancelCodeTask, recoverCodeTask, loadCodeTaskArtifact } = globalThis.__codePanelApi;');

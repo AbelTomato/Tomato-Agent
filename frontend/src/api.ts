@@ -129,8 +129,8 @@ const jsonRequest = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-export async function createSession(): Promise<string> {
-  const result = await request<{ session_id: string }>('/api/sessions', jsonRequest({}));
+export async function createSession(signal?: AbortSignal): Promise<string> {
+  const result = await request<{ session_id: string }>('/api/sessions', { ...jsonRequest({}), signal });
   if (!result.session_id) throw new ApiError('后端未返回 session_id。', 200);
   return result.session_id;
 }
@@ -278,4 +278,55 @@ export function recoverCodeTask(runId: string, expectedVersion: number, action: 
 }
 export function loadCodeTaskArtifact(runId: string, artifactId: string, signal?: AbortSignal): Promise<CodeTaskArtifact> {
   return request(`${codeTaskPath(runId)}/artifacts/${encodeURIComponent(artifactId)}`, { signal });
+}
+
+export type TaskKind = 'chat' | 'knowledge' | 'writing' | 'code';
+export type TaskAction = 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery';
+export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string };
+export type Workspace = { workspace_id: string; repo_path?: string; pytest_paths?: string[]; available?: boolean };
+export type UnifiedResult = Partial<WritingTask> & {
+  answer?: string; content?: string; evidence_status?: string;
+  test_results?: CodeTask['test_results']; artifacts?: CodeTaskArtifactRef[];
+  changed_files?: string[]; diff_artifact?: CodeTaskArtifactRef | null;
+};
+export type UnifiedTask = {
+  run_id: string; session_id: string; kind: TaskKind; status: string; phase: string | null;
+  version: number; workspace_id: string | null; created_at: string; legacy: boolean;
+  result: UnifiedResult | null; error?: Record<string, unknown> | null;
+  messages?: ConversationMessage[]; capabilities: TaskAction[];
+  pending_action: { action_id: string; reason: string; business_version: number;
+    allowed_actions: TaskAction[]; display_data: UnifiedResult } | null;
+};
+export type UnifiedTaskRequest = { kind: TaskKind; message: string; client_request_id: string;
+  workspace_id?: string; options?: { retrieval_mode: RetrievalMode; limit?: number } };
+export type TaskActionRequest = { action_id: string; action: TaskAction; expected_version: number;
+  client_request_id: string; payload: Record<string, unknown> };
+const sessionPath = (id: string) => `/api/sessions/${encodeURIComponent(id)}`;
+const taskPath = (id: string) => `/api/tasks/${encodeURIComponent(id)}`;
+export function listSessions(limit = 200, offset = 0, signal?: AbortSignal): Promise<{ sessions: Session[] }> {
+  return request(`/api/sessions?limit=${limit}&offset=${offset}`, { signal });
+}
+export function listSessionTasks(id: string, limit = 200, offset = 0, signal?: AbortSignal): Promise<{ tasks: UnifiedTask[] }> {
+  return request(`${sessionPath(id)}/tasks?limit=${limit}&offset=${offset}`, { signal });
+}
+export function submitTask(id: string, body: UnifiedTaskRequest, signal?: AbortSignal): Promise<UnifiedTask> {
+  return request(`${sessionPath(id)}/tasks`, { ...jsonRequest(body), signal });
+}
+export function getTask(id: string, signal?: AbortSignal): Promise<UnifiedTask> {
+  return request(taskPath(id), { signal });
+}
+export function listTaskEvents(id: string, after = 0, signal?: AbortSignal): Promise<{ events: CodeTaskEvent[]; next_cursor: number }> {
+  return request(`${taskPath(id)}/events?after=${after}&limit=200`, { signal });
+}
+export function actOnTask(id: string, body: TaskActionRequest, signal?: AbortSignal): Promise<UnifiedTask> {
+  return request(`${taskPath(id)}/actions`, { ...jsonRequest(body), signal });
+}
+export function listWorkspaces(signal?: AbortSignal): Promise<{ workspaces: Workspace[] }> {
+  return request('/api/workspaces', { signal });
+}
+export function registerWorkspace(path: string, pytest_paths: string[], signal?: AbortSignal): Promise<Workspace> {
+  return request('/api/workspaces', { ...jsonRequest({ path, pytest_paths }), signal });
+}
+export function setSessionWorkspace(id: string, workspace_id: string | null, signal?: AbortSignal): Promise<Session> {
+  return request(`${sessionPath(id)}/workspace`, { ...jsonRequest({ workspace_id }), signal });
 }

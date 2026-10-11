@@ -1,8 +1,14 @@
 # 技术写作 Agent 说明
 
+## 统一会话前端（2026-10-11，MVP 任务 7）
+
+在统一会话中选择“技术写作”并提交主题，研究由 Worker 执行；等待提纲确认时编辑 JSON，点击“确认提纲并生成草稿”；草稿出现后点击“确认保存草稿”。所有操作使用统一 Run 的 pending_action/版本，服务端固定保存幂等键；不会单独创建 Panel 领域任务。刷新从服务端恢复，切模式保留完整时间线；legacy 写作仅展示，无统一操作能力。保存未知时可核查事实，界面不会自动重试或默认确认恢复。
+
+任务 7 前端 node:test **19 passed**、TypeScript/Vite 构建通过；后端统一 API/历史 **23 passed**。真实有证据 Provider/浏览器写作闭环保留任务 8，本阶段不构成完整 MVP 交付。
+
 ## 统一会话阶段适配（2026-10-11，MVP 任务 5）
 
-TaskService/WritingAdapter 已接入单 Worker，统一 HTTP 已于 MVP 任务 6 接入：研究自动运行，提纲 waiting 后确认排队 drafting，草稿 waiting 后显式排队保存；一个顶层 Run 持续至保存完成。复用 WritingService/Executor 的证据校验、业务版本与保存幂等键，动作键同内容重放返回已有 Run，异内容拒绝。统一前端留任务 7，当前旧写作接口保持原契约。
+TaskService/WritingAdapter 已接入单 Worker，统一 HTTP 已于 MVP 任务 6 接入：研究自动运行，提纲 waiting 后确认排队 drafting，草稿 waiting 后显式排队保存；一个顶层 Run 持续至保存完成。复用 WritingService/Executor 的证据校验、业务版本与保存幂等键，动作键同内容重放返回已有 Run，异内容拒绝。统一前端已完成任务 7，旧写作接口保持原契约。
 
 统一入口 `POST /api/sessions/{id}/tasks` 使用 `kind=writing`、message 和 client_request_id；查询 `/api/tasks/{run_id}` 获取 pending_action.action_id、version 与允许动作，向 `/api/tasks/{run_id}/actions` 提交 action_id/action/expected_version/client_request_id/payload。确认提纲 payload 为 `{"outline": {...}}`，保存 payload 为空；保存幂等键由服务端固定。确认及保存均排队后由 Worker 执行，重复确认可返回已有终态，冲突返回 409。会话历史只读合并旧写作记录并排除已关联记录和内部研究/草稿 Run。任务 6 相关回归 194 passed，包含有证据 fake Provider 的 HTTP 提纲确认、草稿生成与保存重放；真实统一浏览器/Provider 闭环留任务 8。
 
