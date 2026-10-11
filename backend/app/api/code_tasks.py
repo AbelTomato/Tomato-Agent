@@ -82,7 +82,7 @@ async def recover_code_task(run_id: str, request: RecoverCodeTaskRequest, http_r
     except Exception as exc:
         code = str(exc) or "recovery_rejected"
         raise HTTPException(409, {"code": code}) from exc
-    return result
+    return {**result, "run_id": run_id, "dispatch_status": _dispatch_status(http_request)}
 
 
 @router.get("/api/code-tasks/{run_id}")

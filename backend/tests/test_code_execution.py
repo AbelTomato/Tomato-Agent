@@ -180,12 +180,13 @@ async def test_ready_finish_recovery_reuses_response_and_validates_completion(tm
 
         class NoModel:
             async def complete(self, messages, tools):
-                pytest.fail("persisted final must not call the model")
+                pytest.fail("recovery decision must not call the model")
 
         service.llm = NoModel()
         result = await service.recover(str(run.id), expected_version=before.version, action="continue")
-        assert result["status"] == "completed"
-        assert (await repository.latest_attempt(run.id)).attempt_no == 2
+        assert result == {"status": "queued", "recovery_reason": "snapshot_resumable"}
+        assert (await repository.latest_attempt(run.id)).attempt_no == 1
+        assert (await service.run_repository.get_run(run.id)).status == "queued"
         assert not service._heartbeat_tasks
 
 

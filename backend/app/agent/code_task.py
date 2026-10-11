@@ -155,7 +155,7 @@ class CodeTaskService:
         recovered = await self.execution_repository.apply_recovery(candidate, decision)
         if recovered.status == "waiting":
             return {"status": "waiting", "recovery_reason": decision.reason_code}
-        return await self.execute(run_id)
+        return {"status": recovered.status, "recovery_reason": decision.reason_code}
 
     def build_capability_profile(self, run) -> CodeTaskCapabilityProfile:
         if run is None:

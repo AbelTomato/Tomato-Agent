@@ -64,6 +64,40 @@ async def test_execute_returns_accepted_without_running_inline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_recover_continue_returns_quickly_without_running_inline(tmp_path, monkeypatch):
+    app = make_app(tmp_path)
+    fake_llm = CountingLLM()
+    recover_calls = []
+
+    async def recover(run_id, *, expected_version, action):
+        recover_calls.append((run_id, expected_version, action))
+        return {"status": "queued", "recovery_reason": "snapshot_resumable"}
+
+    async with app.router.lifespan_context(app):
+        app.state.code_task_llm = fake_llm
+        service = app.state.code_task_service
+        monkeypatch.setattr(service, "recover", recover)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            created = await client.post("/api/code-tasks", json={"task": "fix calculator"})
+            run_id = created.json()["run_id"]
+            response = await client.post(
+                f"/api/code-tasks/{run_id}/recover",
+                json={"expected_version": 0, "action": "continue", "confirm": True},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "queued",
+        "recovery_reason": "snapshot_resumable",
+        "run_id": run_id,
+        "dispatch_status": "worker_disabled",
+    }
+    assert recover_calls == [(run_id, 0, "continue")]
+    assert fake_llm.calls == []
+
+
+@pytest.mark.asyncio
 async def test_event_cursor_returns_only_events_after_sequence(tmp_path):
     app = make_app(tmp_path)
     async with app.router.lifespan_context(app):
