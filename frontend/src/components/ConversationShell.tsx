@@ -10,7 +10,7 @@ import { WorkspacePicker } from './WorkspacePicker';
 
 const storageKey = 'tomato-agent-session-id';
 const terminal = (task: UnifiedTask) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(task.status) || task.legacy;
-const message = (reason: unknown) => reason instanceof Error ? reason.message : '请求失败。';
+const message = (reason: unknown) => reason instanceof Error ? (reason.message === 'assistant_disabled' ? '助手入口未启用，请配置 [assistant].enabled=true 与 [worker].enabled=true，或选择高级模式。' : reason.message) : '请求失败。';
 function storedId() {
   try { return localStorage.getItem(storageKey) ?? ''; } catch { return ''; }
 }
@@ -25,7 +25,7 @@ export function ConversationShell() {
   const [events, setEvents] = useState<Record<string, CodeTaskEvent[]>>({});
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState('');
-  const [kind, setKind] = useState<TaskKind>('chat');
+  const [kind, setKind] = useState<TaskKind>('assistant');
   const [input, setInput] = useState('');
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>('keyword');
   const [modes, setModes] = useState<RetrievalMode[]>(['keyword']);
@@ -158,8 +158,8 @@ export function ConversationShell() {
   async function send() {
     if (!sessionId || !input.trim() || active || loading || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))) return;
     await operate(async (signal, current) => {
-      const body = { kind, message: input.trim(), ...(kind === 'code' ? { workspace_id: workspaceId } : {}),
-        ...(kind === 'knowledge' ? { options: { retrieval_mode: retrievalMode } } : {}) };
+      const body = { kind, message: input.trim(), ...((kind === 'code' || kind === 'assistant' && workspaceId) ? { workspace_id: workspaceId } : {}),
+        ...(kind === 'knowledge' ? { options: { retrieval_mode: retrievalMode } } : kind === 'assistant' ? { options: {} } : {}) };
       const fingerprint = JSON.stringify({ sessionId, ...body });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { fingerprint, id: crypto.randomUUID() };
       const task = await submitTask(sessionId, { ...body, client_request_id: submission.current!.id }, signal);
@@ -174,7 +174,16 @@ export function ConversationShell() {
         action, expected_version: task.version, payload };
       const fingerprint = JSON.stringify({ run: task.run_id, ...body });
       if (actionRequest.current?.fingerprint !== fingerprint) actionRequest.current = { fingerprint, id: crypto.randomUUID() };
-      const updated = await actOnTask(task.run_id, { ...body, client_request_id: actionRequest.current!.id }, signal);
+      let updated: UnifiedTask;
+      try {
+        updated = await actOnTask(task.run_id, { ...body, client_request_id: actionRequest.current!.id }, signal);
+      } catch (reason) {
+        if (current() && reason instanceof Error && ['stale_action', 'version_conflict', 'action_conflict'].includes(reason.message)) {
+          actionRequest.current = null;
+          setRefresh((value) => value + 1);
+        }
+        throw reason;
+      }
       if (!current()) return;
       actionRequest.current = null;
       if (updated.recovery) recoveryObservations.current.set(task.run_id, updated.recovery);
@@ -211,17 +220,18 @@ export function ConversationShell() {
       <nav aria-label="会话列表">{sessions.map((session) => <button className="secondary-button" type="button" key={session.id} aria-current={session.id === sessionId ? 'true' : undefined} onClick={() => selectSession(session.id)}>{String(session.metadata.title ?? session.id)}</button>)}</nav>
     </aside>
     <section className="card conversation-shell" aria-label="统一会话">
-      <header><div><h2>统一会话</h2><p>普通聊天、知识问答、技术写作与原目录代码任务共享时间线。</p></div><span>{loading ? '恢复中' : active ? '有活动任务' : '就绪'}</span></header>
-      <div className="controls"><label>任务模式<select value={kind} onChange={(event) => setKind(event.target.value as TaskKind)}>{Object.entries(taskLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <header><div><h2>统一助手</h2><p>直接描述目标，助手在同一任务中检索资料、读取项目并解释；当前助手能力为只读。</p></div><span>{loading ? '恢复中' : active ? '有活动任务' : '就绪'}</span></header>
+      <div className="controls"><label>入口（其他为高级模式）<select value={kind} onChange={(event) => setKind(event.target.value as TaskKind)}>{Object.entries(taskLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         {kind === 'knowledge' && <label>检索方式<select value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as RetrievalMode)}>{modes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></label>}
         <button type="button" className="secondary-button" disabled={busy} onClick={() => setRefresh((value) => value + 1)}>刷新会话</button>
       </div>
       {kind === 'knowledge' && <p className="capability-note">{capabilityNotice}</p>}
-      <WorkspacePicker workspaces={workspaces} value={workspaceId} disabled={busy || loading || !sessionId} onSelect={(id) => void bind(id)} onRegister={register} />
+      {kind === 'assistant' && <p className="capability-note">工作区可选；需要读取项目时可按任务请求绑定一次，已绑定任务不能切换项目。</p>}
+      <WorkspacePicker workspaces={workspaces} value={workspaceId} disabled={busy || loading || active || !sessionId} onSelect={(id) => void bind(id)} onRegister={register} />
       {error && <p className="notice error" role="alert">{error}</p>}
       {pollError && <p className="notice error" role="alert">读取失败：{pollError}</p>}
       <div className="task-timeline" aria-live="polite">{tasks.length === 0 && <p className="empty-state">{sessionId ? '当前会话暂无任务。' : '请新建或选择会话。'}</p>}
-        {tasks.map((task) => <div key={task.run_id}><TaskCard task={task} busy={busy} onAction={action} onOpenDocument={(citation) => void openDocument(citation)} />
+        {tasks.map((task) => <div key={task.run_id}><TaskCard task={task} workspaces={workspaces} busy={busy} onAction={action} onOpenDocument={(citation) => void openDocument(citation)} />
           {!task.legacy && <details className="task-events"><summary>事件（{events[task.run_id]?.length ?? 0}）</summary><ol>{events[task.run_id]?.map((event) => <li key={event.sequence}><b>#{event.sequence} {event.event_type}</b><pre>{JSON.stringify(event.payload, null, 2)}</pre></li>)}</ol></details>}
         </div>)}
       </div>

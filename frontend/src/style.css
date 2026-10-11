@@ -46,4 +46,8 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .task-events ol { max-height: 320px; overflow: auto; }
 .conversation-shell .composer textarea { flex: 1; min-width: 0; }
 .conversation-layout > .document-panel { grid-column: 2; }
+.assistant-result, .pending-action-panel { display: grid; gap: 12px; min-width: 0; }
+.pending-action-panel { border: 1px solid #fcd34d; background: #fffbeb; border-radius: 8px; padding: 12px; }
+.pending-action-panel button { justify-self: start; }
+.assistant-result ul { padding-left: 22px; overflow-wrap: anywhere; }
 @media (max-width: 800px) { .conversation-layout { grid-template-columns: minmax(0, 1fr); }.session-sidebar { position: static; }.session-sidebar nav { max-height: 160px; }.conversation-layout > .document-panel { grid-column: 1; } }

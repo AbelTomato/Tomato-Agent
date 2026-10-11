@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { loadCodeTaskArtifact, type Citation, type CodeTask, type TaskAction, type UnifiedTask } from '../api';
+import { loadCodeTaskArtifact, type Citation, type CodeTask, type TaskAction, type UnifiedTask, type Workspace } from '../api';
 import { CitationList } from './CitationList';
+import { AssistantResult } from './AssistantResult';
+import { PendingActionPanel } from './PendingActionPanel';
 
-export const taskLabels = { chat: '普通聊天', knowledge: '知识问答', writing: '技术写作', code: '代码任务' };
+export const taskLabels = { assistant: '助手', chat: '普通聊天', knowledge: '知识问答', writing: '技术写作', code: '代码任务' };
 export const statusLabels: Record<string, string> = {
   queued: '排队中', running: '执行中', waiting: '等待确认', completed: '已完成',
   failed: '失败', cancelled: '已取消', timed_out: '已超时',
@@ -20,8 +22,8 @@ export function WritingDraft({ draft }: { draft: string | null }) {
   return <details><summary>查看草稿</summary><pre>{draft ?? '尚无草稿'}</pre></details>;
 }
 
-export function TaskCard({ task, busy, onAction, onOpenDocument }: {
-  task: UnifiedTask; busy: boolean;
+export function TaskCard({ task, busy, onAction, onOpenDocument, workspaces = [] }: {
+  task: UnifiedTask; busy: boolean; workspaces?: Workspace[];
   onAction: (task: UnifiedTask, action: TaskAction, payload: Record<string, unknown>) => Promise<void>;
   onOpenDocument: (citation: Citation) => void;
 }) {
@@ -70,7 +72,9 @@ export function TaskCard({ task, busy, onAction, onOpenDocument }: {
       {['no_results', 'insufficient'].includes(result.evidence_status ?? '') && <p className="notice">材料不足（{result.evidence_status}），本轮回答无充分来源支撑。</p>}
       {task.kind === 'knowledge' && !result.citations?.length && <p className="evidence-warning">无来源（source）</p>}
     </>}
-    {result.citations && <CitationList citations={result.citations} onOpenDocument={onOpenDocument} />}
+    {task.kind === 'assistant' && <AssistantResult result={result} onOpenDocument={onOpenDocument} />}
+    {task.kind === 'assistant' && <PendingActionPanel key={`${task.run_id}:${task.version}:${task.pending_action?.action_id}`} task={task} busy={busy} workspaces={workspaces} onAction={onAction} />}
+    {task.kind !== 'assistant' && result.citations && <CitationList citations={result.citations} onOpenDocument={onOpenDocument} />}
     {task.kind === 'writing' && <>
       <p>主题：{result.topic ?? '研究中'}</p>
       {allowed('confirm_outline') ? <label>提纲 JSON<textarea rows={9} value={outline} disabled={busy} onChange={(event) => setOutline(event.target.value)} /></label> :

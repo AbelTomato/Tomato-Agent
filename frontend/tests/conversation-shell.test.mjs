@@ -56,7 +56,7 @@ async function compile(path, replacements) {
 const { ConversationShell } = await compile('../src/components/ConversationShell.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
   [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument } = globalThis.__conversationApi;'],
-  [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
+  [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { assistant: "助手", chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
   [/import \{ WorkspacePicker \} from '.\/WorkspacePicker';/, 'const WorkspacePicker = "workspace-picker";'],
 ]);
 globalThis.__cardApi = { async loadCodeTaskArtifact() { return { content: 'diff-content' }; } };
@@ -64,6 +64,8 @@ const { TaskCard, CodeTestResults } = await compile('../src/components/TaskCard.
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
   [/import \{.*?\} from '..\/api';/s, 'const { loadCodeTaskArtifact } = globalThis.__cardApi;'],
   [/import \{ CitationList \} from '.\/CitationList';/, 'const CitationList = "citations";'],
+  [/import \{ AssistantResult \} from '.\/AssistantResult';/, 'const AssistantResult = "assistant-result";'],
+  [/import \{ PendingActionPanel \} from '.\/PendingActionPanel';/, 'const PendingActionPanel = "pending-action-panel";'],
 ]);
 const { WorkspacePicker } = await compile('../src/components/WorkspacePicker.tsx', [
   [/import \{ useState \} from 'react';/, 'const { useState } = globalThis.__conversationHooks;'],
@@ -128,6 +130,41 @@ test('刷新恢复服务端事实、切模式保留历史、终态停止轮询�
   assert.equal(cards()[0].props.task.run_id, 's2');
   assert.deepEqual([...values.keys()], ['tomato-agent-session-id']);
   assert.equal(values.get('tomato-agent-session-id'), 's2');
+}));
+
+test('默认助手提交可选工作区且不带检索配置，禁用时保留输入并提示配置', async () => scenario(async () => {
+  historyReader = async () => ({ tasks: [] });
+  submitReader = async () => { const error = new Error('assistant_disabled'); error.code = 'assistant_disabled'; throw error; };
+  mount(); await flush();
+  assert.equal(elements().find((node) => node.type === 'select').props.value, 'assistant');
+  elements().find((node) => node.type === 'textarea').props.onChange({ target: { value: '解释缓存' } }); await flush();
+  elements().find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush();
+  const body = calls.find((call) => call[0] === 'submit')[2];
+  assert.equal(body.kind, 'assistant'); assert.equal(body.workspace_id, 'ws'); assert.deepEqual(body.options, {});
+  assert.match(text(), /助手.*未启用/);
+  assert.equal(elements().find((node) => node.type === 'textarea').props.value, '解释缓存');
+  elements().find((node) => node.type === 'workspace-picker').props.onSelect(''); await flush();
+  elements().find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush();
+  assert.equal(calls.filter((call) => call[0] === 'submit').at(-1)[2].workspace_id, undefined);
+}));
+
+test('助手绑定是版本动作，过期动作刷新事实并保留错误，网络重试复用动作ID', async () => scenario(async () => {
+  let currentTask = { ...task('assistant', 'waiting', 'assistant'), capabilities: ['bind_workspace', 'reject_action'],
+    pending_action: { action_id: 'bind:3', action_type: 'workspace_binding', allowed_actions: ['bind_workspace', 'reject_action'] } };
+  historyReader = async () => ({ tasks: [currentTask] }); taskReader = async () => currentTask;
+  let errorCode = 'network';
+  actionReader = async () => { const error = new Error(errorCode); error.code = errorCode; if (errorCode === 'stale_action') currentTask = { ...currentTask, version: 4 }; throw error; };
+  mount(); await flush();
+  const original = cards()[0].props.task;
+  await cards()[0].props.onAction(original, 'bind_workspace', { workspace_id: 'ws' }); await flush();
+  await cards()[0].props.onAction(original, 'bind_workspace', { workspace_id: 'ws' }); await flush();
+  const attempts = calls.filter((call) => call[0] === 'action');
+  assert.equal(attempts[0][2].client_request_id, attempts[1][2].client_request_id);
+  assert.deepEqual(attempts[0][2].payload, { workspace_id: 'ws' }); assert.equal(attempts[0][2].expected_version, 3);
+  errorCode = 'stale_action';
+  await cards()[0].props.onAction(original, 'reject_action', {}); await flush();
+  assert.equal(cards()[0].props.task.version, 4); assert.match(text(), /stale_action/);
+  assert.equal(calls.some((call) => call[0] === 'bind'), false);
 }));
 
 test('切换清理计时器与请求，旧会话迟到历史不能覆盖新会话', async () => scenario(async ({ timers }) => {

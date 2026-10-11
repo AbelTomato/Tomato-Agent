@@ -45,9 +45,26 @@ test('统一协议编码 ID、分页、动作版本、原目录目标和 AbortSi
 test('统一 API 保留能力不足、冲突和不可用错误', async () => {
   const original = globalThis.fetch;
   try {
-    for (const [status, code] of [[503, 'worker_disabled'], [409, 'stale_action'], [503, 'validation_backend_unavailable']]) {
+    for (const [status, code] of [[503, 'assistant_disabled'], [503, 'worker_disabled'], [409, 'stale_action'], [503, 'validation_backend_unavailable']]) {
       globalThis.fetch = async () => new Response(JSON.stringify({ detail: { code } }), { status });
       await assert.rejects(() => api.getTask('run'), (error) => error.status === status && error.code === code);
     }
+  } finally { globalThis.fetch = original; }
+});
+
+test('助手空options、可空工作区和新公共动作按统一协议发送', async () => {
+  const original = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => { bodies.push(JSON.parse(init.body)); return new Response('{}', { status: 202 }); };
+  try {
+    await api.submitTask('s', { kind: 'assistant', message: '解释缓存', client_request_id: 'req', workspace_id: null, options: {} });
+    for (const [action, payload] of [['provide_input', { message: '当前项目' }], ['bind_workspace', { workspace_id: 'ws' }], ['reject_action', {}], ['approve_action', {}]]) {
+      await api.actOnTask('r', { action_id: 'a', expected_version: 4, client_request_id: action, action, payload });
+    }
+    assert.equal(bodies[0].workspace_id, null); assert.deepEqual(bodies[0].options, {});
+    assert.deepEqual(bodies.slice(1).map((body) => [body.action, body.payload]), [
+      ['provide_input', { message: '当前项目' }], ['bind_workspace', { workspace_id: 'ws' }], ['reject_action', {}], ['approve_action', {}],
+    ]);
+    assert.ok(bodies.slice(1).every((body) => body.expected_version === 4 && body.action_id === 'a'));
   } finally { globalThis.fetch = original; }
 });

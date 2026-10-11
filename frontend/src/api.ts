@@ -280,8 +280,8 @@ export function loadCodeTaskArtifact(runId: string, artifactId: string, signal?:
   return request(`${codeTaskPath(runId)}/artifacts/${encodeURIComponent(artifactId)}`, { signal });
 }
 
-export type TaskKind = 'chat' | 'knowledge' | 'writing' | 'code';
-export type TaskAction = 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery';
+export type TaskKind = 'assistant' | 'chat' | 'knowledge' | 'writing' | 'code';
+export type TaskAction = 'provide_input' | 'approve_action' | 'reject_action' | 'bind_workspace' | 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery';
 export type TaskRecoveryObservation = {
   version: number; reason: string;
   action: 'reuse' | 'retry' | 'reconcile' | 'manual_review' | 'reject';
@@ -293,6 +293,7 @@ export type UnifiedResult = Partial<WritingTask> & {
   answer?: string; content?: string; evidence_status?: string;
   test_results?: CodeTask['test_results']; artifacts?: CodeTaskArtifactRef[];
   changed_files?: string[]; diff_artifact?: CodeTaskArtifactRef | null;
+  schema_version?: number; validation_status?: 'not_required' | 'passed' | 'failed' | 'unavailable';
 };
 export type UnifiedTask = {
   run_id: string; session_id: string; kind: TaskKind; status: string; phase: string | null;
@@ -301,10 +302,11 @@ export type UnifiedTask = {
   recovery?: TaskRecoveryObservation;
   messages?: ConversationMessage[]; capabilities: TaskAction[];
   pending_action: { action_id: string; reason: string; business_version: number;
-    allowed_actions: TaskAction[]; display_data: UnifiedResult } | null;
+    action_type?: string; target_capability?: string | null; frozen_parameters?: Record<string, unknown>;
+    allowed_actions: TaskAction[]; display_data: UnifiedResult & Record<string, unknown> } | null;
 };
 export type UnifiedTaskRequest = { kind: TaskKind; message: string; client_request_id: string;
-  workspace_id?: string; options?: { retrieval_mode: RetrievalMode; limit?: number } };
+  workspace_id?: string | null; options?: { retrieval_mode?: RetrievalMode; limit?: number } };
 export type TaskActionRequest = { action_id: string; action: TaskAction; expected_version: number;
   client_request_id: string; payload: Record<string, unknown> };
 const sessionPath = (id: string) => `/api/sessions/${encodeURIComponent(id)}`;
