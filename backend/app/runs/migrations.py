@@ -10,6 +10,22 @@ RUN_SCHEMA = """
 """
 
 
+MODEL_CALL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS execution_model_calls (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES task_runs(id),
+    lease_attempt_id TEXT NOT NULL REFERENCES execution_attempts(id),
+    scope TEXT NOT NULL CHECK(scope IN ('top','domain')), step_id TEXT,
+    operation_id TEXT, phase TEXT NOT NULL, attempt_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL, input_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('reserved','committed','failed','unknown')),
+    timeout_seconds REAL NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
+    response TEXT, error_code TEXT, UNIQUE(run_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_model_calls_step ON execution_model_calls(run_id, scope, step_id);
+INSERT OR IGNORE INTO execution_schema_migrations VALUES (2);
+"""
+
+
 async def migrate_unified_runs(db: aiosqlite.Connection) -> None:
     """Replace the legacy parent atomically without renaming child FK targets."""
     await db.execute("PRAGMA foreign_keys=OFF")

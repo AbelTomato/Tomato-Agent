@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import Field, ValidationError
 
-from .models import ExecutionModel, ExecutionSnapshot, OperationStatus
+from .models import ExecutionModel, ExecutionSnapshot, OperationStatus, parse_execution_snapshot
 from .ports import canonical_digest
 
 
@@ -17,7 +17,7 @@ class RecoveryOperation(ExecutionModel):
     logical_index: int = Field(ge=0)
     kind: str
     tool_name: str | None = None
-    recovery_class: Literal["model", "read_only", "file_write", "artifact", "sandbox"]
+    recovery_class: Literal["model", "read_only", "file_write", "artifact", "sandbox", "domain_publish"]
     status: OperationStatus
     input_digest: str
     input_payload: dict[str, Any]
@@ -27,6 +27,13 @@ class RecoveryOperation(ExecutionModel):
     output_digest: str | None = None
 
 
+class DomainPublication(ExecutionModel):
+    domain_id: str = Field(min_length=1)
+    version: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=1)
+    result_payload: dict[str, Any]
+
+
 class RecoveryObservation(ExecutionModel):
     policy_digest: str
     executor_exited: bool = False
@@ -34,6 +41,7 @@ class RecoveryObservation(ExecutionModel):
     artifact_refs: list[dict[str, str]] = Field(default_factory=list)
     sandbox_reconciled: bool = False
     sandbox_retry_approved: bool = False
+    domain_publications: list[DomainPublication] = Field(default_factory=list)
 
 
 class RecoveryDecision(ExecutionModel):
@@ -67,7 +75,9 @@ def classify_recovery(snapshot, operation, observation: RecoveryObservation) -> 
     if raw.get("schema_version") != 1:
         return decision("reject", "unsupported_snapshot")
     try:
-        snap = ExecutionSnapshot.model_validate_json(json.dumps(raw))
+        snap = parse_execution_snapshot(json.dumps(raw))
+        if not isinstance(snap, ExecutionSnapshot):
+            return decision("reject", "invalid_snapshot")
     except (ValidationError, TypeError, ValueError):
         return decision("reject", "invalid_snapshot")
     if snap.policy_digest != observation.policy_digest:
@@ -89,6 +99,12 @@ def classify_recovery(snapshot, operation, observation: RecoveryObservation) -> 
         return decision("reject", "operation_failed")
     if operation.recovery_class in {"model", "read_only"}:
         return decision("retry", "safe_retry")
+    if operation.recovery_class == "domain_publish":
+        matches = [item for item in observation.domain_publications
+                   if all(operation.input_payload.get(key) == getattr(item, key)
+                          for key in ("domain_id", "version", "idempotency_key"))]
+        if len(matches) == 1:
+            return decision("reconcile", "domain_publication_confirmed", matches[0].result_payload)
     if operation.recovery_class == "file_write" and observation.executor_exited:
         before, after = operation.before_digests, operation.after_digests
         if before and before.keys() == after.keys():

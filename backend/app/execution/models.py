@@ -149,13 +149,26 @@ class StageExecutionSnapshot(ExecutionModel):
     save_key: str | None = None
 
 
-def parse_execution_snapshot(value: str) -> ExecutionSnapshot | StageExecutionSnapshot:
+class AssistantExecutionSnapshot(ExecutionSnapshot):
+    snapshot_type: Literal["assistant"] = "assistant"
+    schema_version: Literal[1] = 1
+    workspace_id: str | None = None
+    session_id: UUID
+    config_digest: str = Field(min_length=1)
+    pending_action: PendingAction | None = None
+    domain_links: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def parse_execution_snapshot(value: str) -> ExecutionSnapshot | StageExecutionSnapshot | AssistantExecutionSnapshot:
     raw = json.loads(value)
     if not isinstance(raw, dict):
         raise ValueError("snapshot must be an object")
     discriminator = raw.get("snapshot_type", "code")
     if discriminator == "stage":
         return StageExecutionSnapshot.model_validate_json(value)
+    if discriminator == "assistant":
+        return AssistantExecutionSnapshot.model_validate_json(value)
     if discriminator == "code":
         if raw.get("schema_version") != 1:
             raise ValueError("unsupported code snapshot version")
@@ -169,7 +182,7 @@ class OperationInput(ExecutionModel):
     kind: Literal["model", "tool"]
     tool_name: str | None = None
     input_payload: dict[str, Any]
-    recovery_class: Literal["model", "read_only", "file_write", "artifact", "sandbox"]
+    recovery_class: Literal["model", "read_only", "file_write", "artifact", "sandbox", "domain_publish"]
     before_digests: dict[str, str] = Field(default_factory=dict)
     after_digests: dict[str, str] = Field(default_factory=dict)
 

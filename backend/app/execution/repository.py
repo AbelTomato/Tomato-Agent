@@ -30,6 +30,8 @@ class ExecutionRepository:
             await self._configure(db)
             await db.executescript(";".join(execution_migration()) + ";")
             await db.executescript(_RECOVERY_SCHEMA)
+            from app.runs.migrations import MODEL_CALL_SCHEMA
+            await db.executescript(MODEL_CALL_SCHEMA)
             await db.execute("CREATE TABLE IF NOT EXISTS task_actions (run_id TEXT NOT NULL REFERENCES task_runs(id), "
                              "client_request_id TEXT NOT NULL, digest TEXT NOT NULL, "
                              "PRIMARY KEY(run_id,client_request_id))")
@@ -107,6 +109,8 @@ class ExecutionRepository:
                      _dump_time(expires), _dump_time(now), _dump_time(now)),
                 )
                 await self._set_run_status(db, run_id, "running", now)
+                await db.execute("UPDATE task_run_checkpoints SET created_at=? WHERE run_id=? "
+                    "AND json_extract(state,'$.snapshot_type')='assistant'", (_dump_time(now), str(run_id)))
                 await self._append_event(db, run_id, "execution.claimed", {
                     "attempt_id": str(attempt_id), "fencing_token": token,
                 }, now)
@@ -146,6 +150,7 @@ class ExecutionRepository:
                     "UPDATE execution_attempts SET status='released', finished_at=? WHERE id=?",
                     (_dump_time(now), str(lease.attempt_id)),
                 )
+                await self._settle_assistant_time(db, lease.run_id, now)
                 await db.execute(
                     "UPDATE execution_run_heads SET active_attempt_id=NULL WHERE run_id=?",
                     (str(lease.run_id),),
@@ -262,6 +267,7 @@ class ExecutionRepository:
                 await db.execute("BEGIN IMMEDIATE")
                 await self._validate_lease(db, lease, now)
                 row = await self._run_row(db, lease.run_id)
+                await self._settle_assistant_time(db, lease.run_id, now)
                 if row[4] == "cancelled":
                     raise StaleExecutionOwner("run has been cancelled")
                 await self._set_run_status(db, lease.run_id, status, now)
@@ -274,6 +280,15 @@ class ExecutionRepository:
                          pending_action.model_dump_json() if pending_action else None,
                          domain_run_id or row[11], str(lease.run_id)))
                 if snapshot is not None:
+                    if snapshot.run_id != lease.run_id:
+                        raise RecoveryConflict("snapshot_run_mismatch")
+                    if snapshot.snapshot_type == "assistant":
+                        current = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                            (str(lease.run_id),))).fetchone()
+                        raw = json.loads(current[0])
+                        snapshot = snapshot.model_copy(update={
+                            "reserved_model_calls": raw["reserved_model_calls"],
+                            "elapsed_upper_bound_seconds": raw["elapsed_upper_bound_seconds"]})
                     cursor = await db.execute(
                         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_run_checkpoints WHERE run_id=?",
                         (str(lease.run_id),))
@@ -400,6 +415,128 @@ class ExecutionRepository:
 
     async def save_snapshot(self, lease: LeaseHandle, snapshot: ExecutionSnapshot):
         return await self._operation_transaction(lease, snapshot)
+
+    async def get_model_calls(self, run_id):
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                "SELECT * FROM execution_model_calls WHERE run_id=? ORDER BY ordinal",
+                (str(run_id),))).fetchall()
+        return [dict(row) for row in rows]
+
+    async def _settle_assistant_time(self, db, run_id, now, *, minimum=0.0):
+        row = await (await db.execute("SELECT state,created_at FROM task_run_checkpoints WHERE run_id=?",
+                                     (str(run_id),))).fetchone()
+        if row is None:
+            return
+        state = json.loads(row[0])
+        if state.get("snapshot_type") != "assistant":
+            return
+        delta = max(minimum, 0.0, (now - _parse_time(row[1])).total_seconds())
+        state["elapsed_upper_bound_seconds"] += delta
+        state["checkpoint_revision"] += 1
+        await db.execute("UPDATE task_run_checkpoints SET state=?,created_at=?,sequence=sequence+1 WHERE run_id=?",
+                         (json.dumps(state), _dump_time(now), str(run_id)))
+
+    async def reserve_model_call(self, lease, *, scope, step_id, operation_id, phase,
+                                 attempt_id, input_digest, config_digest, timeout_seconds):
+        from .models import AssistantExecutionSnapshot, parse_execution_snapshot
+        if scope not in {"top", "domain"} or not phase or not attempt_id:
+            raise ValueError("invalid model call scope")
+        if scope == "top" and not step_id or scope == "domain" and not operation_id:
+            raise ValueError("model call requires stable step or parent operation")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout must be positive")
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            db.row_factory = aiosqlite.Row
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await self._validate_lease(db, lease, now)
+                await self._settle_assistant_time(db, lease.run_id, now)
+                row = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                                             (str(lease.run_id),))).fetchone()
+                snap = parse_execution_snapshot(row[0]) if row else None
+                if not isinstance(snap, AssistantExecutionSnapshot):
+                    raise RecoveryConflict("assistant_snapshot_required")
+                if snap.config_digest != config_digest:
+                    raise RecoveryConflict("model_config_conflict")
+                if scope == "top":
+                    old = await (await db.execute("SELECT * FROM execution_model_calls "
+                        "WHERE run_id=? AND scope='top' AND step_id=? ORDER BY ordinal DESC LIMIT 1",
+                        (str(lease.run_id), step_id))).fetchone()
+                    if old:
+                        if old["input_digest"] != input_digest or old["config_digest"] != config_digest:
+                            raise RecoveryConflict("model_input_conflict")
+                        if old["status"] == "committed":
+                            await db.rollback()
+                            return dict(old)
+                        if old["status"] == "reserved":
+                            raise RecoveryConflict("model_call_in_flight")
+                unknown = await (await db.execute("SELECT 1 FROM execution_operations WHERE run_id=? "
+                    "AND status IN ('running','unknown') AND recovery_class NOT IN ('model','read_only') LIMIT 1",
+                    (str(lease.run_id),))).fetchone()
+                if unknown:
+                    raise RecoveryConflict("unknown_side_effect")
+                count, inflight = await (await db.execute("SELECT COUNT(*), "
+                    "COALESCE(SUM(CASE WHEN status='reserved' THEN timeout_seconds ELSE 0 END),0) "
+                    "FROM execution_model_calls WHERE run_id=?", (str(lease.run_id),))).fetchone()
+                if count >= snap.budget_limits["max_model_calls"]:
+                    raise RuntimeError("model_budget_exhausted")
+                remaining = snap.budget_limits["max_execution_seconds"] - snap.elapsed_upper_bound_seconds - inflight
+                if remaining <= 0:
+                    raise TimeoutError("run_time_exhausted")
+                timeout = min(float(timeout_seconds), remaining)
+                call_id = str(uuid4())
+                await db.execute("INSERT INTO execution_model_calls "
+                    "(id,run_id,lease_attempt_id,scope,step_id,operation_id,phase,attempt_id,ordinal,"
+                    "input_digest,config_digest,status,timeout_seconds,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (call_id, str(lease.run_id), str(lease.attempt_id), scope, step_id, operation_id,
+                     phase, attempt_id, count + 1, input_digest, config_digest, "reserved", timeout, _dump_time(now)))
+                snap = snap.model_copy(update={"reserved_model_calls": count + 1,
+                    "checkpoint_revision": snap.checkpoint_revision + 1})
+                await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                                 (snap.model_dump_json(), _dump_time(now), str(lease.run_id)))
+                await self._append_event(db, lease.run_id, "assistant.model_reserved",
+                    {"call_id": call_id, "ordinal": count + 1, "scope": scope}, now)
+                result = dict(await (await db.execute("SELECT * FROM execution_model_calls WHERE id=?", (call_id,))).fetchone())
+                await self._commit(db)
+                return result
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def commit_model_call(self, lease, call_id, response=None, *, error_code=None):
+        from .models import parse_execution_snapshot
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            db.row_factory = aiosqlite.Row
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await self._validate_lease(db, lease, now)
+                row = await (await db.execute("SELECT * FROM execution_model_calls WHERE id=? AND run_id=?",
+                    (str(call_id), str(lease.run_id)))).fetchone()
+                if not row or row["lease_attempt_id"] != str(lease.attempt_id) or row["status"] != "reserved":
+                    raise RecoveryConflict("model_call_not_reserved")
+                await self._settle_assistant_time(db, lease.run_id, now,
+                    minimum=row["timeout_seconds"] if error_code in {"timeout", "cancelled"} else 0.0)
+                raw = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?", (str(lease.run_id),))).fetchone()
+                snap = parse_execution_snapshot(raw[0])
+                snap = snap.model_copy(update={
+                    "checkpoint_revision": snap.checkpoint_revision + 1})
+                await db.execute("UPDATE execution_model_calls SET status=?,response=?,error_code=?,finished_at=? WHERE id=?",
+                    ("committed" if response is not None else "failed", response.model_dump_json() if response is not None else None,
+                     error_code, _dump_time(now), str(call_id)))
+                await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                                 (snap.model_dump_json(), _dump_time(now), str(lease.run_id)))
+                await self._append_event(db, lease.run_id, "assistant.model_settled", {"call_id": str(call_id),
+                    "status": "committed" if response is not None else "failed"}, now)
+                await self._commit(db)
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def link_stage(self, lease, snapshot):
         """Persist domain association and stage checkpoint under the same fence."""
@@ -538,6 +675,15 @@ class ExecutionRepository:
                 await db.execute("BEGIN IMMEDIATE")
                 await self._validate_lease(db, lease, now)
                 payload = {"attempt_id": str(lease.attempt_id), "fencing_token": lease.fencing_token}
+                if snapshot.snapshot_type == "assistant":
+                    current = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                        (str(lease.run_id),))).fetchone()
+                    if current:
+                        raw = json.loads(current[0])
+                        snapshot = snapshot.model_copy(update={
+                            "reserved_model_calls": max(snapshot.reserved_model_calls, raw.get("reserved_model_calls", 0)),
+                            "elapsed_upper_bound_seconds": max(snapshot.elapsed_upper_bound_seconds,
+                                raw.get("elapsed_upper_bound_seconds", 0))})
                 if operation is not None:
                     digest = canonical_digest(operation.input_payload)
                     existing = await (await db.execute(
@@ -691,6 +837,12 @@ class ExecutionRepository:
                     raise RecoveryConflict("attempt_not_expired")
                 await db.execute("UPDATE execution_attempts SET status='expired', finished_at=? WHERE id=?",
                                  (_dump_time(now), str(attempt_id)))
+                calls = await (await db.execute("SELECT COALESCE(SUM(timeout_seconds),0) FROM execution_model_calls "
+                    "WHERE lease_attempt_id=? AND status='reserved'", (str(attempt_id),))).fetchone()
+                if calls[0]:
+                    await db.execute("UPDATE execution_model_calls SET status='unknown',finished_at=? "
+                        "WHERE lease_attempt_id=? AND status='reserved'", (_dump_time(now), str(attempt_id)))
+                await self._settle_assistant_time(db, attempt.run_id, now, minimum=calls[0])
                 await db.execute("UPDATE execution_operations SET status='unknown' WHERE status='running' "
                                  "AND id IN (SELECT operation_id FROM execution_steps WHERE attempt_id=? AND status='running')",
                                  (str(attempt_id),))

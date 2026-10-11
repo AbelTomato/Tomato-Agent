@@ -65,6 +65,12 @@ class LeaseExecutionPort:
     async def commit_step(self, step_id, result, snapshot):
         return await self.repository.commit_step(self.lease, step_id, result, snapshot)
 
+    async def reserve_model_call(self, **kwargs):
+        return await self.repository.reserve_model_call(self.lease, **kwargs)
+
+    async def commit_model_call(self, call_id, response=None, **kwargs):
+        return await self.repository.commit_model_call(self.lease, call_id, response, **kwargs)
+
 
 class Clock(Protocol):
     def now(self) -> datetime:
