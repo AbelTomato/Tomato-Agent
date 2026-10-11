@@ -146,7 +146,7 @@ class RunRepository:
         *, snapshot_factory: Callable[[RunRecord], Any] | None = None,
         event_type: str | None = None, event_payload: dict[str, Any] | None = None,
     ) -> RunRecord:
-        if kind not in {"chat", "knowledge", "writing", "code"}:
+        if kind not in {"chat", "knowledge", "writing", "code", "assistant"}:
             raise ValueError("unsupported task kind")
         if kind == "code" and not workspace_id:
             raise ValueError("code requires workspace")
@@ -174,7 +174,7 @@ class RunRepository:
                 (str(session_id),),
             )).fetchone():
                 raise RunRepositoryConflict("session_busy")
-            if kind == "code":
+            if kind in {"code", "assistant"} and workspace_id:
                 if await (await db.execute(
                     "SELECT 1 FROM task_runs WHERE workspace_id=? AND status IN ('queued','running','waiting')",
                     (workspace_id,),

@@ -201,6 +201,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
     from app.tasks.adapters.writing import WritingAdapter
     from app.knowledge.conversation import KnowledgeConversation
     from app.execution.ports import canonical_digest
+    from app.assistant.service import AssistantService
 
     runtime = AgentRuntime(llm_client, ContextManager(), tool_registry, session_repository,
                            "You are a concise assistant.", config.runtime_config)
@@ -211,6 +212,8 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
             "knowledge": KnowledgeAdapter(KnowledgeConversation(session_repository, knowledge_service, llm_client)),
             "writing": WritingAdapter(writing_service, writing_executor, code_task_service.execution_repository),
         }, enabled=config.effective_task_worker_enabled, model_available=bool(config.llm_api_key.strip()),
+        assistant=AssistantService(run_repository, code_task_service.execution_repository, session_repository,
+            workspace_service, artifact_service, knowledge_service, llm_client, config),
         config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
             "runtime": config.runtime_config.model_dump(mode="json"),
             "writing": {"retrieval_mode": config.writing_retrieval_mode,
@@ -225,6 +228,13 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
 
     async def observe_recovery(candidate):
         run = await run_repository.get_run(candidate.run_id)
+        if run.task_type == "assistant":
+            from app.execution.recovery import RecoveryObservation
+            snapshot = await code_task_service.execution_repository.get_snapshot(run.id)
+            digest = task_service.assistant.policy_digest
+            if snapshot.config_digest != task_service.config_digest or not config.assistant_enabled:
+                digest = canonical_digest({"policy": digest, "config_changed": True})
+            return RecoveryObservation(policy_digest=digest)
         return code_task_service.recovery_observation(run)
 
     execution_worker = ExecutionWorker(

@@ -7,6 +7,7 @@ import tomllib
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 GROUPS = {
+    "assistant": {"enabled": "assistant_enabled"},
     "worker": {"enabled": "task_worker_enabled", "poll_interval_seconds": "code_task_worker_poll_interval_seconds"},
     "storage": {name: name for name in (
         "database_path", "docs_root", "draft_directory", "code_task_workspace_root", "code_task_artifact_root")},

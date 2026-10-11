@@ -7,7 +7,7 @@ from app.runs.models import RunRepositoryConflict
 
 
 class TaskService:
-    def __init__(self, runs, execution, sessions, adapters, *, enabled, config_digest, model_available=True):
+    def __init__(self, runs, execution, sessions, adapters, *, enabled, config_digest, model_available=True, assistant=None):
         self.runs = runs
         self.execution = execution
         self.sessions = sessions
@@ -15,6 +15,7 @@ class TaskService:
         self.enabled = enabled
         self.config_digest = config_digest
         self.model_available = model_available
+        self.assistant = assistant
 
     @staticmethod
     def pending_action(run):
@@ -35,6 +36,10 @@ class TaskService:
         session_id = UUID(str(session_id))
         if not await self.sessions.session_exists(session_id):
             raise KeyError("session_not_found")
+        if request.kind == "assistant":
+            if self.assistant is None:
+                raise RuntimeError("assistant_disabled")
+            return await self.assistant.submit(session_id, request, self.config_digest)
         if request.kind == "code":
             return await self.adapters["code"].service.create_for_session(
                 session_id, CodeTaskRequest(task=request.message), request.workspace_id,
@@ -52,6 +57,8 @@ class TaskService:
             request.client_request_id, snapshot_factory=snapshot_factory)
 
     async def execute(self, run, lease, port):
+        if run.task_type == "assistant":
+            return await self.assistant.execute(run, lease, port, self.config_digest)
         return await self.adapters[run.task_type if run.task_type != "code_task" else "code"].execute(
             run, lease, port)
 
@@ -77,6 +84,8 @@ class TaskService:
         replay = await self.execution.get_stage_action_replay(run.id, request)
         if replay is not None:
             return replay
+        if run.task_type == "assistant":
+            return await self.assistant.act(run, request)
         if run.task_type == "writing":
             return await self.adapters["writing"].act(run, request)
         if run.version != request.expected_version:

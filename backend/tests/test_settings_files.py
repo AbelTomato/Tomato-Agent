@@ -22,6 +22,13 @@ def test_toml_groups_and_paths(tmp_path):
     assert settings.database_path == Path(__file__).resolve().parents[1] / "data/example.db"
 
 
+def test_assistant_switch_from_toml_and_environment(tmp_path, monkeypatch):
+    path = config(tmp_path, '[assistant]\nenabled=true\n')
+    assert Settings(_env_file=None, config_file=path).assistant_enabled is True
+    monkeypatch.setenv("ASSISTANT_ENABLED", "false")
+    assert Settings(_env_file=None, config_file=path).assistant_enabled is False
+
+
 def test_source_priority(tmp_path, monkeypatch):
     path = config(tmp_path, '[runtime]\nmax_loops=3\n')
     dotenv = tmp_path / ".env"

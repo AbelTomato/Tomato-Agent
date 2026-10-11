@@ -565,6 +565,7 @@ class KnowledgeService:
         *,
         mode: RetrievalMode | str = "keyword",
         limit: int = 5,
+        llm_client: LLMClient | None = None,
     ) -> KnowledgeAnswer:
         if not query.strip():
             raise ValueError("query cannot be empty")
@@ -581,6 +582,7 @@ class KnowledgeService:
                     mode=mode,
                     candidate_limit=self.candidate_limit,
                     final_limit=limit,
+                    **({"llm_client": llm_client} if llm_client is not None else {}),
                 )
                 citations = [
                     CitationSnapshot.from_search_result(item.result)
@@ -663,6 +665,9 @@ class KnowledgeService:
             evidence_status="supported" if citations else "no_results",
             citations=citations,
         )
+
+    async def retrieve_for_assistant(self, query, *, mode, limit, llm_client):
+        return await self.retrieve(query, mode=mode, limit=limit, llm_client=llm_client)
 
     @staticmethod
     def _is_hybrid_fallback_error(error: Exception) -> bool:

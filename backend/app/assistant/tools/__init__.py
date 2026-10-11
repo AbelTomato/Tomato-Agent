@@ -1,0 +1,1 @@
+"""Concrete server-approved assistant capabilities."""

@@ -5,6 +5,9 @@
 enabled = true # 统一聊天/RAG/写作/代码入口需要 Worker
 # poll_interval_seconds = 1.0
 
+[assistant]
+# enabled = false # 实验性统一助手：知识与项目只读；同时需要 Worker 和模型
+
 [storage]
 # database_path = "data/agent.db"
 # docs_root = "../docs"

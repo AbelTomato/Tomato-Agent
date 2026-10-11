@@ -101,7 +101,16 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     calls = []
                     if decision.kind == "call_tool":
                         if decision.tool_name not in policy.allowed_tools:
-                            return await result("failed", "tool is not allowed by policy")
+                            feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
+                                category="permission_denied", code="tool_not_allowed")).model_dump(mode="json")
+                            blocked[decision.tool_name] = "permission_denied"
+                            state = state.model_copy(update={"structured_state": {
+                                **state.structured_state, "capability_feedback": feedback, "blocked_capabilities": blocked}})
+                            messages.append(Message(role="assistant", content=response.content or ""))
+                            messages.append(Message(role="user", content=json.dumps(feedback)))
+                            snapshot = await self.save_snapshot(updated(phase="ready_model",
+                                logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
+                            continue
                         try:
                             arguments = tools.get(decision.tool_name).input_model.model_validate(decision.arguments).model_dump(mode="json")
                         except ValidationError:
@@ -114,6 +123,23 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             snapshot = await self.save_snapshot(updated(phase="ready_model",
                                 logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
                             continue
+                        descriptor = tools.resolve(decision.tool_name)
+                        if blocked.get(decision.tool_name) or descriptor.requires_workspace and state.structured_state.get("workspace_rejected"):
+                            feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
+                                category="user_rejected", code="capability_blocked")).model_dump(mode="json")
+                            state = state.model_copy(update={"structured_state": {
+                                **state.structured_state, "capability_feedback": feedback}})
+                            messages.append(Message(role="assistant", content=response.content or ""))
+                            messages.append(Message(role="user", content=json.dumps(feedback)))
+                            snapshot = await self.save_snapshot(updated(phase="ready_model",
+                                logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
+                            continue
+                        if descriptor.requires_workspace and self.workspace_id is None:
+                            action = PendingAction(action_id=str(uuid4()), reason="workspace_required", business_version=0,
+                                action_type="workspace_binding", target_capability=decision.tool_name,
+                                frozen_parameters=arguments, allowed_actions=["bind_workspace", "reject_action"])
+                            snapshot = snapshot.model_copy(update={"loop_count": snapshot.loop_count + 1})
+                            return await wait(action)
                         call = ToolCall(name=decision.tool_name, arguments=arguments)
                         response = response.model_copy(update={"kind": "tool_call", "tool_call": call})
                         calls = [call]
@@ -182,6 +208,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 if outcome.result:
                     dynamic["validation_status"] = outcome.result.validation_status
                     snapshot = snapshot.model_copy(update={
+                        "evidence_refs": list({item["citation_id"]: item for item in [*snapshot.evidence_refs,
+                            *(citation.model_dump(mode="json") for citation in outcome.result.citations)]}.values()),
                         "test_results": [*snapshot.test_results, *outcome.result.test_results],
                         "artifact_ids": list(dict.fromkeys([*snapshot.artifact_ids,
                             *(str(item.artifact_id) for item in outcome.result.artifacts)]))})
@@ -216,7 +244,16 @@ async def execute_assistant(run, lease, port, *, harness, strategy, llm, policy,
         llm=llm, tools=port.capabilities, policy=policy, budget=budget,
         execution_port=port, resume_snapshot=snapshot)
     if result.status != "waiting" and result.stop_reason != "stale_execution_owner":
+        output = {"output": result.output}
+        if result.status == "completed":
+            from .completion import validate_completion
+            try:
+                output = validate_completion(await port.repository.get_snapshot(run.id), result.output).model_dump(mode="json")
+            except ValueError as exc:
+                await port.finish("failed", error={"code": str(exc) if str(exc) in {
+                    "invalid_citation", "validation_not_available"} else "invalid_assistant_result"})
+                return result.model_copy(update={"status": "failed", "stop_reason": "invalid_assistant_result"})
         await port.finish("completed" if result.status == "completed" else "timed_out" if
-            result.stop_reason == "duration budget exhausted" else "failed", result={"output": result.output},
+            result.stop_reason == "duration budget exhausted" else "failed", result=output,
             error={"code": result.stop_reason} if result.stop_reason else None)
     return result

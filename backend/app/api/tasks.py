@@ -27,7 +27,8 @@ def task_error(exc):
         return HTTPException(503, {"code": "validation_backend_unavailable"})
     conflicts = {"session_busy", "workspace_busy", "workspace_busy_unknown_outcome", "request_conflict", "version_conflict",
                  "stale_action", "action_not_allowed", "confirmation_required", "workspace_changed",
-                 "domain_version_conflict", "action_conflict", "action_request_conflict", "config_changed", "file_conflict"}
+                 "domain_version_conflict", "action_conflict", "action_request_conflict", "config_changed", "file_conflict",
+                 "project_operation_exists", "session_mismatch"}
     if code in conflicts:
         return HTTPException(409, {"code": code})
     if isinstance(exc, WorkspacePathError):
@@ -59,7 +60,7 @@ async def domain_required(request, run):
 
 async def task_required(request, run_id):
     run = await request.app.state.run_repository.get_run(ident(run_id))
-    if run is None or run.session_id is None or run.task_type not in {"chat", "knowledge", "writing", "code"}:
+    if run is None or run.session_id is None or run.task_type not in {"chat", "knowledge", "writing", "code", "assistant"}:
         raise HTTPException(404, {"code": "task_not_found"})
     await domain_required(request, run)
     return run
@@ -100,7 +101,7 @@ async def submit_task(session_id: str, body: UnifiedTaskRequest, request: Reques
     await session_required(request, session_id)
     # Task 1 publishes the schema only. Assistant execution is installed by
     # the later capability/API slice, never through a legacy stage adapter.
-    if body.kind == "assistant":
+    if body.kind == "assistant" and not request.app.state.config.assistant_enabled:
         raise task_error(RuntimeError("assistant_disabled"))
     try:
         run = await request.app.state.task_service.submit(session_id, body)

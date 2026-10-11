@@ -47,7 +47,9 @@ class ExecutionRepository:
                     "WHERE r.status='queued' AND (r.task_type IN ('code_task','code') OR "
                     "(r.task_type IN ('chat','knowledge','writing') AND EXISTS "
                     "(SELECT 1 FROM task_run_checkpoints c WHERE c.run_id=r.id "
-                    "AND json_extract(c.state,'$.snapshot_type')='stage'))) "
+                    "AND json_extract(c.state,'$.snapshot_type')='stage')) OR "
+                    "(r.task_type='assistant' AND EXISTS (SELECT 1 FROM task_run_checkpoints c "
+                    "WHERE c.run_id=r.id AND json_extract(c.state,'$.snapshot_type')='assistant'))) "
                     "AND (h.run_id IS NULL OR h.active_attempt_id IS NULL) "
                     "ORDER BY r.created_at, r.id LIMIT 1"
                 )).fetchone()
@@ -554,7 +556,7 @@ class ExecutionRepository:
                 (snapshot.model_dump_json(), _dump_time(now), str(lease.run_id)))
             await self._commit(db)
 
-    async def queue_assistant_action(self, run_id, request, *, confirmation_validator=None):
+    async def queue_assistant_action(self, run_id, request, *, confirmation_validator=None, workspace_validator=None):
         """Consume a frozen assistant action atomically, without creating another Run."""
         from .models import AssistantExecutionSnapshot, parse_execution_snapshot
         from app.agent.models import Message
@@ -582,18 +584,45 @@ class ExecutionRepository:
             pending = snapshot.pending_action
             if not pending or pending.action_id != request.action_id or request.action not in pending.allowed_actions:
                 raise RunRepositoryConflict("action_not_allowed")
-            if request.action not in {"provide_input", "reject_action", "approve_action"} or pending.action_type == "recovery":
+            if request.action not in {"provide_input", "reject_action", "approve_action", "bind_workspace"} or pending.action_type == "recovery":
                 raise RunRepositoryConflict("action_not_allowed")
+            workspace_id = snapshot.workspace_id
+            if request.action == "bind_workspace":
+                if pending.action_type != "workspace_binding" or workspace_id is not None or row[3] is not None:
+                    raise RunRepositoryConflict("action_not_allowed")
+                if workspace_validator is None:
+                    raise RunRepositoryConflict("action_not_allowed")
+                if await (await db.execute("SELECT 1 FROM execution_operations WHERE run_id=? AND "
+                    "tool_name IN ('list_files','read_file','search_files','write_file','apply_patch','run_tests','get_diff','collect_artifact')",
+                    (str(run_id),))).fetchone():
+                    raise RunRepositoryConflict("project_operation_exists")
+                workspace_id = request.payload["workspace_id"]
+                workspace_validator(workspace_id)
+                if not await (await db.execute("SELECT 1 FROM sessions WHERE id=?", (row[9],))).fetchone():
+                    raise RunRepositoryConflict("session_not_found")
+                if snapshot.session_id != UUID(row[9]):
+                    raise RunRepositoryConflict("session_mismatch")
+                if await (await db.execute("SELECT 1 FROM task_runs WHERE workspace_id=? AND id!=? "
+                    "AND status IN ('queued','running','waiting')", (workspace_id, str(run_id)))).fetchone():
+                    raise RunRepositoryConflict("workspace_busy")
+                if await (await db.execute("SELECT 1 FROM execution_operations o JOIN task_runs r ON r.id=o.run_id "
+                    "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
+                    "AND o.status IN ('running','unknown')", (workspace_id,))).fetchone():
+                    raise RunRepositoryConflict("workspace_busy_unknown_outcome")
+                await db.execute("UPDATE task_runs SET workspace_id=? WHERE id=?", (workspace_id, str(run_id)))
             if request.action == "approve_action":
                 if pending.action_type != "confirmation" or confirmation_validator is None:
                     raise RunRepositoryConflict("confirmation_handler_unavailable")
                 confirmation_validator(pending.model_copy(deep=True), dict(request.payload))
             state = dict(snapshot.harness_state)
             dynamic = dict(state.get("structured_state", {}))
+            dynamic["workspace_id"] = workspace_id
             dynamic["action_feedback"] = {"action_id": pending.action_id, "action": request.action,
                 "payload": request.payload, "target_capability": pending.target_capability,
                 "frozen_parameters": pending.frozen_parameters, "business_version": pending.business_version}
             if request.action == "reject_action":
+                if pending.action_type == "workspace_binding":
+                    dynamic["workspace_rejected"] = True
                 dynamic["rejected_actions"] = [*dynamic.get("rejected_actions", []), pending.action_id]
                 if pending.target_capability:
                     dynamic["blocked_capabilities"] = {**dynamic.get("blocked_capabilities", {}),
@@ -603,7 +632,8 @@ class ExecutionRepository:
                 {"action": request.action, "payload": request.payload}, ensure_ascii=False))]
             saved = snapshot.model_copy(update={"phase": "ready_model", "pending_action": None,
                 "pending_decision": None, "pending_response": None, "harness_state": state,
-                "messages": messages, "checkpoint_revision": snapshot.checkpoint_revision + 1})
+                "messages": messages, "workspace_id": workspace_id,
+                "checkpoint_revision": snapshot.checkpoint_revision + 1})
             await self._set_run_status(db, run_id, "queued", now, resume_confirmed=True)
             await db.execute("UPDATE task_runs SET pending_action=NULL WHERE id=?", (str(run_id),))
             await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",

@@ -248,7 +248,7 @@ async def test_execute_assistant_commits_result_on_same_run(tmp_path):
         budget=Budget(max_loops=12, max_tool_calls=8, max_duration_seconds=20.0,
             max_context_tokens=4000, max_response_chars=2000))
     assert result.status == "completed"
-    assert (await repo.get_run(run.id)).result == {"output": "answer"}
+    assert (await repo.get_run(run.id)).result == AssistantResult(answer="answer").model_dump(mode="json")
 
 
 async def test_strategy_cannot_grant_confirmation(tmp_path):

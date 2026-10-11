@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     code_task_allow_credentials: Literal[False] = False
     code_task_worker_enabled: bool = False
     task_worker_enabled: bool | None = None
+    assistant_enabled: bool = False
     code_task_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     code_task_worker_max_concurrency: Literal[1] = 1
     code_task_max_loops: int = Field(default=12, gt=0)
