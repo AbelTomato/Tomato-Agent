@@ -12,6 +12,7 @@ from app.execution.ports import LeaseExecutionPort, canonical_digest
 from app.execution.recovery import RecoveryConflict
 from app.execution.state_machine import StaleExecutionOwner
 from app.tools.code_workspace import create_code_workspace_registry
+from app.workspaces.run_changes import RunFileChanges, digest
 
 
 def execution_config(service, run, budget=None):
@@ -52,6 +53,20 @@ class CodeExecutionPort(LeaseExecutionPort):
         elif tool_name in {"get_diff", "collect_artifact"}:
             recovery_class = "artifact"
         elif tool_name in {"write_file", "apply_patch"}:
+            if (await self.service.workspace_service.get(self.workspace_id)).mode == "original":
+                tracker = RunFileChanges(self.service.workspace_service, self.service.run_repository)
+                if tool_name == "apply_patch":
+                    prepared = await tracker.prepare_patch(self.lease.run_id, self.workspace_id,
+                                                           arguments.get("changes", []))
+                else:
+                    prepared = {arguments["path"]: arguments["content"]}
+                for name, updated in prepared.items():
+                    name, content, updated = await tracker.prepare_write(
+                        self.lease.run_id, self.workspace_id, name, updated)
+                    before[name], after[name] = digest(content), digest(updated)
+                return OperationInput(id=uuid4(), logical_index=logical_index, kind="tool",
+                    tool_name=tool_name, input_payload=arguments, recovery_class=recovery_class,
+                    before_digests=before, after_digests=after)
             changes = arguments.get("changes", []) if tool_name == "apply_patch" else [arguments]
             for change in changes:
                 path = self.service.workspace_service.resolve(self.workspace_id, change["path"], write=True)
@@ -81,10 +96,15 @@ class CodeExecutionPort(LeaseExecutionPort):
             if ref.get("artifact_id") and ref["artifact_id"] not in artifacts:
                 artifacts.append(ref["artifact_id"])
             if isinstance(data.get("passed"), bool):
-                diff = await self.service.workspace_service.diff(self.workspace_id)
+                original = (await self.service.workspace_service.get(self.workspace_id)).mode == "original"
+                tracker = RunFileChanges(self.service.workspace_service, self.service.run_repository)
+                diff = (await tracker.diff_for_run(self.lease.run_id) if original
+                        else await self.service.workspace_service.diff(self.workspace_id))
                 tests.append({"target": data.get("target", "unknown"), "passed": data["passed"],
                     "exit_code": data.get("exit_code"), "artifact_id": ref.get("artifact_id"),
-                    "workspace_diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest()})
+                    "workspace_diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+                    **({"verification_manifest": await tracker.verification_manifest(
+                        self.lease.run_id, self.workspace_id)} if original else {})})
             if ref.get("kind") == "diff":
                 state["diff_artifact_id"] = ref["artifact_id"]
             if not result.success:

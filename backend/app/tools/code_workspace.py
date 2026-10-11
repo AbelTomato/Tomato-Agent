@@ -11,6 +11,7 @@ from app.agent.policies import CodeTaskCapabilityProfile, ToolDeclaration
 from app.artifacts.service import ArtifactService
 from app.runs.repository import RunRepository
 from app.workspaces.service import WorkspacePathError, WorkspaceService
+from app.workspaces.run_changes import FileChangeConflict, RunFileChanges
 
 from .base import ToolContext, ToolResult
 from .registry import ToolRegistry
@@ -60,6 +61,7 @@ class CodeWorkspaceTool:
         self.artifacts = artifacts
         self.runs = runs
         self.persist_events = persist_events
+        self.changes = RunFileChanges(workspaces, runs)
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(name=self.name, description=self.description,
@@ -120,6 +122,8 @@ class CodeWorkspaceTool:
             return ToolResult(success=False, error="permission_denied")
         except WorkspacePathError:
             return ToolResult(success=False, error="permission_denied")
+        except FileChangeConflict as exc:
+            return ToolResult(success=False, error=str(exc))
         except (ValidationError, ValueError, TypeError):
             return ToolResult(success=False, error="invalid_arguments")
         except (KeyError, OSError):
@@ -127,6 +131,7 @@ class CodeWorkspaceTool:
 
     async def _execute(self, args: BaseModel, context: ToolContext) -> dict:
         workspace_id = context.workspace_id
+        original = (await self.workspaces.get(workspace_id)).mode == "original"
         if self.name in {"list_files", "search_files", "read_file", "write_file", "collect_artifact"}:
             self._authorize_path(context, args.path, write=self.name == "write_file")
         if self.name == "list_files":
@@ -135,9 +140,15 @@ class CodeWorkspaceTool:
                 self._authorize_path(context, path)
             return listing.model_dump()
         if self.name == "read_file":
+            if original:
+                content = await self.changes.observe(context.run_id, workspace_id, args.path)
+                return {"content": content, "missing": content is None}
             return {"content": await self.workspaces.read_file(
                 workspace_id, args.path, self.workspaces.max_file_bytes)}
         if self.name == "write_file":
+            if original:
+                await self.changes.write_checked(context.run_id, workspace_id, args.path, args.content)
+                return {"path": args.path}
             await self.workspaces.write_file(workspace_id, args.path, args.content)
             return {"path": args.path}
         if self.name == "search_files":
@@ -145,12 +156,19 @@ class CodeWorkspaceTool:
             listing = await self.workspaces.enumerate_files(workspace_id, args.path)
             for path in listing.files:
                 self._authorize_path(context, path)
-                content = await self.workspaces.read_file(workspace_id, path, self.workspaces.max_file_bytes)
+                content = (await self.changes.observe(context.run_id, workspace_id, path) if original
+                           else await self.workspaces.read_file(workspace_id, path, self.workspaces.max_file_bytes))
                 for number, line in enumerate(content.splitlines(), 1):
                     if args.query in line:
                         matches.append({"path": path, "line": number, "text": line})
             return {"matches": matches, "truncated": listing.truncated}
         if self.name == "apply_patch":
+            if original:
+                for change in args.changes:
+                    self._authorize_path(context, change.path, write=True)
+                files = await self.changes.patch_checked(context.run_id, workspace_id,
+                    [change.model_dump() for change in args.changes])
+                return {"files": files}
             pending = {}
             for change in args.changes:
                 path = self._authorize_path(context, change.path, write=True)
@@ -168,14 +186,16 @@ class CodeWorkspaceTool:
                 await self.workspaces.write_file(workspace_id, relative_path, content)
             return {"files": [relative for relative, _ in pending.values()]}
         if self.name == "get_diff":
-            diff = await self.workspaces.diff(workspace_id)
+            diff = (await self.changes.diff_for_run(context.run_id) if original
+                    else await self.workspaces.diff(workspace_id))
             ref = await self.artifacts.register_text(context.run_id, "diff", diff)
             await self.workspaces.record_artifact_ref(workspace_id, ref.model_dump(mode="json"))
             if self.persist_events:
                 await self.runs.append_event(context.run_id, "code_task.diff_created", {
                     "artifact_id": str(ref.artifact_id),
                 })
-            return {"diff": diff, "artifact": ref.model_dump(mode="json")}
+            return {"diff": diff, "artifact": ref.model_dump(mode="json"),
+                    **({"conflicts": await self.changes.conflicts_for_run(context.run_id)} if original else {})}
         if self.name == "collect_artifact":
             ref = await self.artifacts.register_file(context.run_id, workspace_id, args.path, args.kind)
             return {"artifact": ref.model_dump(mode="json")}
