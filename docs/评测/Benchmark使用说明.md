@@ -12,6 +12,8 @@ Benchmark runner 仅评估检索，不生成答案，也不执行语义拒答评
 
 当前正式 `dev` 清单为 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json`。它锁定题集、split、隔离快照、18 个 `dev` 题 ID、比较范围和策略配置。更换数据、快照或策略时，复制并审阅清单；不得把 API key、Authorization Header 或环境变量写入清单。
 
+Provider 凭据与连接使用 `backend/.env`，Embedding 请求超时使用 `backend/config.local.toml` 的 `[providers].embedding_timeout_seconds`；优先级与迁移规则见[环境配置说明](../环境配置说明.md)。Benchmark 的实验策略仍由 manifest/CLI 显式指定，不通过修改应用 TOML 代替实验策略记录，也不需要开启 Worker。
+
 `keyword` 不调用外部服务。`vector` 和 `hybrid` 从 `backend/.env` 读取 Embedding 配置；每题发送一次 query embedding 请求，不自动重试。正式 `dev` 为 18 题，因此每次 vector 或 hybrid 运行最多发起 18 次 Embedding 请求。Benchmark 不调用 LLM。请求用量/费用由 Provider 计费侧核实，报告不推算未知费用。
 
 ## 运行命令

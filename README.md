@@ -8,8 +8,7 @@ Tomato Agent 是一个面向个人知识库与技术写作的 Agent 项目，提
 - **知识库检索**：导入 Markdown，支持关键词、向量和混合检索，并保留引用来源。
 - **技术写作**：检索证据、生成提纲，经用户确认后生成并保存草稿。
 - **统一会话（实验性 MVP）**：一个会话列表、时间线和输入框支持普通聊天、知识问答、技术写作与代码任务，展示引用、确认动作、测试报告与本轮 diff。
-- **受控代码任务（实验性）**：统一界面注册原目录 Python 项目，直接修改并通过固定 Docker 镜像执行只读 pytest；旧 HTTP 入口保留 fixture。
-- **代码任务操作面**：Web 页面提供提交、状态与事件轮询、取消、人工恢复确认及测试报告/Artifact/diff 查看；已通过本机 Chrome 与真实 Provider/OpenShell 成功闭环、running 主动取消、刷新恢复和终态停止轮询验收。waiting 检查与确认使用独立未知副作用夹具通过真实 API/浏览器验证，未知事实继续保持等待。
+- **受控代码任务（实验性）**：注册原目录 Python 项目，直接修改并通过固定 Docker 镜像执行只读 pytest；支持状态查询、取消、人工恢复确认及测试报告、产物和 diff 查看。
 
 ## 技术栈
 
@@ -28,12 +27,13 @@ Tomato Agent 是一个面向个人知识库与技术写作的 Agent 项目，提
 ```bash
 cd backend
 cp .env.example .env
+cp config.example.toml config.local.toml
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 ```
 
-编辑 `backend/.env`，配置 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`，然后在同一终端启动：
+编辑 `backend/.env`，配置 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`；运行策略放在 `backend/config.local.toml`，示例已开启统一任务所需 Worker。已有文件不要覆盖，旧 `.env` 项仍优先于 TOML，迁移规则见[环境配置说明](docs/环境配置说明.md)。然后在同一终端启动：
 
 ```bash
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
@@ -57,19 +57,17 @@ pnpm dev
 
 ## 当前使用边界
 
-当前按本地可信单用户、一次一个任务场景使用。统一写作研究自动运行，提纲和草稿保存由用户确认；统一代码任务绑定已注册原目录 Python 项目、使用固定 Docker 镜像/只读 pytest。旧代码接口仍使用 `python_calculator` fixture 和既有 Docker/OpenShell 配置。设置 `CODE_TASK_WORKER_ENABLED=true` 后，应用启动会先初始化执行仓储、处理安全恢复，再由单机单 Worker 自动领取 queued Run；关闭时会停止 Worker。创建/查询响应包含 `dispatch_status`，禁用时明确为 `worker_disabled`。SQLite 执行内核已通过 fake LLM/工具的独立进程硬崩溃、显式恢复、竞争领取与旧执行者 fencing 验证；未知写入/Sandbox 副作用进入等待，不盲目重放。当前后台能力已在代码任务范围内完成单 Worker 交付验收，统一写作已接入外层阶段恢复，但领域内部不支持逐操作恢复；多 Worker、背压/限流、生产规模、真实 Gateway 断连与资源故障矩阵、公开多租户安全仍未验收，测试与单次真实闭环不代表生产放行。
+- 面向本地可信单用户、一次一个任务场景，尚不适用于公开多租户或生产规模部署。
+- 写作研究自动运行，提纲与草稿保存由用户确认；聊天、知识问答和写作仅支持阶段恢复。
+- 代码任务限定已注册的原目录 Python 项目、预置依赖与固定 Docker 镜像中的只读 pytest；取消任务不会回滚已经写入的内容。
+- 无法确认是否完成的写入或执行操作会保持等待，需要人工核对后恢复。具体配置与限制见[受控代码任务说明](docs/受控代码任务说明.md)。
 
 ## 文档导航
-
-统一会话与原目录代码任务 MVP 计划任务 1～8 已完成（2026-10-11）：公共 Run、原目录注册、分轮 diff/冲突、四类适配器/单 Worker、统一 API 与前端通过独立验收。任务 8 后端19文件268 passed（无失败/跳过），前端19 passed与TypeScript/Vite构建通过；真实Provider+Docker两轮原目录1 passed，Chrome完成同Session聊天、带引用RAG/原文、提纲编辑确认/保存、代码测试/diff、刷新/切换、主动取消和外部冲突拒绝。错误测试目标保留failed记录，继续后成功；跳过不计通过。新入口为 `POST /api/sessions/{id}/tasks`，旧代码HTTP入口保留fixture。`TASK_WORKER_ENABLED` 显式优先，未设置回退 `CODE_TASK_WORKER_ENABLED`，只启动一个Worker。聊天/RAG/写作仅阶段恢复，未知保存保持等待；原目录限定Python/pytest、预置依赖、digest固定Docker与只读测试。关键词中文改写对英文语料可能无结果；本地可信单用户MVP验收不代表跨语言检索质量或生产放行，详见[实施计划](docs/实施计划/2026.10.11-统一会话与原目录代码任务MVP实施计划.md)及[受控代码任务说明](docs/受控代码任务说明.md)。
-
-后台执行计划任务 1～6 已完成功能与交付门禁（2026-10-11，未提交 Git）。最终后端目标回归 133 passed、6 个真实 opt-in 场景跳过；聊天/知识/写作目标回归 33 passed，前端 5/5 与 TypeScript/Vite 构建通过。任务 5 已有 Docker 五场景、OpenShell 五场景及后台 HTTP/独立进程六场景通过证据，本轮核实并复用；跳过不计通过。后台故障验收使用脚本模型，清理失败采用显式注入；真实 Sandbox 未知副作用重启保持 waiting。工具集合序列化顺序已固定，旧 Run 摘要不自动迁移。具体命令、资源检查和未验收边界见[受控代码任务说明](docs/受控代码任务说明.md)。
-
-独立 `ExecutionWorker` 协调器负责单并发领取、租约心跳、启动恢复和关闭等待。代码任务创建和 execute 请求返回 `202`；前端提供状态/事件轮询、取消、人工恢复确认和 artifact/diff 查看。该历史代码入口继续保留；统一入口已共享单机单 Worker 外层执行内核，聊天/RAG/写作仅阶段恢复，任务 8 已取得独立真实验收证据。
 
 | 文档 | 内容 |
 | --- | --- |
 | [本地开发指南](docs/本地开发指南.md) | 跨平台启动、环境配置与常见问题 |
+| [环境配置说明](docs/环境配置说明.md) | 精简 .env、TOML 配置项、优先级与旧配置迁移 |
 | [知识库使用说明](docs/知识库使用说明.md) | Markdown 导入、索引与检索 |
 | [技术写作 Agent 说明](docs/技术写作Agent说明.md) | 写作流程、API、验证与限制 |
 | [受控代码任务说明](docs/受控代码任务说明.md) | 工具契约、API、隔离执行与验收边界 |

@@ -1,5 +1,9 @@
 # 技术写作 Agent 说明
 
+## 配置入口
+
+LLM、Embedding 的凭据与连接信息放在 `backend/.env`；运行策略放在 `backend/config.local.toml`。统一写作入口需要 `[worker].enabled=true`，检索模式、证据数量、生成预算和执行超时使用 `[writing]`，草稿目录使用 `[storage].draft_directory`。默认 hybrid 在缺少 Embedding 或索引不兼容时按既有规则回退 keyword，Provider 网络/认证错误不回退。旧环境变量仍兼容且优先于 TOML，详见[环境配置说明](环境配置说明.md)。
+
 ## 统一 MVP 任务 8 增量证据（2026-10-11）
 
 真实 Provider/Chrome 在独立 Session 与独立 SETEX 知识库中完成研究、用户编辑提纲、确认生成和显式保存。知识库位于 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases/unified-mvp-2026-10-11.db`，草稿及浏览器工件位于 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/unified-mvp-acceptance/browser-2026-10-11/`；未迁移现有业务库。恢复测试新增独立进程硬退出，验证已发布提纲/已保存结果补齐且不再次生成或保存，生成中断 failed/interrupted，未知保存 waiting/save_outcome_unknown。仅外层阶段恢复，不支持领域内部逐操作接管。完整任务 8 状态以实施计划检查点为准。
@@ -155,7 +159,7 @@ Content-Type: application/json
 
 ## 保存目录与恢复边界
 
-保存目录由 `draft_directory` 配置，默认是 `backend/data/drafts`（相对于后端工作目录）。目标文件名由任务 ID 和草稿版本生成。服务端先在同目录写入临时文件并执行原子替换，再以条件状态/版本更新数据库。
+保存目录由 TOML `[storage].draft_directory` 配置，旧 `DRAFT_DIRECTORY` 环境变量仍优先；默认是 `backend/data/drafts`，相对路径固定以 backend 目录解析，不随启动工作目录变化。目标文件名由任务 ID 和草稿版本生成。服务端先在同目录写入临时文件并执行原子替换，再以条件状态/版本更新数据库。
 
 数据库和文件系统之间不宣称分布式事务或恰好一次执行。如果文件已经生成但数据库状态更新失败，后续相同保存请求会先核对目标文件内容；当前实现不会把任意客户端路径作为恢复目标。
 
