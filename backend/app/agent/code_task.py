@@ -118,14 +118,13 @@ class CodeTaskService:
             for filename in ("calculator.py", "test_calculator.py")
         }
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-        run = await self.run_repository.create_run("code_task", request.model_dump(), workspace.workspace_id)
         from app.agent.code_execution import initial_snapshot
-        await self.execution_repository.bootstrap_run(
-            initial_snapshot(self, run),
+        return await self.run_repository.create_run(
+            "code_task", request.model_dump(), workspace.workspace_id,
+            snapshot_factory=lambda run: initial_snapshot(self, run),
             event_type="code_task.created",
             event_payload={"workspace_id": workspace.workspace_id},
         )
-        return await self.run_repository.get_run(run.id)
 
     async def create_for_session(self, session_id, request: CodeTaskRequest,
                                  workspace_id: str, client_request_id: str):
@@ -155,14 +154,9 @@ class CodeTaskService:
             "profile_digest": canonical_digest(profile.model_dump(mode="json")),
         }}
         facts = await project_context(self.workspace_service, workspace_id)
-        run = await self.run_repository.create_session_run(
-            session_id, "code", request_data, workspace_id, client_request_id)
-        if await self.run_repository.get_checkpoint(run.id) is not None:
-            return run
         from app.agent.code_execution import initial_snapshot
-        snapshot = initial_snapshot(self, run)
         completed = [item for item in await self.run_repository.list_for_session(session_id)
-                     if item.status == "completed" and item.id != run.id]
+                     if item.status == "completed"]
         summaries = []
         for item in completed[-2:]:
             checkpoint = await self.run_repository.get_checkpoint(item.id)
@@ -170,12 +164,18 @@ class CodeTaskService:
                       if checkpoint else "")
             summaries.append(json.dumps({"task": item.request.get("task", item.request.get("message", "")),
                                          "result": item.result or output}, ensure_ascii=False)[:2000])
-        state = {**snapshot.harness_state, "context_state": {
-            **snapshot.harness_state["context_state"], "important_facts": facts,
-            "memory": summaries}}
-        await self.execution_repository.bootstrap_run(snapshot.model_copy(update={"harness_state": state}),
+
+        def snapshot_factory(run):
+            snapshot = initial_snapshot(self, run)
+            state = {**snapshot.harness_state, "context_state": {
+                **snapshot.harness_state["context_state"], "important_facts": facts,
+                "memory": summaries}}
+            return snapshot.model_copy(update={"harness_state": state})
+
+        return await self.run_repository.create_session_run(
+            session_id, "code", request_data, workspace_id, client_request_id,
+            snapshot_factory=snapshot_factory,
             event_type="code_task.created", event_payload={"workspace_id": workspace_id})
-        return await self.run_repository.get_run(run.id)
 
     async def recover(self, run_id: str, *, expected_version: int, action: str):
         run = await self.run_repository.get_run(run_id)

@@ -40,15 +40,16 @@ class TaskService:
                 session_id, CodeTaskRequest(task=request.message), request.workspace_id,
                 request.client_request_id)
         data = {"message": request.message, "options": request.options}
-        run = await self.runs.create_session_run(session_id, request.kind, data, None,
-                                                request.client_request_id)
-        snapshot = StageExecutionSnapshot(run_id=run.id, kind=request.kind,
-            checkpoint_revision=1, last_event_sequence=0, phase="ready", stage="research" if
-            request.kind == "writing" else "generation", input_version=0,
-            policy_digest=canonical_digest({"kind": request.kind, "protocol": 1}),
-            config_digest=self.config_digest)
-        await self.execution.bootstrap_snapshot(snapshot)
-        return run
+
+        def snapshot_factory(run):
+            return StageExecutionSnapshot(run_id=run.id, kind=request.kind,
+                checkpoint_revision=1, last_event_sequence=0, phase="ready", stage="research" if
+                request.kind == "writing" else "generation", input_version=0,
+                policy_digest=canonical_digest({"kind": request.kind, "protocol": 1}),
+                config_digest=self.config_digest)
+
+        return await self.runs.create_session_run(session_id, request.kind, data, None,
+            request.client_request_id, snapshot_factory=snapshot_factory)
 
     async def execute(self, run, lease, port):
         return await self.adapters[run.task_type if run.task_type != "code_task" else "code"].execute(

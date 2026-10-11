@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,7 +93,9 @@ class RunRepository:
             await migrate_unified_runs(db)
 
     async def create_run(
-        self, task_type: str, request: dict[str, Any], workspace_id: str | None = None
+        self, task_type: str, request: dict[str, Any], workspace_id: str | None = None,
+        *, snapshot_factory: Callable[[RunRecord], Any] | None = None,
+        event_type: str | None = None, event_payload: dict[str, Any] | None = None,
     ) -> RunRecord:
         run_id = uuid4()
         timestamp = _now()
@@ -111,6 +114,8 @@ class RunRepository:
                     timestamp,
                 ),
             )
+            await self._initialize_run(db, run_id, timestamp, snapshot_factory,
+                                       event_type, event_payload)
             await db.commit()
         return RunRecord(
             id=run_id,
@@ -138,6 +143,8 @@ class RunRepository:
     async def create_session_run(
         self, session_id: str | UUID, kind: str, request: dict[str, Any],
         workspace_id: str | None, client_request_id: str,
+        *, snapshot_factory: Callable[[RunRecord], Any] | None = None,
+        event_type: str | None = None, event_payload: dict[str, Any] | None = None,
     ) -> RunRecord:
         if kind not in {"chat", "knowledge", "writing", "code"}:
             raise ValueError("unsupported task kind")
@@ -189,10 +196,35 @@ class RunRepository:
                 (str(run_id), kind, json.dumps(_json_safe(request)), workspace_id, timestamp, timestamp,
                  str(session_id), client_request_id, digest),
             )
+            await self._initialize_run(db, run_id, timestamp, snapshot_factory,
+                                       event_type, event_payload)
             await db.commit()
         result = await self.get_run(run_id)
         assert result is not None
         return result
+
+    async def _initialize_run(self, db, run_id, timestamp, snapshot_factory,
+                              event_type, event_payload):
+        """Keep the initial checkpoint and creation event in the Run transaction."""
+        if snapshot_factory is not None:
+            row = await (await db.execute(
+                f"SELECT {_RUN_COLUMNS} FROM task_runs WHERE id=?", (str(run_id),)
+            )).fetchone()
+            snapshot = snapshot_factory(run_record_from_row(row))
+            if snapshot.run_id != run_id:
+                raise ValueError("snapshot_run_mismatch")
+            await db.execute(
+                "INSERT INTO task_run_checkpoints(run_id, sequence, state, created_at) "
+                "VALUES (?, 1, ?, ?)",
+                (str(run_id), snapshot.model_dump_json(), timestamp),
+            )
+        if event_type is not None:
+            await db.execute(
+                "INSERT INTO task_run_events(id, run_id, sequence, event_type, payload, created_at) "
+                "VALUES (?, ?, 1, ?, ?, ?)",
+                (str(uuid4()), str(run_id), event_type,
+                 json.dumps(_json_safe(event_payload or {})), timestamp),
+            )
 
     async def list_for_session(self, session_id: str | UUID, limit: int = 50, offset: int = 0) -> list[RunRecord]:
         if limit < 1 or offset < 0:
