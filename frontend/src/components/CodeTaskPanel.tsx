@@ -30,6 +30,7 @@ export function CodeTaskPanel() {
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pollError, setPollError] = useState('');
   const [updatedAt, setUpdatedAt] = useState('');
   const [refresh, setRefresh] = useState(0);
   const mounted = useRef(false);
@@ -69,13 +70,13 @@ export function CodeTaskPanel() {
         });
         cursor.current = Math.max(cursor.current, ...result.events.map((event) => event.sequence));
         setUpdatedAt(new Date().toLocaleString());
-        setError('');
+        setPollError('');
         failures = 0;
         if (!terminal(loaded.status)) timer = setTimeout(() => void poll(), 1000);
       } catch (reason) {
         if (controller.signal.aborted) return;
         failures += 1;
-        setError(`${message(reason)}${failures >= 3 ? ' 自动轮询已暂停，请手动刷新。' : ''}`);
+        setPollError(`${message(reason)}${failures >= 3 ? ' 自动轮询已暂停，请手动刷新。' : ''}`);
         if (failures < 3) timer = setTimeout(() => void poll(), 1000);
       }
     }
@@ -108,6 +109,7 @@ export function CodeTaskPanel() {
   function selectRun(selected: CodeTaskSubmission | CodeTask) {
     cursor.current = 0;
     setEvents([]); setArtifact(null); setRecovery(null); setConfirmed(false); setUpdatedAt('');
+    setPollError('');
     setRun(selected);
     setOpenId(selected.run_id);
     try { localStorage.setItem(runStorageKey, selected.run_id); }
@@ -144,6 +146,7 @@ export function CodeTaskPanel() {
     <button type="button" onClick={start} disabled={busy || !input.trim() || (run !== null && !terminal(run.status))}>{busy ? '请求中…' : '提交代码任务'}</button>
     {!run && <p className="code-empty">提交后自动观察后台状态。需要启用 Worker 并配置隔离执行环境。</p>}
     {error && <p className="notice error" role="alert">{error}</p>}
+    {pollError && <p className="notice error" role="alert">{pollError}</p>}
     {run && <>
       <p className="code-meta">Run：{run.run_id}<br />Workspace：{run.workspace_id}<br />版本：{details?.version ?? '待查询'} · 最近查询：{updatedAt || '尚未查询'}</p>
       {run.dispatch_status === 'worker_disabled' && <p className="notice">后台 Worker 未启用，任务不会自动执行。请在后端配置 CODE_TASK_WORKER_ENABLED=true 并重启服务。</p>}

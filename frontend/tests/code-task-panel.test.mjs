@@ -38,7 +38,7 @@ let fail = false;
 const task = (id) => ({ run_id: id, status: 'completed', workspace_id: `ws-${id}`, version: 2,
   artifacts: [{ artifact_id: `diff-${id}`, kind: 'diff', size_bytes: 4 }], test_results: [], changed_files: ['calculator.py'] });
 globalThis.__codePanelApi = {
-  async getCodeTask(id) { calls.push(['state', id]); if (fail) throw new Error('Run 不存在'); return task(id); },
+  async getCodeTask(id) { calls.push(['state', id]); if (fail || id === 'missing') throw new Error('Run 不存在'); return task(id); },
   async listCodeTaskEvents(id, after) { calls.push(['events', id, after]); return { events: [{ sequence: 1, event_type: id, payload: {} }] }; },
   async loadCodeTaskArtifact(id, artifactId) { calls.push(['artifact', id, artifactId]); return { artifact: { kind: 'diff' }, content: `content-${id}` }; },
   async createCodeTask() { return task('created'); },
@@ -109,5 +109,18 @@ test('存储不可用仍可创建并查看任务', async () => {
     elements().find((node) => node.type === 'button' && text(node) === '提交代码任务').props.onClick(); await flush();
     assert.match(text(harness.tree), /Run：created/);
     assert.ok(calls.some((call) => call.join() === 'events,created,0'));
+  } finally { unmount(); globalThis.localStorage = originalStorage; }
+});
+
+test('已有任务轮询成功不会清除打开其他任务失败的操作错误', async () => {
+  const originalStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => 'saved', setItem() {} };
+  try {
+    mount(); await flush();
+    const idInput = elements().find((node) => node.type === 'input' && node.props.placeholder);
+    idInput.props.onChange({ target: { value: 'missing' } }); await flush();
+    elements().find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush();
+    assert.match(text(harness.tree), /Run 不存在/);
+    assert.match(text(harness.tree), /Run：saved/);
   } finally { unmount(); globalThis.localStorage = originalStorage; }
 });
