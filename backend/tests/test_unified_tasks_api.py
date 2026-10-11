@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -150,6 +150,49 @@ async def test_unknown_workspace_and_session(tmp_path):
         result = await client.post(f"/api/sessions/{session}/tasks", json=body(kind="code", workspace_id=str(uuid4())))
         assert result.status_code == 404
         assert (await client.post(f"/api/sessions/{uuid4()}/tasks", json=body())).status_code == 404
+
+
+async def test_cancelled_unknown_operation_returns_workspace_conflict(tmp_path):
+    from app.agent.policies import CodeTaskCapabilityProfile
+    from app.execution.models import OperationInput
+    from app.tools.code_tests import RunTestsTool, TestTargetRegistry
+    from test_original_code_task import Sandbox
+
+    async with api(tmp_path) as (app, client, session):
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "app.py").write_text("value = 0\n")
+        (project / "test_app.py").write_text("def test_ok(): assert True\n")
+        workspace = await client.post("/api/workspaces", json={
+            "path": str(project), "pytest_paths": ["test_app.py"]})
+        assert workspace.status_code == 201
+        workspace_id = workspace.json()["workspace_id"]
+        service = app.state.code_task_service
+        service.test_tool = RunTestsTool(TestTargetRegistry([]), Sandbox(), service.workspace_service,
+                                        service.artifact_service, service.run_repository)
+        service.capability_profile_factory = lambda root: CodeTaskCapabilityProfile(
+            allowed_paths=(str(root),), sandbox_backend="docker")
+        path = f"/api/sessions/{session}/tasks"
+        created = await client.post(path, json=body(kind="code", workspace_id=workspace_id))
+        assert created.status_code == 202
+        run_id = created.json()["run_id"]
+        execution = app.state.execution_repository
+        lease = await execution.claim(UUID(run_id), "old", lease_seconds=30)
+        snapshot = await execution.get_snapshot(run_id)
+        operation = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="write_file",
+                                   input_payload={"path": "app.py"}, recovery_class="file_write")
+        snapshot = snapshot.model_copy(update={"pending_operation_id": operation.id})
+        await execution.prepare_operation(lease, operation, snapshot)
+        await execution.start_step(lease, operation.id, snapshot)
+        await execution.request_cancel(run_id)
+        assert (await app.state.run_repository.get_run(run_id)).status == "cancelled"
+
+        result = await client.post(path, json=body(
+            kind="code", workspace_id=workspace_id, client_request_id="second"))
+        assert result.status_code == 409
+        assert result.json() == {"detail": {"code": "workspace_busy_unknown_outcome"}}
+        runs = await app.state.run_repository.list_for_session(session)
+        assert [str(run.id) for run in runs] == [run_id]
 
 
 async def test_code_binding_result_and_backend_errors(tmp_path):

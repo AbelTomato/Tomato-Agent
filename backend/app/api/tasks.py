@@ -25,7 +25,7 @@ def task_error(exc):
         return HTTPException(503, {"code": code})
     if code in {"Registered Docker test executor required", "Original project tests require Docker"}:
         return HTTPException(503, {"code": "validation_backend_unavailable"})
-    conflicts = {"session_busy", "workspace_busy", "request_conflict", "version_conflict",
+    conflicts = {"session_busy", "workspace_busy", "workspace_busy_unknown_outcome", "request_conflict", "version_conflict",
                  "stale_action", "action_not_allowed", "confirmation_required", "workspace_changed",
                  "domain_version_conflict", "action_conflict", "action_request_conflict", "config_changed", "file_conflict"}
     if code in conflicts:
