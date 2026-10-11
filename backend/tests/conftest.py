@@ -2,6 +2,9 @@
 
 import os
 
+# Set before importing app.settings, including its module-level singleton.
+os.environ["CONFIG_FILE"] = ""
+
 
 # pytest loads conftest.py before importing test modules. Environment variables
 # take precedence over Pydantic's configured .env file, so tests remain stable

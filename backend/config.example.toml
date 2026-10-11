@@ -1,0 +1,79 @@
+# 复制为 config.local.toml；不放密钥、Provider 地址或模型。
+# 仅需覆盖与默认值不同的项。相对存储路径以 backend 为基准。
+
+[worker]
+enabled = true # 统一聊天/RAG/写作/代码入口需要 Worker
+# poll_interval_seconds = 1.0
+
+[storage]
+# database_path = "data/agent.db"
+# docs_root = "../docs"
+# draft_directory = "data/drafts"
+# code_task_workspace_root = "data/code-workspaces"
+# code_task_artifact_root = "data/code-artifacts"
+
+[providers]
+# llm_timeout_seconds = 60.0
+# embedding_timeout_seconds = 60.0
+
+[runtime]
+# max_loops = 12
+# max_tool_calls = 8
+# max_duration_seconds = 120.0
+# tool_timeout_seconds = 20.0
+# max_doc_bytes = 100000
+# max_tool_result_chars = 20000
+
+[knowledge]
+# 以下保持既有默认；启用完整 Pipeline 前需准备对应 Provider。
+pipeline_enabled = false
+# min_vector_similarity = 0.5
+# candidate_limit = 30
+# candidate_min_vector_similarity = 0.2
+# candidate_keyword_limit = 20
+# candidate_vector_limit = 30
+
+[knowledge.query_planning]
+enabled = false
+# structural_fallback_enabled = false
+# max_queries = 4
+# max_query_chars = 300
+
+[knowledge.answerability]
+# min_supported_coverage = 1.0
+# min_partial_coverage = 0.5
+# min_supported_evidence = 1
+# multi_evidence_requires_all_queries = true
+# allow_insufficient_llm = false
+
+[knowledge.rerank]
+enabled = false
+# provider = "compatible" # 或 dashscope
+# timeout_seconds = 10.0
+# candidate_limit = 30
+
+[writing]
+# retrieval_mode = "hybrid"
+# max_evidence = 5
+# max_context_tokens = 8000
+# max_response_chars = 20000
+# timeout_seconds = 120.0
+
+[code]
+# 注册原目录前设置绝对项目根目录；不可使用 /。
+workspace_allowed_roots = []
+# local 不执行项目测试；统一原目录代码任务要求 docker 和固定 digest 镜像。
+sandbox_backend = "local"
+# docker_image = "repository@sha256:<64位镜像digest>"
+# docker_binary = "docker"
+# openshell_image = "repository@sha256:<64位镜像digest>"
+# openshell_binary = "openshell"
+# max_loops = 12
+# max_tool_calls = 8
+# max_duration_seconds = 120.0
+# max_context_tokens = 8000
+# max_response_chars = 20000
+# tool_timeout_seconds = 20.0
+# max_tool_result_chars = 20000
+# max_file_bytes = 100000
+# max_artifact_bytes = 1000000

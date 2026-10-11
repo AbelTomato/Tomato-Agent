@@ -8,9 +8,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.agent.config import RuntimeConfig
 from app.agent.models import CodeTaskBudget
 from app.agent.policies import CodeTaskCapabilityProfile
+from app.config_file import BACKEND_ROOT, normalize_worker, read_config
 
 
 class Settings(BaseSettings):
+    config_file: Path | None = Field(default=None, exclude=True)
     database_path: Path = Path("data/agent.db")
     docs_root: Path = Path("../docs")
     max_doc_bytes: int = 100_000
@@ -79,7 +81,41 @@ class Settings(BaseSettings):
     code_task_docker_binary: str = "docker"
     code_task_openshell_image: str = ""
     code_task_openshell_binary: str = "openshell"
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=BACKEND_ROOT / ".env", extra="ignore",
+                                      validate_default=True, hide_input_in_errors=True)
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        def toml_source():
+            initial = init_settings.init_kwargs
+            for source in (initial, env_settings(), dotenv_settings()):
+                if "config_file" not in source:
+                    continue
+                path = source["config_file"]
+                if path is None or path == "":
+                    return {}
+                return read_config(Path(path), required=True)
+            if dotenv_settings.env_file is None:
+                return {}
+            return read_config(BACKEND_ROOT / "config.local.toml", required=False)
+
+        def normalized(source):
+            return lambda: normalize_worker(source())
+
+        return (normalized(init_settings), normalized(env_settings),
+                normalized(dotenv_settings), toml_source, file_secret_settings)
+
+    @field_validator("config_file", mode="before")
+    @classmethod
+    def empty_config_disables_file(cls, value):
+        return None if value == "" else value
+
+    @field_validator("database_path", "docs_root", "draft_directory",
+                     "code_task_workspace_root", "code_task_artifact_root", mode="after")
+    @classmethod
+    def anchor_storage_paths(cls, path: Path) -> Path:
+        return path if path.is_absolute() else (BACKEND_ROOT / path).resolve()
 
     @property
     def effective_task_worker_enabled(self) -> bool:

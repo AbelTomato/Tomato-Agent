@@ -111,7 +111,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         [
             Calculator(),
             Search(),
-            ReadDocs(Path(config.docs_root)),
+            ReadDocs(Path(config.docs_root), max_bytes=config.max_doc_bytes),
             SearchKnowledge(
                 knowledge_repository,
                 max_result_chars=config.max_tool_result_chars,
