@@ -5,6 +5,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.runs.models import TaskKind
 
 
+class TaskRecoveryObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    version: int = Field(ge=0)
+    reason: str = Field(min_length=1)
+    action: Literal["reuse", "retry", "reconcile", "manual_review", "reject"]
+    allowed_actions: list[Literal["cancel", "inspect_recovery", "continue_recovery"]]
+
+
 class UnifiedTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: TaskKind

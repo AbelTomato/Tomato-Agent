@@ -42,6 +42,8 @@ export function ConversationShell() {
   const documentController = useRef(0);
   const submission = useRef<{ fingerprint: string; id: string } | null>(null);
   const actionRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+  // 动作检查是一次观察；只在同一 Run 版本内保留，轮询不能把它丢弃。
+  const recoveryObservations = useRef(new Map<string, UnifiedTask['recovery']>());
   const active = tasks.some((task) => !terminal(task));
 
   useEffect(() => {
@@ -90,7 +92,10 @@ export function ConversationShell() {
           setEvents((previous) => ({ ...previous, [task.run_id]: [...new Map([
             ...(previous[task.run_id] ?? []), ...page.events,
           ].map((event) => [event.sequence, event])).values()].sort((a, b) => a.sequence - b.sequence) }));
-          return { ...task, ...detail, messages: task.messages };
+          const observed = recoveryObservations.current.get(task.run_id);
+          if (observed?.version !== detail.version) recoveryObservations.current.delete(task.run_id);
+          return { ...task, ...detail, messages: task.messages,
+            recovery: detail.recovery ?? (observed?.version === detail.version ? observed : undefined) };
         }));
         if (!current()) return;
         setTasks(loaded); setLoading(false); setPollError(''); failures = 0;
@@ -130,6 +135,7 @@ export function ConversationShell() {
     if (id === sessionId) return;
     generation.current += 1; actionController.current?.abort(); documentController.current += 1;
     submission.current = null; actionRequest.current = null;
+    recoveryObservations.current.clear();
     remember(id); setSessionId(id); setInput(''); setTasks([]); setEvents({}); setDocument(null); setError(''); setBusy(false); setLoading(true);
   }
   async function operate(operation: (signal: AbortSignal, current: () => boolean) => Promise<void>) {
@@ -171,6 +177,8 @@ export function ConversationShell() {
       const updated = await actOnTask(task.run_id, { ...body, client_request_id: actionRequest.current!.id }, signal);
       if (!current()) return;
       actionRequest.current = null;
+      if (updated.recovery) recoveryObservations.current.set(task.run_id, updated.recovery);
+      else recoveryObservations.current.delete(task.run_id);
       setTasks((previous) => previous.map((item) => item.run_id === task.run_id ? { ...item, ...updated } : item));
       // 重启轮询，但保留操作错误；错误只在下一次明确操作时清除。
       setRefresh((value) => value + 1);

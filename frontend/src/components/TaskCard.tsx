@@ -41,6 +41,7 @@ export function TaskCard({ task, busy, onAction, onOpenDocument }: {
     return () => request.current?.abort();
   }, [task.run_id]);
   const allowed = (action: TaskAction) => !task.legacy && task.capabilities.includes(action);
+  const recovery = task.recovery?.version === task.version ? task.recovery : undefined;
   async function confirmOutline() {
     try {
       const parsed: unknown = JSON.parse(outline);
@@ -87,6 +88,14 @@ export function TaskCard({ task, busy, onAction, onOpenDocument }: {
       </li>)}</ul>{artifact && <pre>{artifact}</pre>}</details>
     </>}
     {task.pending_action && <p className="notice">等待原因：{task.pending_action.reason}</p>}
+    {recovery && <section aria-label="恢复检查结果">
+      <p className="notice">恢复分类原因：{recovery.reason} · 分类动作：{recovery.action}</p>
+      <p>允许的后续动作：{recovery.allowed_actions.map((action) => ({
+        cancel: '取消任务', inspect_recovery: '检查恢复原因', continue_recovery: '确认请求恢复',
+      })[action]).join('、') || '无'}</p>
+      {recovery.action === 'manual_review' && <p className="notice">副作用结果尚未确认，需要人工核对；请求恢复仍可能保持等待。</p>}
+      <details><summary>本次恢复观察</summary><pre>{JSON.stringify(recovery, null, 2)}</pre></details>
+    </section>}
     {allowed('inspect_recovery') && <>
       <p className="notice">核对文件写入、测试与保存事实。检查结果不代表副作用已确认；未知结果保持等待。</p>
       <details><summary>当前恢复事实</summary><pre>{JSON.stringify({ error: task.error, pending_action: task.pending_action }, null, 2)}</pre></details>

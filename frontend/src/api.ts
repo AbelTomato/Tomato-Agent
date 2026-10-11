@@ -282,6 +282,11 @@ export function loadCodeTaskArtifact(runId: string, artifactId: string, signal?:
 
 export type TaskKind = 'chat' | 'knowledge' | 'writing' | 'code';
 export type TaskAction = 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery';
+export type TaskRecoveryObservation = {
+  version: number; reason: string;
+  action: 'reuse' | 'retry' | 'reconcile' | 'manual_review' | 'reject';
+  allowed_actions: Extract<TaskAction, 'cancel' | 'inspect_recovery' | 'continue_recovery'>[];
+};
 export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string };
 export type Workspace = { workspace_id: string; repo_path?: string; pytest_paths?: string[]; available?: boolean };
 export type UnifiedResult = Partial<WritingTask> & {
@@ -293,6 +298,7 @@ export type UnifiedTask = {
   run_id: string; session_id: string; kind: TaskKind; status: string; phase: string | null;
   version: number; workspace_id: string | null; created_at: string; legacy: boolean;
   result: UnifiedResult | null; error?: Record<string, unknown> | null;
+  recovery?: TaskRecoveryObservation;
   messages?: ConversationMessage[]; capabilities: TaskAction[];
   pending_action: { action_id: string; reason: string; business_version: number;
     allowed_actions: TaskAction[]; display_data: UnifiedResult } | null;

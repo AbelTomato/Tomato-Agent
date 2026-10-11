@@ -186,7 +186,7 @@ async def test_manual_recovery_uses_current_policy_after_creation(tmp_path, poli
 
         result = await service.recover(str(run.id), expected_version=before.version, action="continue")
         status = "running" if policy_changed else "queued"
-        assert result == {"status": status, "recovery_reason": reason}
+        assert result == {"status": status, "recovery_reason": reason, "recovery_action": action}
         assert (await service.run_repository.get_run(run.id)).status == status
         expired = await repository.latest_attempt(run.id)
         assert expired.status == "expired"
@@ -232,7 +232,7 @@ async def test_ready_finish_recovery_reuses_response_and_validates_completion(tm
 
         service.llm = NoModel()
         result = await service.recover(str(run.id), expected_version=before.version, action="continue")
-        assert result == {"status": "queued", "recovery_reason": "snapshot_resumable"}
+        assert result == {"status": "queued", "recovery_reason": "snapshot_resumable", "recovery_action": "reuse"}
         assert (await repository.latest_attempt(run.id)).attempt_no == 1
         assert (await service.run_repository.get_run(run.id)).status == "queued"
         assert not service._heartbeat_tasks

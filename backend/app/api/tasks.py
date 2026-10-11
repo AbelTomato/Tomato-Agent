@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.tasks.models import TaskActionRequest, UnifiedTaskRequest
+from app.tasks.models import TaskActionRequest, TaskRecoveryObservation, UnifiedTaskRequest
 from app.workspaces.service import WorkspacePathError
 
 router = APIRouter()
@@ -122,10 +122,19 @@ async def task_events(run_id: str, request: Request, after: int = Query(0, ge=0)
 async def task_action(run_id: str, body: TaskActionRequest, request: Request):
     run = await task_required(request, run_id)
     try:
-        await request.app.state.task_service.act(run.id, body)
+        outcome = await request.app.state.task_service.act(run.id, body)
     except (KeyError, ValueError, RuntimeError) as exc:
         raise task_error(exc) from exc
-    return await task_payload(request, await task_required(request, run_id))
+    payload = await task_payload(request, await task_required(request, run_id))
+    if (run.task_type == "code" and body.action in {"inspect_recovery", "continue_recovery"}
+            and isinstance(outcome, dict) and outcome.get("recovery_reason")):
+        payload["recovery"] = TaskRecoveryObservation(
+            version=payload["version"], reason=outcome["recovery_reason"],
+            action=outcome["recovery_action"],
+            allowed_actions=[action for action in payload["capabilities"]
+                             if action in {"cancel", "inspect_recovery", "continue_recovery"}],
+        ).model_dump(mode="json")
+    return payload
 
 
 @router.get("/api/sessions/{session_id}/tasks")

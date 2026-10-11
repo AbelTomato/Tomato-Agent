@@ -264,3 +264,21 @@ test('卸载取消正在读取的任务与事件，不发布迟到结果', async
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.dirty, false);
 }));
+
+test('恢复观察在动作后刷新和同版本轮询中保留，版本变化时清除', async () => scenario(async ({ timers }) => {
+  let currentTask = { ...task('recover', 'waiting', 'code'), capabilities: ['inspect_recovery', 'continue_recovery'],
+    pending_action: { action_id: 'recover:3', reason: 'recovery_required' } };
+  historyReader = async () => ({ tasks: [currentTask] });
+  taskReader = async () => currentTask;
+  const recovery = { version: 3, reason: 'unknown_side_effect', action: 'manual_review',
+    allowed_actions: ['inspect_recovery', 'continue_recovery'] };
+  actionReader = async () => ({ ...currentTask, recovery });
+  mount(); await flush();
+  await cards()[0].props.onAction(cards()[0].props.task, 'inspect_recovery', {}); await flush();
+  assert.deepEqual(cards()[0].props.task.recovery, recovery);
+  const tick = [...timers.values()].at(-1); timers.clear(); tick(); await flush();
+  assert.deepEqual(cards()[0].props.task.recovery, recovery);
+  currentTask = { ...currentTask, version: 4 };
+  const next = [...timers.values()].at(-1); timers.clear(); next(); await flush();
+  assert.equal(cards()[0].props.task.recovery, undefined);
+}));

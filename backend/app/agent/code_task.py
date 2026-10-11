@@ -202,9 +202,8 @@ class CodeTaskService:
             candidate = await self.execution_repository.expire_and_classify(attempt.id)
             decision = classify_recovery(candidate.snapshot, candidate.operation, observation)
         recovered = await self.execution_repository.apply_recovery(candidate, decision)
-        if recovered.status == "waiting":
-            return {"status": "waiting", "recovery_reason": decision.reason_code}
-        return {"status": recovered.status, "recovery_reason": decision.reason_code}
+        return {"status": recovered.status, "recovery_reason": decision.reason_code,
+                "recovery_action": decision.action}
 
     def recovery_observation(self, run) -> RecoveryObservation:
         """Observe the live policy for both manual and automatic recovery."""

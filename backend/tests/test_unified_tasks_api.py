@@ -200,3 +200,61 @@ async def test_code_waiting_has_versioned_recovery_action(tmp_path, monkeypatch)
         req["payload"] = {"confirmed": True}
         assert (await client.post(path, json=req)).status_code == 200
         recover.assert_awaited_once()
+
+
+@pytest.mark.parametrize("scenario,reason,decision,status", [
+    ("resumable", "snapshot_resumable", "retry", "queued"),
+    ("unknown", "unknown_side_effect", "manual_review", "waiting"),
+    ("policy", "policy_mismatch", "reject", "waiting"),
+])
+async def test_real_recovery_http_response_renders_in_frontend(tmp_path, scenario, reason, decision, status):
+    import json
+    from pathlib import Path
+    import subprocess
+
+    import aiosqlite
+    from app.agent.models import CodeTaskRequest
+    from test_execution_recovery import operation, seed_operation
+
+    async with api(tmp_path) as (app, client, session):
+        service = app.state.code_task_service
+        run = await service.create(CodeTaskRequest(task="recover"))
+        async with aiosqlite.connect(service.run_repository.path) as db:
+            await db.execute("UPDATE task_runs SET session_id=?, task_type='code' WHERE id=?",
+                             (session, str(run.id)))
+            await db.commit()
+        lease = await service.execution_repository.claim(run.id, "owner", lease_seconds=30)
+        if scenario == "unknown":
+            await seed_operation(service.execution_repository, run, lease, operation())
+        await service.execution_repository.finish(lease, "waiting")
+        if scenario == "policy":
+            app.state.config.code_task_tool_timeout_seconds = 19
+        before = await service.run_repository.get_run(run.id)
+        payload = (await client.get(f"/api/tasks/{run.id}")).json()
+        responses = []
+        for action in ("inspect_recovery", "continue_recovery"):
+            response = await client.post(f"/api/tasks/{run.id}/actions", json={
+                "action": action, "action_id": payload["pending_action"]["action_id"],
+                "expected_version": payload["version"], "client_request_id": action,
+                "payload": {"confirmed": True} if action == "continue_recovery" else {},
+            })
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["recovery"] == {
+                "version": payload["version"], "reason": reason, "action": decision,
+                "allowed_actions": payload["capabilities"],
+            }
+            if action == "inspect_recovery":
+                assert await service.run_repository.get_run(run.id) == before
+                assert payload["status"] == "waiting"
+            else:
+                assert payload["status"] == status
+            responses.append(payload)
+
+        # Feed actual ASGI HTTP JSON through the frontend API client and real React card.
+        frontend = Path(__file__).resolve().parents[2] / "frontend"
+        rendered = subprocess.run(
+            ["node", str(frontend / "tests" / "recovery-http-render.mjs")],
+            input=json.dumps(responses), text=True, capture_output=True, cwd=frontend, check=False,
+        )
+        assert rendered.returncode == 0, rendered.stderr
