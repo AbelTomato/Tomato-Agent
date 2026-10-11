@@ -8,7 +8,9 @@ from uuid import UUID, uuid4
 
 import aiosqlite
 
-from app.runs.models import RunRecord
+from app.runs.models import RunRecord, RunRepositoryConflict
+from app.runs.repository import _RUN_COLUMNS, run_record_from_row
+from app.runs.state_machine import transition_run
 
 from .models import (AttemptRecord, LeaseHandle, PROTOCOL_VERSION, ExecutionSnapshot,
                      OperationInput, StepRecord, StepOutcome)
@@ -295,11 +297,41 @@ class ExecutionRepository:
         return _run_record(row)
 
     async def get_snapshot(self, run_id: UUID):
-        from .models import ExecutionSnapshot
+        from .models import parse_execution_snapshot
         async with aiosqlite.connect(self.path) as db:
             row = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
                                           (str(run_id),))).fetchone()
-        return ExecutionSnapshot.model_validate_json(row[0]) if row else None
+        return parse_execution_snapshot(row[0]) if row else None
+
+    async def resume(self, run_id: UUID, *, expected_version: int, confirmed: bool) -> RunRecord:
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                run = await self._run_row(db, run_id)
+                if run is None:
+                    raise KeyError(str(run_id))
+                if run[6] != expected_version:
+                    raise RunRepositoryConflict("Run version conflict")
+                if run[4] != "waiting":
+                    raise RecoveryConflict("run_not_waiting")
+                head = await self._head_row(db, run_id)
+                if head and head[1] is not None:
+                    raise RecoveryConflict("active_execution_owner")
+                unresolved = await (await db.execute(
+                    "SELECT 1 FROM execution_operations WHERE run_id=? AND status IN ('running','unknown')",
+                    (str(run_id),),
+                )).fetchone()
+                if unresolved:
+                    raise RecoveryConflict("manual_recovery_required")
+                await self._set_run_status(db, run_id, "queued", now, resume_confirmed=confirmed)
+                await self._append_event(db, run_id, "execution.resumed", {"schema_version": 1}, now)
+                await self._commit(db)
+                return _run_record(await self._run_row(db, run_id))
+            except Exception:
+                await db.rollback()
+                raise
 
     async def bootstrap_snapshot(self, snapshot) -> None:
         now = self._aware_now()
@@ -577,7 +609,10 @@ class ExecutionRepository:
                     await db.execute("UPDATE execution_operations SET status=?, result_payload=? WHERE id=?",
                         ("prepared" if decision.action == "retry" else "succeeded",
                          json.dumps(decision.result_payload), str(op.id)))
-                await self._set_run_status(db, candidate.run_id, status, now)
+                if status == "queued" and run[4] == "running":
+                    await self._set_run_status(db, candidate.run_id, "waiting", now)
+                await self._set_run_status(db, candidate.run_id, status, now,
+                                           resume_confirmed=status == "queued")
                 await self._append_event(db, candidate.run_id,
                     "execution.waiting" if status == "waiting" else "execution.recovered",
                     {"attempt_id": str(candidate.attempt_id), "fencing_token": candidate.fencing_token,
@@ -620,7 +655,7 @@ class ExecutionRepository:
 
     async def _run_row(self, db, run_id: UUID):
         return await (await db.execute(
-            "SELECT id, task_type, request, workspace_id, status, error, version, created_at, updated_at "
+            f"SELECT {_RUN_COLUMNS} "
             "FROM task_runs WHERE id=?", (str(run_id),))).fetchone()
 
     async def _head_row(self, db, run_id: UUID):
@@ -634,7 +669,11 @@ class ExecutionRepository:
             (str(run_id),))).fetchone()
         return row[0]
 
-    async def _set_run_status(self, db, run_id: UUID, status: str, now: datetime) -> None:
+    async def _set_run_status(self, db, run_id: UUID, status: str, now: datetime, *, resume_confirmed: bool = False) -> None:
+        current = await self._run_row(db, run_id)
+        if current is None:
+            raise KeyError(str(run_id))
+        transition_run(current[4], status, resume_confirmed=resume_confirmed)
         await db.execute("UPDATE task_runs SET status=?, version=version+1, updated_at=? WHERE id=?",
                          (status, _dump_time(now), str(run_id)))
 
@@ -642,7 +681,7 @@ class ExecutionRepository:
         row = await (await db.execute(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_run_events WHERE run_id=?",
             (str(run_id),))).fetchone()
-        await db.execute("INSERT INTO task_run_events VALUES (?, ?, ?, ?, ?, ?)",
+        await db.execute("INSERT INTO task_run_events (id, run_id, sequence, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                          (str(uuid4()), str(run_id), row[0], event_type, json.dumps(payload), _dump_time(now)))
 
     async def _configure(self, db) -> None:
@@ -702,6 +741,4 @@ def _attempt_record(row) -> AttemptRecord:
 
 
 def _run_record(row) -> RunRecord:
-    return RunRecord(id=UUID(row[0]), task_type=row[1], request=json.loads(row[2]), workspace_id=row[3],
-                     status=row[4], error=json.loads(row[5]) if row[5] else None, version=row[6],
-                     created_at=_parse_time(row[7]), updated_at=_parse_time(row[8]))
+    return run_record_from_row(row)

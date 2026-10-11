@@ -15,6 +15,20 @@ RunStatus = Literal[
     "timed_out",
 ]
 
+TaskKind = Literal["chat", "knowledge", "writing", "code"]
+
+
+class PendingAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    allowed_actions: list[Literal[
+        "cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery"
+    ]] = Field(min_length=1)
+    business_version: int = Field(ge=0)
+    display_data: dict[str, Any] = Field(default_factory=dict)
+
 
 class RunRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -22,7 +36,13 @@ class RunRecord(BaseModel):
     id: UUID
     task_type: str
     request: dict[str, Any]
-    workspace_id: str
+    workspace_id: str | None = None
+    session_id: UUID | None = None
+    client_request_id: str | None = None
+    domain_run_id: str | None = None
+    result: dict[str, Any] | None = None
+    stage: str | None = None
+    pending_action: PendingAction | None = None
     status: RunStatus
     error: dict[str, Any] | None = None
     version: int = Field(ge=0)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -8,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.agent.models import LLMResponse, Message
+from app.runs.models import PendingAction
 
 PROTOCOL_VERSION = 1
 
@@ -81,6 +83,7 @@ class BudgetState(ExecutionModel):
 
 
 class ExecutionSnapshot(ExecutionModel):
+    snapshot_type: Literal["code"] = "code"
     run_id: UUID
     protocol_version: int = Field(default=PROTOCOL_VERSION, ge=1)
     schema_version: int = Field(ge=1)
@@ -120,6 +123,42 @@ class ExecutionSnapshot(ExecutionModel):
         if not value:
             raise ValueError("budget_limits must not be empty")
         return deepcopy(value)
+
+
+# Existing imports and discriminator-free v1 snapshots remain supported.
+CodeExecutionSnapshot = ExecutionSnapshot
+
+
+class StageExecutionSnapshot(ExecutionModel):
+    snapshot_type: Literal["stage"] = "stage"
+    run_id: UUID
+    protocol_version: Literal[1] = 1
+    schema_version: Literal[1] = 1
+    checkpoint_revision: int = Field(ge=1)
+    last_event_sequence: int = Field(ge=0)
+    kind: Literal["chat", "knowledge", "writing"]
+    workspace_id: None = None
+    phase: Literal["ready", "generating", "waiting", "finished"]
+    stage: str = Field(min_length=1)
+    domain_run_id: str | None = None
+    input_version: int = Field(ge=0)
+    policy_digest: str = Field(min_length=1)
+    config_digest: str = Field(min_length=1)
+    pending_action: PendingAction | None = None
+
+
+def parse_execution_snapshot(value: str) -> ExecutionSnapshot | StageExecutionSnapshot:
+    raw = json.loads(value)
+    if not isinstance(raw, dict):
+        raise ValueError("snapshot must be an object")
+    discriminator = raw.get("snapshot_type", "code")
+    if discriminator == "stage":
+        return StageExecutionSnapshot.model_validate_json(value)
+    if discriminator == "code":
+        if raw.get("schema_version") != 1:
+            raise ValueError("unsupported code snapshot version")
+        return ExecutionSnapshot.model_validate_json(value)
+    raise ValueError(f"unsupported snapshot type: {discriminator}")
 
 
 class OperationInput(ExecutionModel):

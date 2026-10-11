@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -6,19 +7,29 @@ from uuid import UUID, uuid4
 
 import aiosqlite
 
-from .models import RunCheckpoint, RunEvent, RunRecord, RunRepositoryConflict, RunStatus
+from .models import PendingAction, RunCheckpoint, RunEvent, RunRecord, RunRepositoryConflict, RunStatus
+from .state_machine import transition_run
+from .migrations import migrate_unified_runs
 
 
-_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
-    "queued": {"queued", "running", "cancelled", "timed_out", "failed"},
-    "running": {"running", "waiting", "completed", "failed", "cancelled", "timed_out"},
-    "waiting": {"waiting", "running", "completed", "failed", "cancelled", "timed_out"},
-    "completed": {"completed"},
-    "failed": {"failed"},
-    "cancelled": {"cancelled"},
-    "timed_out": {"timed_out"},
-}
 _SENSITIVE_KEYS = {"authorization", "api_key", "credential", "password", "secret", "token"}
+_UNSET = object()
+
+_RUN_COLUMNS = (
+    "id, task_type, request, workspace_id, status, error, version, created_at, updated_at, "
+    "session_id, client_request_id, domain_run_id, result, stage, pending_action"
+)
+
+
+def run_record_from_row(row) -> RunRecord:
+    return RunRecord(
+        id=UUID(row[0]), task_type=row[1], request=json.loads(row[2]), workspace_id=row[3],
+        status=row[4], error=json.loads(row[5]) if row[5] else None, version=row[6],
+        created_at=_parse_datetime(row[7]), updated_at=_parse_datetime(row[8]),
+        session_id=UUID(row[9]) if row[9] else None, client_request_id=row[10],
+        domain_run_id=row[11], result=json.loads(row[12]) if row[12] else None,
+        stage=row[13], pending_action=json.loads(row[14]) if row[14] else None,
+    )
 
 
 def _now() -> str:
@@ -47,6 +58,7 @@ class RunRepository:
     async def init(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("PRAGMA busy_timeout=5000")
             await db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS task_runs (
@@ -77,16 +89,16 @@ class RunRepository:
                 );
                 """
             )
-            await db.commit()
+            await migrate_unified_runs(db)
 
     async def create_run(
-        self, task_type: str, request: dict[str, Any], workspace_id: str
+        self, task_type: str, request: dict[str, Any], workspace_id: str | None = None
     ) -> RunRecord:
         run_id = uuid4()
         timestamp = _now()
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
-                "INSERT INTO task_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO task_runs (id, task_type, request, workspace_id, status, error, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(run_id),
                     task_type,
@@ -114,24 +126,68 @@ class RunRepository:
     async def get_run(self, run_id: str | UUID) -> RunRecord | None:
         async with aiosqlite.connect(self.path) as db:
             cursor = await db.execute(
-                "SELECT id, task_type, request, workspace_id, status, error, version, created_at, updated_at "
+                f"SELECT {_RUN_COLUMNS} "
                 "FROM task_runs WHERE id = ?",
                 (str(run_id),),
             )
             row = await cursor.fetchone()
         if row is None:
             return None
-        return RunRecord(
-            id=UUID(row[0]),
-            task_type=row[1],
-            request=json.loads(row[2]),
-            workspace_id=row[3],
-            status=row[4],
-            error=json.loads(row[5]) if row[5] else None,
-            version=row[6],
-            created_at=_parse_datetime(row[7]),
-            updated_at=_parse_datetime(row[8]),
-        )
+        return run_record_from_row(row)
+
+    async def create_session_run(
+        self, session_id: str | UUID, kind: str, request: dict[str, Any],
+        workspace_id: str | None, client_request_id: str,
+    ) -> RunRecord:
+        if kind not in {"chat", "knowledge", "writing", "code"}:
+            raise ValueError("unsupported task kind")
+        if kind == "code" and not workspace_id:
+            raise ValueError("code requires workspace")
+        if not client_request_id:
+            raise ValueError("client_request_id must not be empty")
+        digest = sha256(json.dumps(
+            {"kind": kind, "request": request, "workspace_id": workspace_id},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()).hexdigest()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute("BEGIN IMMEDIATE")
+            if not await (await db.execute("SELECT 1 FROM sessions WHERE id=?", (str(session_id),))).fetchone():
+                raise KeyError(f"Session not found: {session_id}")
+            existing = await (await db.execute(
+                f"SELECT {_RUN_COLUMNS}, request_digest FROM task_runs WHERE session_id=? AND client_request_id=?",
+                (str(session_id), client_request_id),
+            )).fetchone()
+            if existing:
+                if existing[-1] != digest:
+                    raise RunRepositoryConflict("request_conflict")
+                return run_record_from_row(existing)
+            if await (await db.execute(
+                "SELECT 1 FROM task_runs WHERE session_id=? AND status IN ('queued','running','waiting')",
+                (str(session_id),),
+            )).fetchone():
+                raise RunRepositoryConflict("session_busy")
+            run_id, timestamp = uuid4(), _now()
+            await db.execute(
+                "INSERT INTO task_runs (id, task_type, request, workspace_id, status, version, created_at, updated_at, "
+                "session_id, client_request_id, request_digest) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)",
+                (str(run_id), kind, json.dumps(_json_safe(request)), workspace_id, timestamp, timestamp,
+                 str(session_id), client_request_id, digest),
+            )
+            await db.commit()
+        result = await self.get_run(run_id)
+        assert result is not None
+        return result
+
+    async def list_for_session(self, session_id: str | UUID, limit: int = 50, offset: int = 0) -> list[RunRecord]:
+        if limit < 1 or offset < 0:
+            raise ValueError("limit must be positive and offset non-negative")
+        async with aiosqlite.connect(self.path) as db:
+            rows = await (await db.execute(
+                f"SELECT {_RUN_COLUMNS} FROM task_runs WHERE session_id=? ORDER BY created_at, id LIMIT ? OFFSET ?",
+                (str(session_id), limit, offset),
+            )).fetchall()
+        return [run_record_from_row(row) for row in rows]
 
     async def _reject_managed_write(self, db, run_id: str | UUID) -> None:
         table = await (await db.execute(
@@ -152,6 +208,13 @@ class RunRepository:
         status: RunStatus,
         error: dict[str, Any] | None = None,
         expected_version: int | None = None,
+        *, resume_confirmed: bool = False,
+        result: dict[str, Any] | None | object = _UNSET,
+        stage: str | None | object = _UNSET,
+        pending_action: PendingAction | None | object = _UNSET,
+        domain_run_id: str | None | object = _UNSET,
+        event_type: str | None = None,
+        event_payload: dict[str, Any] | None = None,
     ) -> RunRecord:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -164,9 +227,7 @@ class RunRepository:
                 raise KeyError(f"Run not found: {run_id}")
             current_status, current_version = row
             await self._reject_managed_write(db, run_id)
-            if status not in _TRANSITIONS[current_status]:
-                await db.rollback()
-                raise ValueError(f"Invalid run status transition: {current_status} -> {status}")
+            transition_run(current_status, status, resume_confirmed=resume_confirmed)
             if expected_version is not None and current_version != expected_version:
                 await db.rollback()
                 raise RunRepositoryConflict(f"Run version conflict: {run_id}")
@@ -178,6 +239,23 @@ class RunRepository:
                 "WHERE id = ? AND version = ?",
                 (status, serialized_error, next_version, timestamp, str(run_id), current_version),
             )
+            for column, value in (("result", result), ("stage", stage),
+                                  ("pending_action", pending_action), ("domain_run_id", domain_run_id)):
+                if value is _UNSET:
+                    continue
+                if isinstance(value, PendingAction):
+                    value = value.model_dump(mode="json")
+                if column in {"result", "pending_action"} and value is not None:
+                    value = json.dumps(_json_safe(value))
+                await db.execute(f"UPDATE task_runs SET {column}=? WHERE id=?", (value, str(run_id)))
+            if event_type is not None:
+                sequence = (await (await db.execute(
+                    "SELECT COALESCE(MAX(sequence), 0)+1 FROM task_run_events WHERE run_id=?", (str(run_id),)
+                )).fetchone())[0]
+                await db.execute(
+                    "INSERT INTO task_run_events (id, run_id, sequence, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid4()), str(run_id), sequence, event_type, json.dumps(_json_safe(event_payload or {})), timestamp),
+                )
             await db.commit()
         result = await self.get_run(run_id)
         assert result is not None
@@ -205,7 +283,7 @@ class RunRepository:
             )
             sequence = (await cursor.fetchone())[0] + 1
             await db.execute(
-                "INSERT INTO task_run_events VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO task_run_events (id, run_id, sequence, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (str(event_id), str(run_id), sequence, event_type, json.dumps(_json_safe(payload)), timestamp),
             )
             await db.commit()
@@ -270,7 +348,7 @@ class RunRepository:
             )
             sequence = (await cursor.fetchone())[0] + 1
             await db.execute(
-                "INSERT INTO task_run_checkpoints VALUES (?, ?, ?, ?) "
+                "INSERT INTO task_run_checkpoints (run_id, sequence, state, created_at) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(run_id) DO UPDATE SET sequence = excluded.sequence, state = excluded.state, created_at = excluded.created_at",
                 (str(run_id), sequence, json.dumps(_json_safe(state)), timestamp),
             )
