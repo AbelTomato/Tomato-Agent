@@ -1,13 +1,15 @@
 import base64
 import difflib
 import json
+import os
 import shutil
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from .models import WorkspaceRecord
+from .models import WorkspaceFileListing, WorkspaceRecord
+from .repository import WorkspaceRepository
 
 
 class WorkspacePathError(ValueError):
@@ -15,30 +17,130 @@ class WorkspacePathError(ValueError):
 
 
 class WorkspaceService:
-    def __init__(self, root: Path, max_file_bytes: int = 100_000):
+    def __init__(self, root: Path, max_file_bytes: int = 100_000, *,
+                 allowed_roots: list[Path] | tuple[Path, ...] = (), max_files: int = 10_000):
         if max_file_bytes <= 0:
             raise ValueError("max_file_bytes must be positive")
         self.root = Path(root).resolve()
         self.max_file_bytes = max_file_bytes
+        if max_files <= 0:
+            raise ValueError("max_files must be positive")
+        self.max_files = max_files
+        self.allowed_roots = tuple(Path(path).absolute() for path in allowed_roots)
+        if any(not Path(path).is_absolute() or Path(path).resolve() == Path("/")
+               for path in allowed_roots):
+            raise ValueError("Allowed roots must be absolute project directories, not /")
+        self.repository = WorkspaceRepository(self.root)
 
     def _directory(self, workspace_id: str) -> Path:
         try:
-            if str(UUID(workspace_id)) != workspace_id:
-                raise ValueError
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise WorkspacePathError("Invalid workspace id") from exc
-        directory = self.root / workspace_id
-        if directory.is_symlink() or not directory.resolve().is_relative_to(self.root):
-            raise WorkspacePathError("Workspace boundary violation")
-        if not directory.is_dir():
-            raise KeyError("Workspace not found")
-        return directory
+            return self.repository.directory(workspace_id)
+        except ValueError as exc:
+            raise WorkspacePathError(str(exc)) from exc
 
     def _metadata(self, workspace_id: str) -> tuple[Path, dict]:
-        path = self._directory(workspace_id) / "metadata.json"
-        if path.is_symlink() or not path.is_file():
-            raise WorkspacePathError("Invalid workspace metadata")
-        return path, json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return self.repository.load(workspace_id)
+        except ValueError as exc:
+            raise WorkspacePathError(str(exc)) from exc
+
+    @staticmethod
+    def _reject_links(path: Path) -> None:
+        if any(component.is_symlink() for component in (path, *path.parents)):
+            raise WorkspacePathError("Symbolic links are not allowed")
+
+    @staticmethod
+    def _blocked(path: Path) -> bool:
+        templates = {".env.example", ".env.sample", ".env.template"}
+        blocked = {".git", ".ssh", ".aws", ".azure", ".gcloud", "node_modules", ".venv",
+                   "__pycache__", "credentials", "credentials.json", "credentials.yaml",
+                   "credentials.yml", ".netrc", ".npmrc", ".pypirc", "secrets.json",
+                   "service-account.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+        return any(part.lower() in blocked or
+                   (part.lower().startswith(".env") and part.lower() not in templates) or
+                   Path(part).suffix.lower() in {".pem", ".key", ".p12", ".pfx"}
+                   for part in path.parts)
+
+    async def register_original(self, path: Path, pytest_paths: list[str]) -> WorkspaceRecord:
+        source = Path(path)
+        if not source.is_absolute():
+            raise ValueError("Original path must be absolute")
+        self._reject_links(source)
+        source = source.resolve()
+        if not source.is_dir():
+            raise ValueError("Original path must be a directory")
+        if not any(source.is_relative_to(root.resolve()) for root in self.allowed_roots):
+            raise WorkspacePathError("Project is outside workspace_allowed_roots")
+        for root in self.allowed_roots:
+            self._reject_links(root)
+        if self.root.is_relative_to(source) or source.is_relative_to(self.root):
+            raise WorkspacePathError("Workspace metadata and original project must be separate")
+        if not pytest_paths:
+            raise ValueError("pytest_paths must not be empty")
+        targets = []
+        for value in pytest_paths:
+            target = Path(value)
+            if (not value or "\x00" in value or value.startswith("-") or target.is_absolute()
+                    or ".." in target.parts):
+                raise ValueError("Invalid pytest path")
+            if self._blocked(target):
+                raise WorkspacePathError("Restricted pytest path")
+            candidate = source / target
+            self._reject_links(candidate)
+            if not candidate.exists() or not (candidate.is_dir() or candidate.is_file()):
+                raise ValueError("pytest path must exist")
+            if candidate.is_file() and candidate.stat().st_nlink != 1:
+                raise WorkspacePathError("Hard links are not allowed")
+            targets.append(target.as_posix())
+        existing = self.repository.find_original(source)
+        if existing:
+            record = await self.get(existing)
+            if record.pytest_paths != tuple(targets):
+                raise ValueError("Workspace already registered with different pytest_paths")
+            return record
+        identity = source.stat()
+        workspace_id = str(uuid4())
+        self.repository.create(workspace_id, {
+            "workspace_id": workspace_id, "mode": "original", "status": "active",
+            "repo_path": str(source), "device": identity.st_dev, "inode": identity.st_ino,
+            "pytest_paths": targets, "artifact_refs": [], "events": [],
+        })
+        return await self.get(workspace_id)
+
+    def root_path(self, workspace_id: str) -> Path:
+        _, metadata = self._metadata(workspace_id)
+        if metadata["status"] != "active":
+            raise KeyError("Workspace is not active")
+        if metadata.get("mode", "managed") == "original":
+            repo = Path(metadata["repo_path"])
+            try:
+                self._reject_links(repo)
+                identity = repo.stat()
+                if not repo.is_dir() or (identity.st_dev, identity.st_ino) != (
+                        metadata["device"], metadata["inode"]):
+                    raise WorkspacePathError("workspace_changed")
+            except (OSError, WorkspacePathError) as exc:
+                raise WorkspacePathError("workspace_changed") from exc
+            return repo
+        repo = self._directory(workspace_id) / "repo"
+        self._reject_links(repo)
+        if not repo.is_dir():
+            raise WorkspacePathError("Invalid workspace repo")
+        return repo
+
+    async def get(self, workspace_id: str) -> WorkspaceRecord:
+        metadata_path, metadata = self._metadata(workspace_id)
+        return WorkspaceRecord(workspace_id=workspace_id, repo_path=self.root_path(workspace_id),
+            metadata_path=metadata_path, mode=metadata.get("mode", "managed"),
+            pytest_paths=tuple(metadata.get("pytest_paths", [])),
+            device=metadata.get("device"), inode=metadata.get("inode"))
+
+    async def unregister(self, workspace_id: str) -> None:
+        path, metadata = self._metadata(workspace_id)
+        if metadata.get("mode", "managed") != "original":
+            raise ValueError("Only original workspaces can be unregistered")
+        metadata["status"] = "unregistered"
+        path.write_text(json.dumps(metadata), encoding="utf-8")
 
     async def create(self, input_root: Path | None = None) -> WorkspaceRecord:
         source = Path(input_root).resolve() if input_root is not None else None
@@ -57,17 +159,13 @@ class WorkspaceService:
         record = WorkspaceRecord(
             workspace_id=workspace_id, repo_path=repo, metadata_path=directory / "metadata.json"
         )
-        metadata = {"workspace_id": workspace_id, "status": "active", "baseline": {},
+        metadata = {"workspace_id": workspace_id, "mode": "managed", "status": "active", "baseline": {},
                     "artifact_refs": [], "events": []}
         record.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         # Links are preserved without following them; all operations reject them.
-        for path in sorted(repo.rglob("*")):
-            if path.is_symlink():
-                continue
-            if path.is_file():
-                relative = path.relative_to(repo).as_posix()
-                data = self._read_bytes(workspace_id, relative, self.max_file_bytes)
-                metadata["baseline"][relative] = base64.b64encode(data).decode("ascii")
+        for relative in await self.list_files(workspace_id):
+            data = self._read_bytes(workspace_id, relative, self.max_file_bytes)
+            metadata["baseline"][relative] = base64.b64encode(data).decode("ascii")
         record.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         return record
 
@@ -75,12 +173,14 @@ class WorkspaceService:
         _, metadata = self._metadata(workspace_id)
         if metadata["status"] != "active":
             raise KeyError("Workspace is not active")
-        repo = self._directory(workspace_id) / "repo"
+        repo = self.root_path(workspace_id)
         path = Path(relative_path)
         if "\x00" in relative_path or path.is_absolute() or ".." in path.parts:
             raise WorkspacePathError("Only workspace-relative paths are allowed")
         if write and not path.parts:
             raise WorkspacePathError("A file path is required")
+        if self._blocked(path):
+            raise WorkspacePathError("Restricted workspace path")
         candidate = repo / path
         if repo.is_symlink() or not repo.is_dir():
             raise WorkspacePathError("Invalid workspace repo")
@@ -97,17 +197,35 @@ class WorkspaceService:
         return resolved
 
     async def list_files(self, workspace_id: str, relative_dir: str = "") -> list[str]:
+        listing = await self.enumerate_files(workspace_id, relative_dir)
+        if listing.truncated:
+            raise ValueError("enumeration_truncated")
+        return listing.files
+
+    async def enumerate_files(self, workspace_id: str, relative_dir: str = "") -> WorkspaceFileListing:
         directory = self.resolve(workspace_id, relative_dir)
         if not directory.is_dir():
             raise ValueError("Path must be a directory")
         repo = self.resolve(workspace_id, "")
         files = []
-        for path in sorted(directory.rglob("*")):
-            relative = path.relative_to(repo).as_posix()
-            checked = self.resolve(workspace_id, relative)
-            if checked.is_file():
-                files.append(relative)
-        return files
+        def traversal_error(error: OSError) -> None:
+            raise error
+
+        for current, directories, names in os.walk(directory, followlinks=False, onerror=traversal_error):
+            directories[:] = sorted(name for name in directories
+                if not self._blocked(Path(current, name).relative_to(repo))
+                and not Path(current, name).is_symlink())
+            for name in sorted(names):
+                path = Path(current, name)
+                relative = path.relative_to(repo)
+                if self._blocked(relative) or path.is_symlink():
+                    continue
+                checked = self.resolve(workspace_id, relative.as_posix())
+                if checked.is_file():
+                    if len(files) == self.max_files:
+                        return WorkspaceFileListing(files=sorted(files), truncated=True)
+                    files.append(relative.as_posix())
+        return WorkspaceFileListing(files=sorted(files))
 
     def _read_bytes(self, workspace_id: str, relative_path: str, max_bytes: int) -> bytes:
         if max_bytes <= 0:
@@ -137,6 +255,8 @@ class WorkspaceService:
 
     async def diff(self, workspace_id: str) -> str:
         _, metadata = self._metadata(workspace_id)
+        if metadata.get("mode") == "original":
+            raise ValueError("Original workspace diff requires a Run baseline")
         current = {name: self._read_bytes(workspace_id, name, self.max_file_bytes)
                    for name in await self.list_files(workspace_id)}
         baseline = {name: base64.b64decode(data) for name, data in metadata["baseline"].items()}
@@ -167,6 +287,8 @@ class WorkspaceService:
 
     async def cleanup(self, workspace_id: str) -> None:
         path, metadata = self._metadata(workspace_id)
+        if metadata.get("mode") == "original":
+            raise ValueError("Cannot cleanup original workspace; use unregister")
         if metadata["status"] == "cleaned":
             return
         repo = self.resolve(workspace_id, "")

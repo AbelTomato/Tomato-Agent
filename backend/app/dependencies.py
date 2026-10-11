@@ -154,6 +154,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
     workspace_service = WorkspaceService(
         config.code_task_workspace_root,
         max_file_bytes=config.code_task_max_file_bytes,
+        allowed_roots=config.workspace_allowed_roots,
     )
     artifact_service = ArtifactService(
         config.code_task_artifact_root,

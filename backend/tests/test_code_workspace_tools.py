@@ -192,3 +192,36 @@ async def test_listing_truncation_is_explicit(environment):
     assert result.success and result.data["truncated"] is True
     assert 0 < len(result.data["files"]) < 20
     assert len(json.dumps(result.data, ensure_ascii=False)) <= 100
+
+
+@pytest.mark.asyncio
+async def test_enumeration_limit_is_preserved_in_list_and_search_results(environment):
+    registry, context, workspaces, workspace, _, _ = environment
+    workspaces.max_files = 1
+    for name in ["a.txt", "b.txt"]:
+        await workspaces.write_file(workspace.workspace_id, name, "needle")
+    for name, args in [("list_files", {}), ("search_files", {"query": "needle"})]:
+        result = await registry.execute(name, args, context)
+        assert result.success and result.data["truncated"] is True
+        key = "files" if name == "list_files" else "matches"
+        assert len(result.data[key]) == 1
+
+
+@pytest.mark.asyncio
+async def test_all_file_tools_share_sensitive_path_filter(environment):
+    registry, context, _, workspace, artifacts, _ = environment
+    (workspace.repo_path / ".env").write_text("secret")
+    for name, args in [
+        ("read_file", {"path": ".env"}),
+        ("write_file", {"path": ".env", "content": "changed"}),
+        ("collect_artifact", {"path": ".env"}),
+        ("apply_patch", {"changes": [{"path": ".env", "old_text": "secret", "new_text": "changed"}]}),
+    ]:
+        result = await registry.execute(name, args, context)
+        assert not result.success and result.error == "permission_denied"
+    assert (await registry.execute("list_files", {}, context)).data["files"] == []
+    assert (await registry.execute("search_files", {"query": "secret"}, context)).data["matches"] == []
+    diff = await registry.execute("get_diff", {}, context)
+    assert diff.success and diff.data["diff"] == ""
+    assert (workspace.repo_path / ".env").read_text() == "secret"
+    assert len(await artifacts.list_for_run(context.run_id)) == 1

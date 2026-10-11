@@ -2,7 +2,7 @@ from pathlib import Path
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.agent.config import RuntimeConfig
@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     code_task_max_file_bytes: int = Field(default=100000, gt=0)
     code_task_max_artifact_bytes: int = Field(default=1000000, gt=0)
     code_task_workspace_root: Path = Path("data/code-workspaces")
+    workspace_allowed_roots: list[Path] = Field(default_factory=list)
     code_task_artifact_root: Path = Path("data/code-artifacts")
     code_task_sandbox_backend: Literal["local", "docker", "openshell"] = "local"
     code_task_docker_image: str = ""
@@ -78,6 +79,13 @@ class Settings(BaseSettings):
     code_task_openshell_image: str = ""
     code_task_openshell_binary: str = "openshell"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("workspace_allowed_roots")
+    @classmethod
+    def validate_workspace_allowed_roots(cls, roots: list[Path]) -> list[Path]:
+        if any(not root.is_absolute() or root.resolve() == Path("/") for root in roots):
+            raise ValueError("workspace_allowed_roots must contain absolute project roots, not /")
+        return roots
 
     @property
     def code_task_budget(self) -> CodeTaskBudget:

@@ -85,7 +85,7 @@ class CodeWorkspaceTool:
     @staticmethod
     def _bounded(data: dict, limit: int) -> ToolResult:
         """Keep typed fields and artifact references; trim only preview fields."""
-        data["truncated"] = False
+        data.setdefault("truncated", False)
         def size():
             return len(json.dumps(data, ensure_ascii=False))
         while size() > limit:
@@ -130,10 +130,10 @@ class CodeWorkspaceTool:
         if self.name in {"list_files", "search_files", "read_file", "write_file", "collect_artifact"}:
             self._authorize_path(context, args.path, write=self.name == "write_file")
         if self.name == "list_files":
-            files = await self.workspaces.list_files(workspace_id, args.path)
-            for path in files:
+            listing = await self.workspaces.enumerate_files(workspace_id, args.path)
+            for path in listing.files:
                 self._authorize_path(context, path)
-            return {"files": files}
+            return listing.model_dump()
         if self.name == "read_file":
             return {"content": await self.workspaces.read_file(
                 workspace_id, args.path, self.workspaces.max_file_bytes)}
@@ -142,13 +142,14 @@ class CodeWorkspaceTool:
             return {"path": args.path}
         if self.name == "search_files":
             matches = []
-            for path in await self.workspaces.list_files(workspace_id, args.path):
+            listing = await self.workspaces.enumerate_files(workspace_id, args.path)
+            for path in listing.files:
                 self._authorize_path(context, path)
                 content = await self.workspaces.read_file(workspace_id, path, self.workspaces.max_file_bytes)
                 for number, line in enumerate(content.splitlines(), 1):
                     if args.query in line:
                         matches.append({"path": path, "line": number, "text": line})
-            return {"matches": matches}
+            return {"matches": matches, "truncated": listing.truncated}
         if self.name == "apply_patch":
             pending = {}
             for change in args.changes:

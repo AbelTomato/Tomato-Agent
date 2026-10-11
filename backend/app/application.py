@@ -7,6 +7,7 @@ from app.api.knowledge import router as knowledge_router
 from app.api.sessions import router as sessions_router
 from app.api.writing import router as writing_router
 from app.api.code_tasks import router as code_tasks_router
+from app.api.workspaces import router as workspaces_router
 from app.dependencies import build_app_dependencies, create_runtime
 from app.settings import Settings, settings
 
@@ -67,6 +68,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
     app.include_router(knowledge_router)
     app.include_router(writing_router)
     app.include_router(code_tasks_router)
+    app.include_router(workspaces_router)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
