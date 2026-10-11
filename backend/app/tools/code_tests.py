@@ -59,6 +59,21 @@ class TestTargetRegistry:
         except KeyError as exc:
             raise ValueError("Unknown test target") from exc
 
+    @classmethod
+    def for_workspace(cls, workspaces: WorkspaceService, workspace_id: str):
+        _, metadata = workspaces.repository.load(workspace_id)
+        if metadata.get("mode") != "original":
+            raise ValueError("Original workspace required")
+        paths = metadata["pytest_paths"]
+        for name in paths:
+            if not name or name.startswith("-") or "\x00" in name:
+                raise ValueError("Invalid pytest path")
+            path = workspaces.resolve(workspace_id, name)
+            if not path.exists():
+                raise ValueError("pytest path must exist")
+        return cls([RegisteredTestTarget(name="unit", command=(
+            "python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *paths))])
+
 
 class RunTestsArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -128,6 +143,12 @@ class RunTestsTool:
                 cwd.is_relative_to(Path(root).resolve()) for root in profile.allowed_paths
             ):
                 raise PermissionError
+            original = (await self.workspaces.get(context.workspace_id)).mode == "original"
+            before = None
+            if original:
+                from app.workspaces.run_changes import RunFileChanges
+                tracker = RunFileChanges(self.workspaces, self.runs)
+                before = await tracker.verification_manifest(context.run_id, context.workspace_id)
             request = SandboxRequest(
                 tool_name=self.name, request_id=str(uuid4()),
                 input_refs=(context.run_id, context.workspace_id),
@@ -152,6 +173,12 @@ class RunTestsTool:
                     "status": "timed_out", "exit_code": None,
                     "error_code": "cleanup_failed" if result.error_code == "cleanup_failed" else "timeout",
                 })
+            after = None
+            if original:
+                after = await tracker.verification_manifest(context.run_id, context.workspace_id)
+                if before != after or await tracker.conflicts_for_run(context.run_id):
+                    result = result.model_copy(update={"status": "failed", "exit_code": None,
+                                                       "error_code": "workspace_changed"})
             # Enforce output bounds even for injected adapters returning oversized text.
             stdout = result.stdout[:profile.max_output_chars]
             stderr = result.stderr[:max(0, profile.max_output_chars - len(stdout))]
@@ -164,6 +191,7 @@ class RunTestsTool:
                 "output_truncated": result.output_truncated or (
                     len(result.stdout) + len(result.stderr) > profile.max_output_chars),
                 "error_code": result.error_code,
+                **({"verification_manifest": before, "manifest_after": after} if original else {}),
             }
             ref = await self.artifacts.register_text(
                 context.run_id, "test_report", json.dumps(report, ensure_ascii=False))
@@ -171,6 +199,10 @@ class RunTestsTool:
                 context.workspace_id, ref.model_dump(mode="json"))
             data = {key: value for key, value in report.items()
                     if key not in {"run_id", "workspace_id"}}
+            if original:
+                data.pop("manifest_after")
+                data["verification_manifest"] = {key: value for key, value in before.items()
+                                                 if key != "files"}
             data["artifact"] = ref.model_dump(mode="json")
             bounded = self._bounded(data, profile.max_output_chars)
             if result.status != "completed" and bounded.success:

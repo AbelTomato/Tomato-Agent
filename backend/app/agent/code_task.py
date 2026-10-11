@@ -127,6 +127,56 @@ class CodeTaskService:
         )
         return await self.run_repository.get_run(run.id)
 
+    async def create_for_session(self, session_id, request: CodeTaskRequest,
+                                 workspace_id: str, client_request_id: str):
+        await self.initialize()
+        workspace = await self.workspace_service.get(workspace_id)
+        if workspace.mode != "original":
+            raise ValueError("Session code tasks require an original workspace")
+        if self.test_tool is None:
+            raise ValueError("Registered Docker test executor required")
+        root = self.workspace_service.root_path(workspace_id)
+        profile = (self.capability_profile_factory(root) if self.capability_profile_factory
+                   else CodeTaskCapabilityProfile(allowed_paths=(str(root),)))
+        if profile.sandbox_backend != "docker":
+            raise ValueError("Original project tests require Docker")
+        from app.agent.sandbox_docker import DockerSandboxExecutor
+        from app.tools.code_tests import TestTargetRegistry
+        from app.execution.ports import canonical_digest
+        from app.workspaces.project_context import project_context
+
+        targets = TestTargetRegistry.for_workspace(self.workspace_service, workspace_id)
+        target = targets.resolve("unit")
+        image = getattr(self.test_tool.executor, "image", None)
+        # Reuse digest validation, without starting any process.
+        DockerSandboxExecutor(image)
+        request_data = {**request.model_dump(), "execution_config": {
+            "target": target.model_dump(mode="json"), "image": image,
+            "profile_digest": canonical_digest(profile.model_dump(mode="json")),
+        }}
+        facts = await project_context(self.workspace_service, workspace_id)
+        run = await self.run_repository.create_session_run(
+            session_id, "code", request_data, workspace_id, client_request_id)
+        if await self.run_repository.get_checkpoint(run.id) is not None:
+            return run
+        from app.agent.code_execution import initial_snapshot
+        snapshot = initial_snapshot(self, run)
+        completed = [item for item in await self.run_repository.list_for_session(session_id)
+                     if item.status == "completed" and item.id != run.id]
+        summaries = []
+        for item in completed[-2:]:
+            checkpoint = await self.run_repository.get_checkpoint(item.id)
+            output = (checkpoint.state.get("harness_state", {}).get("output", "")
+                      if checkpoint else "")
+            summaries.append(json.dumps({"task": item.request.get("task", item.request.get("message", "")),
+                                         "result": item.result or output}, ensure_ascii=False)[:2000])
+        state = {**snapshot.harness_state, "context_state": {
+            **snapshot.harness_state["context_state"], "important_facts": facts,
+            "memory": summaries}}
+        await self.execution_repository.bootstrap_run(snapshot.model_copy(update={"harness_state": state}),
+            event_type="code_task.created", event_payload={"workspace_id": workspace_id})
+        return await self.run_repository.get_run(run.id)
+
     async def recover(self, run_id: str, *, expected_version: int, action: str):
         run = await self.run_repository.get_run(run_id)
         if run is None:
@@ -158,19 +208,18 @@ class CodeTaskService:
 
     def recovery_observation(self, run) -> RecoveryObservation:
         """Observe the live policy for both manual and automatic recovery."""
-        from app.agent.code_execution import execution_config
-        from app.execution.ports import canonical_digest
+        from app.agent.code_execution import execution_config, execution_policy_digest
 
         _, _, policy = execution_config(self, run)
         return RecoveryObservation(
-            policy_digest=canonical_digest(policy.model_dump(mode="json")),
+            policy_digest=execution_policy_digest(self, run, policy),
             executor_exited=False,
         )
 
     def build_capability_profile(self, run) -> CodeTaskCapabilityProfile:
         if run is None:
             raise ValueError("run is required")
-        repo = self.workspace_service._directory(run.workspace_id) / "repo"
+        repo = self.workspace_service.root_path(run.workspace_id)
         if self.capability_profile_factory is None:
             return CodeTaskCapabilityProfile(allowed_paths=(str(repo.resolve()),))
         return self.capability_profile_factory(repo)
@@ -187,7 +236,17 @@ class CodeTaskService:
         tests = list(state.get("test_results", []))
         if not tests or not tests[-1]["passed"] or tests[-1]["exit_code"] != 0:
             return False
-        current_diff = await self.workspace_service.diff(run.workspace_id)
+        original = (await self.workspace_service.get(run.workspace_id)).mode == "original"
+        if original:
+            from app.workspaces.run_changes import RunFileChanges
+            tracker = RunFileChanges(self.workspace_service, self.run_repository)
+            manifest = await tracker.verification_manifest(run.id, run.workspace_id)
+            expected = tests[-1].get("verification_manifest", {})
+            if manifest["sha256"] != expected.get("sha256") or await tracker.conflicts_for_run(run.id):
+                return False
+            current_diff = await tracker.diff_for_run(run.id)
+        else:
+            current_diff = await self.workspace_service.diff(run.workspace_id)
         current_diff_sha256 = hashlib.sha256(current_diff.encode("utf-8")).hexdigest()
         if tests[-1].get("workspace_diff_sha256") != current_diff_sha256:
             return False

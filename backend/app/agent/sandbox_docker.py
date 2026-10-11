@@ -23,11 +23,16 @@ _CONTAINER_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
 class DockerSandboxExecutor:
     """Execute one registered command in a short-lived, restricted container."""
 
-    def __init__(self, image: str, *, docker_binary: str = "docker") -> None:
+    def __init__(self, image: str, *, docker_binary: str = "docker",
+                 registered_targets: dict[str, dict[str, tuple[str, ...]]] | None = None) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:\-]*@sha256:[0-9a-f]{64}", image):
             raise ValueError("image must be pinned with a sha256 digest")
         self.image = image
         self.docker_binary = docker_binary
+        self.registered_targets = {
+            str(Path(root).resolve()): {name: tuple(argv) for name, argv in targets.items()}
+            for root, targets in (registered_targets or {}).items()
+        }
 
     def build_run_argv(
         self, request: SandboxRequest, profile: CapabilityProfile, container_name: str
@@ -51,13 +56,16 @@ class DockerSandboxExecutor:
             or not isinstance(cwd, str)
         ):
             raise ValueError("sandbox request must contain a valid argv and cwd")
-        if (set(arguments) != {"target", "argv", "cwd"}
-                or arguments["target"] != "unit"
-                or argv != ["python", "-m", "pytest", "-q", "test_calculator.py"]):
+        if set(arguments) != {"target", "argv", "cwd"}:
             raise ValueError("unregistered test command")
         if not Path(cwd).is_absolute() or any(c in cwd for c in (",", ":", "\n")):
             raise ValueError("invalid mount source")
         workspace = Path(cwd).resolve()
+        targets = self.registered_targets.get(str(workspace))
+        if targets is None:
+            targets = {"unit": ("python", "-m", "pytest", "-q", "test_calculator.py")}
+        if not isinstance(arguments["target"], str) or tuple(argv) != targets.get(arguments["target"]):
+            raise ValueError("unregistered test command")
         if not workspace.is_dir():
             raise ValueError("sandbox cwd must be an existing directory")
         allowed = tuple(Path(path).resolve() for path in profile.allowed_paths)

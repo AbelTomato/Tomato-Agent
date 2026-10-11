@@ -24,6 +24,21 @@ def execution_config(service, run, budget=None):
     return profile, budget, policy
 
 
+def execution_policy_digest(service, run, policy):
+    payload = policy.model_dump(mode="json")
+    frozen = run.request.get("execution_config")
+    if frozen:
+        from app.tools.code_tests import TestTargetRegistry
+        profile = service.build_capability_profile(run)
+        target = TestTargetRegistry.for_workspace(service.workspace_service, run.workspace_id).resolve("unit")
+        live = {"profile_digest": canonical_digest(profile.model_dump(mode="json")),
+                "target": target.model_dump(mode="json"),
+                "image": getattr(service.test_tool.executor, "image", None) if service.test_tool else None}
+        if live != frozen:
+            payload = {"policy": payload, "execution_config_mismatch": live}
+    return canonical_digest(payload)
+
+
 def initial_snapshot(service, run):
     _, budget, policy = execution_config(service, run)
     state = HarnessState(task_id=str(run.id), structured_state={"task": run.request["task"],
@@ -34,7 +49,7 @@ def initial_snapshot(service, run):
         messages=[Message(role="user", content=run.request["task"])],
         harness_state=state.model_dump(mode="json"), budget_limits=budget.model_dump(mode="json"),
         reserved_model_calls=0, reserved_tool_calls=0, loop_count=0,
-        elapsed_upper_bound_seconds=0.0, policy_digest=canonical_digest(policy.model_dump(mode="json")),
+        elapsed_upper_bound_seconds=0.0, policy_digest=execution_policy_digest(service, run, policy),
         workspace_id=run.workspace_id, test_results=[], artifact_ids=[])
 
 
@@ -103,8 +118,7 @@ class CodeExecutionPort(LeaseExecutionPort):
                 tests.append({"target": data.get("target", "unknown"), "passed": data["passed"],
                     "exit_code": data.get("exit_code"), "artifact_id": ref.get("artifact_id"),
                     "workspace_diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
-                    **({"verification_manifest": await tracker.verification_manifest(
-                        self.lease.run_id, self.workspace_id)} if original else {})})
+                    **({"verification_manifest": data.get("verification_manifest")} if original else {})})
             if ref.get("kind") == "diff":
                 state["diff_artifact_id"] = ref["artifact_id"]
             if not result.success:
@@ -124,6 +138,8 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget, execut
         if execution_lease is not None:
             await repository.finish(execution_lease, "failed", event_type="code_task.failed",
                                     error={"code": code})
+        elif run.request.get("execution_config"):
+            await repository.fail_unclaimed(run.id, code)
         return {"status": "failed", "error": {"code": code}, **await service._result_details(key)}
 
     if run.status in {"completed", "failed", "cancelled", "timed_out"}:
@@ -133,11 +149,33 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget, execut
         return await reject("legacy_snapshot")
     profile, budget, policy = execution_config(service, run, budget)
     snapshot = await repository.get_snapshot(run.id)
-    if snapshot.policy_digest != canonical_digest(policy.model_dump(mode="json")):
+    frozen = run.request.get("execution_config")
+    if frozen and canonical_digest(profile.model_dump(mode="json")) != frozen["profile_digest"]:
+        return await reject("execution_config_mismatch")
+    if not frozen and snapshot.policy_digest != canonical_digest(policy.model_dump(mode="json")):
         return await reject("policy_mismatch")
     # Execution must use the budget frozen in the creation snapshot.
     if snapshot.budget_limits != budget.model_dump(mode="json"):
         return await reject("budget_mismatch")
+    if frozen:
+        from app.tools.code_tests import TestTargetRegistry, RunTestsTool
+        from app.agent.sandbox_docker import DockerSandboxExecutor
+        try:
+            targets = TestTargetRegistry.for_workspace(service.workspace_service, run.workspace_id)
+            target = targets.resolve("unit")
+            if (test_tool is None or getattr(test_tool.executor, "image", None) != frozen["image"]
+                    or target.model_dump(mode="json") != frozen["target"]
+                    or canonical_digest(profile.model_dump(mode="json")) != frozen["profile_digest"]):
+                return await reject("execution_config_mismatch")
+            executor = test_tool.executor
+            if isinstance(executor, DockerSandboxExecutor):
+                executor = DockerSandboxExecutor(frozen["image"], docker_binary=executor.docker_binary,
+                    registered_targets={str(service.workspace_service.root_path(run.workspace_id)):
+                                        {target.name: target.command}})
+            test_tool = RunTestsTool(targets, executor, service.workspace_service,
+                                    service.artifact_service, service.run_repository)
+        except (ValueError, KeyError, OSError):
+            return await reject("execution_config_mismatch")
     try:
         lease = execution_lease or await repository.claim(run.id, str(uuid4()), lease_seconds=service.lease_seconds)
     except RecoveryConflict as exc:
@@ -189,6 +227,16 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget, execut
             await repository.finish(lease, "completed", snapshot=saved, event_type="code_task.completed")
             return {"status": "completed", "answer": result.output, **await service._result_details(key)}
         code = state.get("error_code")
+        if frozen and not code and result.status == "completed":
+            tracker = RunFileChanges(service.workspace_service, service.run_repository)
+            manifest = await tracker.verification_manifest(run.id, run.workspace_id)
+            if (saved.test_results and manifest["sha256"] !=
+                    (saved.test_results[-1].get("verification_manifest") or {}).get("sha256")):
+                code = "workspace_changed"
+            elif await tracker.conflicts_for_run(run.id):
+                code = "workspace_changed"
+            elif not await tracker.diff_for_run(run.id):
+                code = "no_changes"
         if not code:
             if result.status == "stopped":
                 code = "budget_exhausted"
