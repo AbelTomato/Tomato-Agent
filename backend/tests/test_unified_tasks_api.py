@@ -40,8 +40,33 @@ async def test_submit_replay_conflict_and_cancel_version(tmp_path):
         route = f"/api/tasks/{run['run_id']}/actions"
         assert (await client.post(route, json=action)).status_code == 409
         action["expected_version"] = run["version"]
-        assert (await client.post(route, json=action)).json()["status"] == "cancelled"
+        cancelled = await client.post(route, json=action)
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+        replay = await client.post(route, json=action)
+        assert replay.status_code == 200 and replay.json() == cancelled.json()
         assert (await client.get(f"/api/tasks/{run['run_id']}")).json()["capabilities"] == []
+
+
+@pytest.mark.parametrize("kind", ["chat", "knowledge", "writing"])
+async def test_cancel_replay_rejects_changed_content_and_new_stale_key(tmp_path, kind):
+    async with api(tmp_path) as (app, client, session):
+        run = (await client.post(f"/api/sessions/{session}/tasks", json=body(kind=kind))).json()
+        route = f"/api/tasks/{run['run_id']}/actions"
+        action = {"action_id": "cancel", "action": "cancel", "expected_version": run["version"],
+                  "client_request_id": "cancel-1", "payload": {}}
+        cancelled = await client.post(route, json=action)
+        assert cancelled.status_code == 200
+        events = await app.state.run_repository.list_events(run["run_id"])
+        replay = await client.post(route, json=action)
+        assert replay.status_code == 200 and replay.json() == cancelled.json()
+        for changes in ({"action_id": "changed"}, {"expected_version": cancelled.json()["version"]},
+                        {"action": "save_draft"}):
+            conflict = await client.post(route, json={**action, **changes})
+            assert conflict.status_code == 409
+            assert conflict.json()["detail"]["code"] == "action_request_conflict"
+        stale = await client.post(route, json={**action, "client_request_id": "cancel-2"})
+        assert stale.status_code == 409 and stale.json()["detail"]["code"] == "version_conflict"
+        assert await app.state.run_repository.list_events(run["run_id"]) == events
 
 
 @pytest.mark.parametrize("values", [{"kind": "code_task"}, {"options": {"limit": 1}},
@@ -50,6 +75,45 @@ async def test_submit_replay_conflict_and_cancel_version(tmp_path):
 async def test_invalid_requests(tmp_path, values):
     async with api(tmp_path) as (_, client, session):
         assert (await client.post(f"/api/sessions/{session}/tasks", json=body(**values))).status_code == 422
+
+
+async def test_code_cancel_replays_and_waits_for_executor_cleanup(tmp_path):
+    import asyncio
+
+    import aiosqlite
+    from app.agent.models import CodeTaskRequest
+
+    async with api(tmp_path) as (app, client, session):
+        service = app.state.code_task_service
+        run = await service.create(CodeTaskRequest(task="test"))
+        async with aiosqlite.connect(service.run_repository.path) as db:
+            await db.execute("UPDATE task_runs SET session_id=?, task_type='code' WHERE id=?",
+                             (session, str(run.id)))
+            await db.commit()
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def executor():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        task = asyncio.create_task(executor())
+        service._execution_tasks[str(run.id)] = task
+        await started.wait()
+        action = {"action_id": "cancel", "action": "cancel", "expected_version": run.version,
+                  "client_request_id": "cancel-1", "payload": {}}
+        route = f"/api/tasks/{run.id}/actions"
+        cancelled = await client.post(route, json=action)
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+        assert cleaned.is_set() and task.done()
+        replay = await client.post(route, json=action)
+        assert replay.status_code == 200 and replay.json() == cancelled.json()
+        conflict = await client.post(route, json={**action, "action": "inspect_recovery"})
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["code"] == "action_request_conflict"
 
 
 @pytest.mark.parametrize("field,code", [("enabled", "worker_disabled"), ("model_available", "model_unconfigured")])

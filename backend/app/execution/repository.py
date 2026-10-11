@@ -180,8 +180,11 @@ class ExecutionRepository:
                 await db.rollback()
                 raise
 
-    async def request_cancel(self, run_id: UUID, *, expected_version=None) -> RunRecord:
+    async def request_cancel(self, run_id: UUID, *, expected_version=None, request=None) -> RunRecord:
         now = self._aware_now()
+        digest = canonical_digest(request.model_dump(mode="json")) if request is not None else None
+        if request is not None:
+            expected_version = request.expected_version
         async with aiosqlite.connect(self.path) as db:
             await self._configure(db)
             try:
@@ -189,10 +192,22 @@ class ExecutionRepository:
                 run = await self._run_row(db, run_id)
                 if run is None:
                     raise KeyError(str(run_id))
+                if request is not None:
+                    existing = await (await db.execute(
+                        "SELECT digest FROM task_actions WHERE run_id=? AND client_request_id=?",
+                        (str(run_id), request.client_request_id))).fetchone()
+                    if existing:
+                        if existing[0] != digest:
+                            raise RunRepositoryConflict("action_request_conflict")
+                        await db.rollback()
+                        return _run_record(run)
                 if expected_version is not None and run[6] != expected_version:
                     raise RunRepositoryConflict("version_conflict")
+                if request is not None:
+                    await db.execute("INSERT INTO task_actions(run_id,client_request_id,digest) VALUES (?,?,?)",
+                                     (str(run_id), request.client_request_id, digest))
                 if run[4] in {"completed", "failed", "cancelled", "timed_out"}:
-                    await db.rollback()
+                    await self._commit(db)
                     return _run_record(run)
                 await db.execute(
                     "UPDATE execution_run_heads SET cancel_requested=1, active_attempt_id=NULL WHERE run_id=?",

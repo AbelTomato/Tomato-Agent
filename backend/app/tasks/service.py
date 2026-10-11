@@ -69,15 +69,18 @@ class TaskService:
         run = await self.runs.get_run(run_id)
         if run is None:
             raise KeyError("run_not_found")
-        if request.action != "cancel" and run.task_type == "writing":
+        if request.action == "cancel":
+            cancelled = await self.execution.request_cancel(run.id, request=request)
+            if run.task_type in {"code", "code_task"}:
+                return await self.adapters["code"].service.cancel(str(run.id))
+            return cancelled
+        replay = await self.execution.get_stage_action_replay(run.id, request)
+        if replay is not None:
+            return replay
+        if run.task_type == "writing":
             return await self.adapters["writing"].act(run, request)
         if run.version != request.expected_version:
             raise RunRepositoryConflict("version_conflict")
-        if request.action == "cancel":
-            await self.execution.request_cancel(run.id, expected_version=request.expected_version)
-            if run.task_type in {"code", "code_task"}:
-                return await self.adapters["code"].service.cancel(str(run.id))
-            return await self.runs.get_run(run.id)
         if run.task_type in {"code", "code_task"} and request.action in {"inspect_recovery", "continue_recovery"}:
             pending = self.pending_action(run)
             if not pending or request.action_id != pending.action_id:

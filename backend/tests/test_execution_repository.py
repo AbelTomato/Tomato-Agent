@@ -10,6 +10,8 @@ from app.execution.repository import (
 )
 from app.execution.models import LeaseHandle
 from app.runs.repository import RunRepository
+from app.runs.models import RunRepositoryConflict
+from app.tasks.models import TaskActionRequest
 
 
 class FakeClock:
@@ -93,6 +95,70 @@ async def test_request_cancel_wins_against_finish_and_invalidates_lease(tmp_path
     with pytest.raises(StaleExecutionOwner):
         await repository.finish(lease, "completed")
     assert (await repository.get_run(run.id)).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_action_is_atomic_and_replays_after_restart(tmp_path, monkeypatch):
+    path = tmp_path / "execution.db"
+    runs, run = await create_run(path)
+    repository = ExecutionRepository(path, clock=FakeClock())
+    await repository.init()
+    lease = await repository.claim(run.id, "worker-1", lease_seconds=30)
+    run = await repository.get_run(run.id)
+    request = TaskActionRequest(action_id="cancel", action="cancel", expected_version=run.version,
+                                client_request_id="cancel-1")
+    commit = repository._commit
+
+    async def fail_commit(db):
+        raise RuntimeError("injected commit failure")
+
+    monkeypatch.setattr(repository, "_commit", fail_commit)
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        await repository.request_cancel(run.id, expected_version=run.version, request=request)
+    assert await repository.get_run(run.id) == run
+    assert (await repository.get_attempt(lease.attempt_id)).status == "running"
+    async with aiosqlite.connect(path) as db:
+        assert (await (await db.execute("SELECT COUNT(*) FROM task_actions")).fetchone())[0] == 0
+
+    monkeypatch.setattr(repository, "_commit", commit)
+    cancelled = await repository.request_cancel(run.id, expected_version=run.version, request=request)
+    assert cancelled.status == "cancelled"
+    events = await runs.list_events(run.id)
+    restarted = ExecutionRepository(path, clock=FakeClock())
+    await restarted.init()
+    assert await restarted.request_cancel(run.id, expected_version=run.version, request=request) == cancelled
+    with pytest.raises(RunRepositoryConflict, match="action_request_conflict"):
+        await restarted.request_cancel(run.id, expected_version=run.version,
+            request=request.model_copy(update={"action_id": "changed"}))
+    assert await runs.list_events(run.id) == events
+    with pytest.raises(StaleExecutionOwner):
+        await restarted.finish(lease, "completed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_concurrent_cancel_actions_commit_once(tmp_path, terminal):
+    import asyncio
+
+    path = tmp_path / "execution.db"
+    runs, run = await create_run(path)
+    repository = ExecutionRepository(path, clock=FakeClock())
+    await repository.init()
+    if terminal:
+        lease = await repository.claim(run.id, "worker-1", lease_seconds=30)
+        run = await repository.finish(lease, "completed")
+    request = TaskActionRequest(action_id="cancel", action="cancel", expected_version=run.version,
+                                client_request_id="cancel-1")
+    first, replay = await asyncio.gather(
+        repository.request_cancel(run.id, request=request),
+        repository.request_cancel(run.id, request=request),
+    )
+    assert first == replay
+    assert first.status == ("completed" if terminal else "cancelled")
+    events = await runs.list_events(run.id)
+    assert sum(event.event_type == "execution.cancelled" for event in events) == (0 if terminal else 1)
+    async with aiosqlite.connect(path) as db:
+        assert (await (await db.execute("SELECT COUNT(*) FROM task_actions")).fetchone())[0] == 1
 
 
 @pytest.mark.asyncio
