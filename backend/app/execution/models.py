@@ -145,6 +145,8 @@ class StageExecutionSnapshot(ExecutionModel):
     policy_digest: str = Field(min_length=1)
     config_digest: str = Field(min_length=1)
     pending_action: PendingAction | None = None
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    save_key: str | None = None
 
 
 def parse_execution_snapshot(value: str) -> ExecutionSnapshot | StageExecutionSnapshot:

@@ -1,5 +1,11 @@
 # 技术写作 Agent 说明
 
+## 统一会话阶段适配（2026-10-11，MVP 任务 5）
+
+服务层 TaskService/WritingAdapter 已接入单 Worker：研究自动运行，提纲 waiting 后确认排队 drafting，草稿 waiting 后显式排队保存；一个顶层 Run 持续至保存完成。复用 WritingService/Executor 的证据校验、业务版本与保存幂等键，动作键同内容重放返回已有 Run，异内容拒绝。统一 HTTP/前端接入留任务 6～7，当前旧写作接口保持原契约。
+
+领域提纲/草稿/保存已发布但外层未提交时，按领域结果补齐，不重放生成或保存；生成中断返回 failed/interrupted。保存阶段事实未知或保存 key 不匹配时进入 waiting/save_outcome_unknown，只允许取消/只读核查，不自动重试。取消后迟到领域结果保留审计，但租约 fencing 拒绝顶层成功。仅阶段恢复，不保证写作内部逐操作恢复。任务 5 的 fake Provider/独立库测试不代表统一真实浏览器闭环验收。
+
 ## Harness 阶段二：共享边界与当前限制
 
 阶段二新增了可供受控任务复用的 `app.agent.harness` 编排契约，以及 `Budget`、`ToolPolicy`、`HarnessState`、`ExecutionResult` 和审计模型。Harness 管理模型决策循环、上下文预算、工具白名单/参数校验、工具调用与时长限制、输出限制和执行结果；它不迁移或直接修改写作任务状态。现有确定性研究仍由 `WritingResearcher.collect()` 单次检索，`AutonomousResearcher.collect()` 默认 `mode="deterministic"`，只有显式指定 `constrained_autonomous` 才进入有界研究循环；未配置模型时自主模式失败关闭。自主研究工具只允许知识检索/阅读，不提供写入、保存或 Sandbox Policy 工具。

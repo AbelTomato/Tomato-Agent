@@ -167,6 +167,21 @@ class RunRepository:
                 (str(session_id),),
             )).fetchone():
                 raise RunRepositoryConflict("session_busy")
+            if kind == "code":
+                if await (await db.execute(
+                    "SELECT 1 FROM task_runs WHERE workspace_id=? AND status IN ('queued','running','waiting')",
+                    (workspace_id,),
+                )).fetchone():
+                    raise RunRepositoryConflict("workspace_busy")
+                operations = await (await db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_operations'"
+                )).fetchone()
+                if operations and await (await db.execute(
+                    "SELECT 1 FROM execution_operations o JOIN task_runs r ON r.id=o.run_id "
+                    "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
+                    "AND o.status IN ('running','unknown')", (workspace_id,),
+                )).fetchone():
+                    raise RunRepositoryConflict("workspace_busy_unknown_outcome")
             run_id, timestamp = uuid4(), _now()
             await db.execute(
                 "INSERT INTO task_runs (id, task_type, request, workspace_id, status, version, created_at, updated_at, "

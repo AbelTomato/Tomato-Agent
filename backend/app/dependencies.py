@@ -66,6 +66,7 @@ class AppDependencies:
     code_task_service: CodeTaskService
     execution_repository: ExecutionRepository
     execution_worker: ExecutionWorker
+    task_service: object
 
 
 def create_llm_client(config: Settings) -> LLMClient:
@@ -193,19 +194,46 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         capability_profile_factory=lambda repo: config.code_task_capability_profile(repo),
         execution_repository=ExecutionRepository(config.database_path),
     )
-    async def execute_claimed(run, lease, port):
-        return await code_task_service.execute(str(run.id), execution_lease=lease)
+    from app.tasks.service import TaskService
+    from app.tasks.adapters.chat import ChatAdapter
+    from app.tasks.adapters.code import CodeAdapter
+    from app.tasks.adapters.knowledge import KnowledgeAdapter
+    from app.tasks.adapters.writing import WritingAdapter
+    from app.knowledge.conversation import KnowledgeConversation
+    from app.execution.ports import canonical_digest
+
+    runtime = AgentRuntime(llm_client, ContextManager(), tool_registry, session_repository,
+                           "You are a concise assistant.", config.runtime_config)
+    task_service = TaskService(run_repository, code_task_service.execution_repository,
+        session_repository, {
+            "code": CodeAdapter(code_task_service),
+            "chat": ChatAdapter(runtime, session_repository),
+            "knowledge": KnowledgeAdapter(KnowledgeConversation(session_repository, knowledge_service, llm_client)),
+            "writing": WritingAdapter(writing_service, writing_executor, code_task_service.execution_repository),
+        }, enabled=config.effective_task_worker_enabled, model_available=bool(config.llm_api_key.strip()),
+        config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
+            "runtime": config.runtime_config.model_dump(mode="json"),
+            "writing": {"retrieval_mode": config.writing_retrieval_mode,
+                        "max_evidence": config.writing_max_evidence,
+                        "max_context_tokens": config.writing_max_context_tokens,
+                        "max_response_chars": config.writing_max_response_chars,
+                        "timeout_seconds": config.writing_timeout_seconds},
+            "knowledge": {key: value for key, value in config.model_dump(mode="json").items()
+                          if key.startswith("knowledge_") and not key.endswith("api_key")},
+            "embedding": {"model": config.embedding_model, "dimensions": config.embedding_dimensions,
+                          "base_url": config.embedding_base_url}}))
 
     async def observe_recovery(candidate):
         run = await run_repository.get_run(candidate.run_id)
         return code_task_service.recovery_observation(run)
 
     execution_worker = ExecutionWorker(
-        code_task_service.execution_repository, execute_claimed,
+        code_task_service.execution_repository, task_service.execute,
         poll_interval_seconds=config.code_task_worker_poll_interval_seconds,
         max_concurrency=config.code_task_worker_max_concurrency,
         recovery_observation_factory=observe_recovery,
     )
+    execution_worker.stage_recovery_factory = task_service.recover_stage
     return AppDependencies(
         session_repository=session_repository,
         run_repository=run_repository,
@@ -223,6 +251,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         code_task_service=code_task_service,
         execution_repository=code_task_service.execution_repository,
         execution_worker=execution_worker,
+        task_service=task_service,
     )
 
 

@@ -11,7 +11,7 @@ from .models import ExecutionSnapshot, LeaseHandle, OperationInput, StepOutcome
 
 class ExecutionPort(Protocol):
     lease: LeaseHandle
-    workspace_id: str
+    workspace_id: str | None
 
     async def save_snapshot(self, snapshot: ExecutionSnapshot) -> ExecutionSnapshot: ...
     async def describe_operation(self, logical_index, tool_name, arguments) -> OperationInput: ...
@@ -33,7 +33,7 @@ class WorkerRepository(Protocol):
 class LeaseExecutionPort:
     """Lease-bound persistence; side-effect metadata must be supplied by an adapter."""
 
-    def __init__(self, repository, lease: LeaseHandle, workspace_id: str):
+    def __init__(self, repository, lease: LeaseHandle, workspace_id: str | None):
         self.repository = repository
         self.lease = lease
         self.workspace_id = workspace_id

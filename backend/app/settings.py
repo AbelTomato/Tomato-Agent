@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     code_task_allow_network: Literal[False] = False
     code_task_allow_credentials: Literal[False] = False
     code_task_worker_enabled: bool = False
+    task_worker_enabled: bool | None = None
     code_task_worker_poll_interval_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     code_task_worker_max_concurrency: Literal[1] = 1
     code_task_max_loops: int = Field(default=12, gt=0)
@@ -79,6 +80,11 @@ class Settings(BaseSettings):
     code_task_openshell_image: str = ""
     code_task_openshell_binary: str = "openshell"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def effective_task_worker_enabled(self) -> bool:
+        return (self.code_task_worker_enabled if self.task_worker_enabled is None
+                else self.task_worker_enabled)
 
     @field_validator("workspace_allowed_roots")
     @classmethod

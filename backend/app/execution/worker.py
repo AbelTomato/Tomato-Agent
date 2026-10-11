@@ -41,6 +41,7 @@ class ExecutionWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.recovery_observation_factory = recovery_observation_factory
         self.recovery_scan_limit = recovery_scan_limit
+        self.stage_recovery_factory = None
         self._owner_id = f"worker-{uuid4()}"
         self._active: dict[asyncio.Task, object] = {}
         self._loop_task: asyncio.Task | None = None
@@ -180,6 +181,14 @@ class ExecutionWorker:
         results = []
         for attempt in expired:
             candidate = await self.repository.get_recovery_candidate(attempt.run_id)
+            if candidate.snapshot and candidate.snapshot.get("snapshot_type") == "stage":
+                if self.stage_recovery_factory is None:
+                    raise ValueError("stage recovery factory is required")
+                candidate = await self.repository.expire_and_classify(attempt.id)
+                run, reason = await self.stage_recovery_factory(candidate)
+                results.append(RecoveryResult(run_id=run.id, status=run.status,
+                                              action="reconcile", reason_code=reason))
+                continue
             observation = factory(candidate)
             if inspect.isawaitable(observation):
                 observation = await observation

@@ -30,6 +30,9 @@ class ExecutionRepository:
             await self._configure(db)
             await db.executescript(";".join(execution_migration()) + ";")
             await db.executescript(_RECOVERY_SCHEMA)
+            await db.execute("CREATE TABLE IF NOT EXISTS task_actions (run_id TEXT NOT NULL REFERENCES task_runs(id), "
+                             "client_request_id TEXT NOT NULL, digest TEXT NOT NULL, "
+                             "PRIMARY KEY(run_id,client_request_id))")
             await db.commit()
 
     async def claim_next(self, owner_id: str, *, lease_seconds: int) -> tuple[RunRecord, LeaseHandle] | None:
@@ -39,7 +42,10 @@ class ExecutionRepository:
                 await self._configure(db)
                 row = await (await db.execute(
                     "SELECT r.id FROM task_runs r LEFT JOIN execution_run_heads h ON h.run_id=r.id "
-                    "WHERE r.status='queued' AND r.task_type='code_task' "
+                    "WHERE r.status='queued' AND (r.task_type IN ('code_task','code') OR "
+                    "(r.task_type IN ('chat','knowledge','writing') AND EXISTS "
+                    "(SELECT 1 FROM task_run_checkpoints c WHERE c.run_id=r.id "
+                    "AND json_extract(c.state,'$.snapshot_type')='stage'))) "
                     "AND (h.run_id IS NULL OR h.active_attempt_id IS NULL) "
                     "ORDER BY r.created_at, r.id LIMIT 1"
                 )).fetchone()
@@ -174,7 +180,7 @@ class ExecutionRepository:
                 await db.rollback()
                 raise
 
-    async def request_cancel(self, run_id: UUID) -> RunRecord:
+    async def request_cancel(self, run_id: UUID, *, expected_version=None) -> RunRecord:
         now = self._aware_now()
         async with aiosqlite.connect(self.path) as db:
             await self._configure(db)
@@ -183,6 +189,8 @@ class ExecutionRepository:
                 run = await self._run_row(db, run_id)
                 if run is None:
                     raise KeyError(str(run_id))
+                if expected_version is not None and run[6] != expected_version:
+                    raise RunRepositoryConflict("version_conflict")
                 if run[4] in {"completed", "failed", "cancelled", "timed_out"}:
                     await db.rollback()
                     return _run_record(run)
@@ -230,7 +238,8 @@ class ExecutionRepository:
 
     async def finish(self, lease: LeaseHandle, status: str = "completed", *, snapshot=None,
                      event_type: str | None = None, event_payload: dict[str, Any] | None = None,
-                     error: dict[str, Any] | None = None) -> RunRecord:
+                      error: dict[str, Any] | None = None, result=None, stage=None,
+                      pending_action=None, domain_run_id=None) -> RunRecord:
         now = self._aware_now()
         async with aiosqlite.connect(self.path) as db:
             await self._configure(db)
@@ -243,6 +252,12 @@ class ExecutionRepository:
                 await self._set_run_status(db, lease.run_id, status, now)
                 await db.execute("UPDATE task_runs SET error=? WHERE id=?",
                                  (json.dumps(error) if error else None, str(lease.run_id)))
+                if row[1] in {"chat", "knowledge", "writing"}:
+                    await db.execute(
+                        "UPDATE task_runs SET result=?, stage=?, pending_action=?, domain_run_id=? WHERE id=?",
+                        (json.dumps(result) if result is not None else None, stage,
+                         pending_action.model_dump_json() if pending_action else None,
+                         domain_run_id or row[11], str(lease.run_id)))
                 if snapshot is not None:
                     cursor = await db.execute(
                         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_run_checkpoints WHERE run_id=?",
@@ -370,6 +385,97 @@ class ExecutionRepository:
 
     async def save_snapshot(self, lease: LeaseHandle, snapshot: ExecutionSnapshot):
         return await self._operation_transaction(lease, snapshot)
+
+    async def link_stage(self, lease, snapshot):
+        """Persist domain association and stage checkpoint under the same fence."""
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            await db.execute("BEGIN IMMEDIATE")
+            await self._validate_lease(db, lease, now)
+            if snapshot.run_id != lease.run_id:
+                raise RecoveryConflict("snapshot_run_mismatch")
+            await db.execute("UPDATE task_runs SET domain_run_id=?,stage=? WHERE id=?",
+                             (snapshot.domain_run_id, snapshot.stage, str(lease.run_id)))
+            await db.execute(
+                "UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                (snapshot.model_dump_json(), _dump_time(now), str(lease.run_id)))
+            await self._commit(db)
+
+    async def queue_stage_action(self, run_id, request):
+        from .models import parse_execution_snapshot
+        now = self._aware_now()
+        digest = canonical_digest(request.model_dump(mode="json"))
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            await db.execute("BEGIN IMMEDIATE")
+            row = await self._run_row(db, run_id)
+            existing = await (await db.execute(
+                "SELECT digest FROM task_actions WHERE run_id=? AND client_request_id=?",
+                (str(run_id), request.client_request_id))).fetchone()
+            if existing:
+                if existing[0] != digest:
+                    raise RunRepositoryConflict("action_request_conflict")
+                return _run_record(row)
+            head = await self._head_row(db, run_id)
+            if row[4] != "waiting" or row[6] != request.expected_version or (head and head[1]):
+                raise RunRepositoryConflict("stale_action")
+            raw = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                                         (str(run_id),))).fetchone()
+            snapshot = parse_execution_snapshot(raw[0])
+            pending = snapshot.pending_action
+            if not pending or pending.action_id != request.action_id or request.action not in pending.allowed_actions:
+                raise RunRepositoryConflict("action_not_allowed")
+            stage = "confirm_outline" if request.action == "confirm_outline" else "saving"
+            saved = snapshot.model_copy(update={"phase": "ready", "stage": stage,
+                "action_payload": request.payload, "save_key": snapshot.save_key or f"save-{run_id}",
+                "checkpoint_revision": snapshot.checkpoint_revision + 1})
+            await self._set_run_status(db, run_id, "queued", now, resume_confirmed=True)
+            await db.execute("UPDATE task_runs SET stage=?,pending_action=NULL WHERE id=?", (stage, str(run_id)))
+            await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                             (saved.model_dump_json(), _dump_time(now), str(run_id)))
+            await db.execute("INSERT INTO task_actions(run_id,client_request_id,digest) VALUES (?,?,?)",
+                             (str(run_id), request.client_request_id, digest))
+            await self._append_event(db, run_id, "task.action", {"schema_version": 1, "action": request.action}, now)
+            await self._commit(db)
+            return _run_record(await self._run_row(db, run_id))
+
+    async def get_stage_action_replay(self, run_id, request):
+        async with aiosqlite.connect(self.path) as db:
+            existing = await (await db.execute(
+                "SELECT digest FROM task_actions WHERE run_id=? AND client_request_id=?",
+                (str(run_id), request.client_request_id))).fetchone()
+        if not existing:
+            return None
+        if existing[0] != canonical_digest(request.model_dump(mode="json")):
+            raise RunRepositoryConflict("action_request_conflict")
+        return await self.get_run(run_id)
+
+    async def recover_stage(self, candidate, *, status, result=None, pending_action=None, error=None):
+        from .models import parse_execution_snapshot
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            await db.execute("BEGIN IMMEDIATE")
+            current = await self._candidate(db, candidate.run_id)
+            head = await self._head_row(db, candidate.run_id)
+            if current != candidate or head[1] is not None:
+                raise RecoveryConflict("recovery_candidate_changed")
+            await self._set_run_status(db, candidate.run_id, status, now)
+            await db.execute("UPDATE task_runs SET result=?,pending_action=?,error=? WHERE id=?",
+                (json.dumps(result) if result is not None else None,
+                 pending_action.model_dump_json() if pending_action else None,
+                 json.dumps(error) if error else None, str(candidate.run_id)))
+            snapshot = parse_execution_snapshot(json.dumps(candidate.snapshot))
+            snapshot = snapshot.model_copy(update={"pending_action": pending_action,
+                "phase": "waiting" if status == "waiting" else "finished",
+                "checkpoint_revision": snapshot.checkpoint_revision + 1})
+            await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                             (snapshot.model_dump_json(), _dump_time(now), str(candidate.run_id)))
+            await self._append_event(db, candidate.run_id, "task.recovered",
+                {"schema_version": 1, "status": status, "code": (error or {}).get("code")}, now)
+            await self._commit(db)
+        return await self.get_run(candidate.run_id)
 
     async def prepare_operation(self, lease, operation, snapshot):
         await self._operation_transaction(lease, snapshot, operation=operation)

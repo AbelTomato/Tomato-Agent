@@ -399,6 +399,7 @@ class AgentRuntime:
         session_id: UUID,
         user_message: str | None = None,
         run_id: UUID | None = None,
+        *, include_previous_history: bool = False,
     ) -> RunResult:
         trace_id = uuid4()
         started_at = monotonic()
@@ -411,7 +412,7 @@ class AgentRuntime:
         messages, state, counters = await self._load_runtime_state(
             session_id=session_id,
             run_id=run_id,
-            include_previous_history=is_new_run,
+            include_previous_history=is_new_run or include_previous_history,
         )
 
         if user_message is not None:

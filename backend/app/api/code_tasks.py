@@ -29,7 +29,7 @@ def _service(request: Request) -> CodeTaskService:
 
 
 def _dispatch_status(request: Request) -> str:
-    return "worker_enabled" if request.app.state.config.code_task_worker_enabled else "worker_disabled"
+    return "worker_enabled" if request.app.state.config.effective_task_worker_enabled else "worker_disabled"
 
 
 def _run_id(value: str) -> str:

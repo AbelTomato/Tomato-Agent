@@ -44,7 +44,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
         await dependencies.code_task_service.initialize()
         worker = dependencies.execution_worker
         try:
-            if app_settings.code_task_worker_enabled:
+            if app_settings.effective_task_worker_enabled:
                 while True:
                     recovered = await worker.recover_on_startup()
                     if len(recovered) < worker.recovery_scan_limit:

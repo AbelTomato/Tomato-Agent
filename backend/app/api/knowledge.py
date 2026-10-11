@@ -1,4 +1,4 @@
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -46,71 +46,16 @@ async def create_knowledge_run(
     if not await repository.session_exists(ident):
         raise HTTPException(404, "Session not found")
 
-    history = [
-        {
-            "role": event.payload.get("role", "user"),
-            "content": event.payload.get("content", ""),
-        }
-        for event in await repository.list_completed_turn_events(ident)
-        if event.event_type in {"user_message", "assistant_message"}
-        and isinstance(event.payload.get("content", ""), str)
-    ]
-    retrieval_query = request.message
-    run_id = await repository.create_run(ident)
-    trace_id = uuid4()
-    service = http_request.app.state.knowledge_service
-    llm_client = http_request.app.state.llm_client
+    from app.knowledge.conversation import KnowledgeConversation
+
+    conversation = KnowledgeConversation(
+        repository, http_request.app.state.knowledge_service, http_request.app.state.llm_client)
     try:
-        if history:
-            retrieval_query = await service.rewrite_query(
-                request.message,
-                history,
-                llm_client=llm_client,
-            )
-        await repository.append_event(
-            ident,
-            run_id,
-            "user_message",
-            {
-                "role": "user",
-                "content": request.message,
-                "original_query": request.message,
-                "retrieval_query": retrieval_query,
-                "retrieval_mode": request.retrieval_mode,
-            },
-        )
-        answer_kwargs = {
-            "mode": request.retrieval_mode,
-            "limit": request.limit,
-            "llm_client": llm_client,
-        }
-        if retrieval_query != request.message:
-            answer_kwargs["retrieval_query"] = retrieval_query
-        result = await service.answer(request.message, **answer_kwargs)
+        return await conversation.run(ident, request.message,
+            retrieval_mode=request.retrieval_mode, limit=request.limit)
     except ValueError as exc:
-        await repository.update_run(run_id, "failed", {"error": str(exc)}, 0)
         raise HTTPException(400, str(exc)) from exc
 
-    payload = result.model_dump(mode="json")
-    await repository.append_event(
-        ident,
-        run_id,
-        "assistant_message",
-        {"role": "assistant", "content": payload["answer"], **payload},
-    )
-    await repository.update_run(
-        run_id,
-        "completed",
-        {"answer": payload["answer"], "citations": payload["citations"]},
-        0,
-    )
-    return {
-        "run_id": str(run_id),
-        "session_id": str(ident),
-        "status": "completed",
-        "trace_id": str(trace_id),
-        **payload,
-    }
 
 
 @router.get("/api/knowledge/documents/{document_id}")
