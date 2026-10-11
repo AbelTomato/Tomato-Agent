@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from .models import ContextState
 
@@ -24,6 +24,10 @@ class ToolPolicy(_ContractModel):
     max_calls: int = Field(gt=0)
     timeout_seconds: float = Field(gt=0)
     max_result_chars: int = Field(gt=0)
+
+    @field_serializer("allowed_tools", when_used="json")
+    def serialize_allowed_tools(self, value: frozenset[str]) -> list[str]:
+        return sorted(value)
 
 
 class UsageSnapshot(_ContractModel):

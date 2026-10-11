@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("scenario", ["isolation", "timeout", "cancelled"])
+@pytest.mark.parametrize("scenario", ["isolation", "tests_failed", "create_failed", "timeout", "cancelled"])
 async def test_real_docker_gate(tmp_path, monkeypatch, scenario):
     image = os.environ["SANDBOX_IMAGE"]
     subprocess.run(["docker", "version"], check=True, capture_output=True, timeout=10)
@@ -41,6 +41,8 @@ def test_isolation():
 ''',
         "timeout": "import time\ndef test_sleep():\n    time.sleep(60)\n",
         "cancelled": "import time\ndef test_sleep():\n    time.sleep(60)\n",
+        "tests_failed": "def test_failure():\n    assert False, 'acceptance-test-failure'\n",
+        "create_failed": "def test_success():\n    assert True\n",
     }
     source = tmp_path / "test_calculator.py"
     source.write_text(sources[scenario])
@@ -54,6 +56,8 @@ def test_isolation():
     profile = CodeTaskCapabilityProfile(sandbox_backend="docker", allowed_paths=(str(tmp_path),),
                                         timeout_seconds=2 if scenario == "timeout" else 20,
                                         max_output_chars=1000)
+    if scenario == "create_failed":
+        image = "tomato-agent-missing-acceptance@sha256:" + "0" * 64
     task = asyncio.create_task(DockerSandboxExecutor(image).execute(request, profile))
     if scenario == "cancelled":
         for _ in range(100):
@@ -70,6 +74,13 @@ def test_isolation():
     if scenario in ("timeout", "cancelled"):
         assert result.status == ("timed_out" if scenario == "timeout" else "cancelled")
         assert result.error_code == ("timeout" if scenario == "timeout" else "cancelled")
+    elif scenario == "create_failed":
+        assert result.status == "failed", result
+        assert result.error_code == "backend_unavailable", result
+    elif scenario == "tests_failed":
+        assert result.status == "completed", result
+        assert result.exit_code == 1, result
+        assert "acceptance-test-failure" in result.stdout, result
     else:
         assert result.status == "completed", result
         assert result.exit_code == 0, result

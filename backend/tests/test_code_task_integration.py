@@ -3,7 +3,10 @@
 import ast
 import asyncio
 import json
+import os
 from pathlib import Path
+import sys
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -100,6 +103,23 @@ def call(name, arguments):
     return LLMResponse(kind="tool_call", tool_call=ToolCall(
         name=name, arguments=arguments,
     ))
+
+
+def test_tool_policy_digest_is_stable_across_process_hash_seeds():
+    import subprocess
+
+    source = """from app.agent.harness_models import ToolPolicy
+from app.execution.ports import canonical_digest
+policy = ToolPolicy(allowed_tools=frozenset({'list_files', 'read_file', 'search_files',
+    'write_file', 'apply_patch', 'get_diff', 'collect_artifact', 'run_tests'}),
+    max_calls=8, timeout_seconds=60, max_result_chars=1000)
+print(canonical_digest(policy.model_dump(mode='json')))
+"""
+    digests = [subprocess.check_output(
+        [sys.executable, "-c", source], cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONHASHSEED": seed}, text=True, timeout=10,
+    ).strip() for seed in ("1", "3", "42", "99")]
+    assert len(set(digests)) == 1, digests
 
 
 def test_configured_provider_is_exposed_to_code_task_routes(tmp_path):
@@ -282,3 +302,178 @@ async def test_unsafe_or_unsuccessful_execution_never_completes(
             else:
                 assert len(calls) == 1
             assert not list((tmp_path / "workspaces").glob("*/outside.py"))
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_BACKGROUND_SANDBOX_ACCEPTANCE") != "1",
+    reason="explicit real background sandbox acceptance opt-in required",
+)
+@pytest.mark.parametrize("scenario", ["success", "tests_failed", "cancelled", "cleanup_failed"])
+async def test_real_background_sandbox_boundaries(scenario, monkeypatch):
+    """Real sandbox and HTTP; scripted model and injected cleanup fault are explicit."""
+    from app.agent.sandbox_openshell import OpenShellSandboxExecutor
+
+    root = Path(__file__).resolve().parents[1] / "data" / "background-sandbox-acceptance" / uuid4().hex
+    root.mkdir(parents=True)
+    config = Settings(
+        database_path=root / "runs.db", docs_root=root,
+        code_task_workspace_root=root / "workspaces",
+        code_task_artifact_root=root / "artifacts",
+        code_task_worker_enabled=True, code_task_worker_poll_interval_seconds=0.05,
+        code_task_tool_timeout_seconds=60, code_task_max_duration_seconds=180,
+        knowledge_pipeline_enabled=False, knowledge_rerank_enabled=False,
+    )
+    assert config.code_task_sandbox_backend == "openshell"
+    app = create_app(config)
+    service = app.state.code_task_service
+    executor = OpenShellSandboxExecutor(
+        config.code_task_openshell_image, openshell_binary=config.code_task_openshell_binary,
+    )
+    service.test_tool.executor = executor
+    responses = []
+    if scenario in {"success", "cleanup_failed"}:
+        responses.append(call("apply_patch", {"changes": [{
+            "path": "calculator.py", "old_text": "return left - right",
+            "new_text": "return left + right",
+        }]}))
+    responses.append(call("run_tests", {"target": "unit"}))
+    if scenario == "success":
+        responses.append(call("get_diff", {}))
+    responses.append(LLMResponse(kind="final", content="Tests finished."))
+    llm = ScriptedLLM(responses)
+    service.llm = app.state.code_task_llm = llm
+    service.strategy = app.state.code_task_strategy = CodeTaskStrategy()
+    executing = asyncio.Event()
+    names = []
+    original_run = executor._run
+    original_cleanup = executor._cleanup
+    summary = {"scenario": scenario, "model": "scripted", "sandbox": "real_openshell",
+               "cleanup_fault_injected": scenario == "cleanup_failed"}
+
+    async def observe(command, *args):
+        if command[2] == "create":
+            names.append(command[4])
+        if command[2] == "exec":
+            executing.set()
+        return await original_run(command, *args)
+
+    async def refuse_cleanup(name, timeout):
+        return False
+
+    monkeypatch.setattr(executor, "_run", observe)
+    if scenario == "cleanup_failed":
+        monkeypatch.setattr(executor, "_cleanup", refuse_cleanup)
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                created = await client.post("/api/code-tasks", json={"task": "Check fixed fixture"})
+                assert created.status_code == 202
+                run_id = created.json()["run_id"]
+                summary["run_id"] = run_id
+                if scenario == "cancelled":
+                    await asyncio.wait_for(executing.wait(), 65)
+                    cancelled = await client.post(f"/api/code-tasks/{run_id}/cancel", json={})
+                    assert cancelled.status_code == 200
+                async with asyncio.timeout(180):
+                    while True:
+                        payload = (await client.get(f"/api/code-tasks/{run_id}")).json()
+                        if payload["status"] in {"completed", "failed", "cancelled", "timed_out", "waiting"}:
+                            break
+                        await asyncio.sleep(0.1)
+                summary.update(status=payload["status"], error=payload.get("error"),
+                               artifacts=payload["artifacts"], test_results=payload["test_results"])
+                expected = {"success": ("completed", None), "tests_failed": ("failed", "tests_failed"),
+                            "cancelled": ("cancelled", None),
+                            "cleanup_failed": ("failed", "cleanup_failed")}[scenario]
+                assert payload["status"] == expected[0], summary
+                assert (payload.get("error") or {}).get("code") == expected[1], summary
+                if scenario == "cancelled":
+                    assert any(event["event_type"] == "execution.cancelled" for event in payload["events"])
+                for ref in payload["artifacts"]:
+                    artifact = await client.get(f"/api/code-tasks/{run_id}/artifacts/{ref['artifact_id']}")
+                    assert artifact.status_code == 200
+                if scenario != "cancelled":
+                    assert any(ref["kind"] == "test_report" for ref in payload["artifacts"]), summary
+                assert names
+                summary["owned_before_final_cleanup"] = [await executor._owned(name) for name in names]
+                assert summary["owned_before_final_cleanup"] == [scenario == "cleanup_failed"]
+                summary["accepted"] = True
+    finally:
+        # Only sandboxes created by this test are eligible for cleanup.
+        summary["final_cleanup"] = [await original_cleanup(name, 10) for name in names]
+        summary["owned_after_final_cleanup"] = [await executor._owned(name) for name in names]
+        (root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"Acceptance report: {root / 'summary.json'}")
+        assert all(summary["final_cleanup"]), summary
+        assert not any(summary["owned_after_final_cleanup"]), summary
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_BACKGROUND_SANDBOX_ACCEPTANCE") != "1",
+    reason="explicit real background sandbox acceptance opt-in required",
+)
+@pytest.mark.parametrize("scenario", ["queued", "sandbox_unknown"])
+async def test_real_sandbox_api_worker_process_restart(scenario):
+    from app.agent.sandbox_openshell import OpenShellSandboxExecutor
+
+    backend = Path(__file__).resolve().parents[1]
+    root = backend / "data" / "background-sandbox-acceptance" / uuid4().hex
+    root.mkdir(parents=True)
+    script = backend / "tests" / "fixtures" / "background_sandbox_worker.py"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(backend), str(backend / "tests")])}
+    config = Settings()
+    executor = OpenShellSandboxExecutor(config.code_task_openshell_image,
+                                       openshell_binary=config.code_task_openshell_binary)
+    name = None
+    summary = {"scenario": scenario, "model": "scripted", "sandbox": "real_openshell"}
+    processes = []
+    try:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, str(script), str(root), "create", scenario,
+            cwd=backend, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        processes.append(child)
+        line = await asyncio.wait_for(child.stdout.readline(), 80)
+        assert line, (await child.stderr.read()).decode()
+        barrier = json.loads(line)
+        name = barrier.get("name")
+        summary["barrier"] = barrier
+        if name:
+            assert await executor._owned(name)
+        child.kill()
+        assert await asyncio.wait_for(child.wait(), 10) == -9
+        if scenario == "sandbox_unknown":
+            # Real lease expiry, without editing persistence or fabricating observations.
+            await asyncio.sleep(31)
+        restarted = await asyncio.create_subprocess_exec(
+            sys.executable, str(script), str(root), "resume", scenario,
+            cwd=backend, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        processes.append(restarted)
+        out, err = await asyncio.wait_for(restarted.communicate(), 100)
+        assert restarted.returncode == 0, err.decode()
+        result = json.loads(out)
+        summary.update(result)
+        assert result["status"] == ("completed" if scenario == "queued" else "waiting"), summary
+        if name:
+            summary["owned_after_restart"] = await executor._owned(name)
+            assert summary["owned_after_restart"] is True
+        else:
+            assert any(ref["kind"] == "test_report" for ref in result["artifacts"])
+            assert any(ref["kind"] == "diff" for ref in result["artifacts"])
+        summary["accepted"] = True
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), 10)
+        if name:
+            summary["manual_cleanup"] = await executor._cleanup(name, 10)
+            summary["owned_after_manual_cleanup"] = await executor._owned(name)
+        (root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"Acceptance report: {root / 'summary.json'}")
+        if name:
+            assert summary["manual_cleanup"] is True
+            assert summary["owned_after_manual_cleanup"] is False

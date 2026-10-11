@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("scenario", ["isolation", "timeout", "cancelled"])
+@pytest.mark.parametrize("scenario", ["isolation", "tests_failed", "create_failed", "timeout", "cancelled"])
 async def test_real_openshell_gate(tmp_path, monkeypatch, scenario):
     binary = os.environ.get("CODE_TASK_OPENSHELL_BINARY", "openshell")
     image = os.environ["CODE_TASK_OPENSHELL_IMAGE"]
@@ -37,9 +37,13 @@ def test_isolation():
 ''',
         "timeout": "import time\ndef test_sleep():\n    time.sleep(60)\n",
         "cancelled": "import time\ndef test_sleep():\n    time.sleep(60)\n",
+        "tests_failed": "def test_failure():\n    assert False, 'acceptance-test-failure'\n",
+        "create_failed": "def test_success():\n    assert True\n",
     }
     (tmp_path / "test_calculator.py").write_text(sources[scenario])
     monkeypatch.setenv("SANDBOX_HOST_SECRET", "acceptance-sentinel")
+    if scenario == "create_failed":
+        image = "tomato-agent-missing-acceptance@sha256:" + "0" * 64
     executor = OpenShellSandboxExecutor(image, openshell_binary=binary)
     original_run = executor._run
     executing = asyncio.Event()
@@ -67,9 +71,14 @@ def test_isolation():
             task.cancel()
     result = await asyncio.wait_for(task, 85)
     assert result.error_code != "cleanup_failed", result
-    assert result.status == {"isolation": "completed", "timeout": "timed_out",
+    assert result.status == {"isolation": "completed", "tests_failed": "completed", "create_failed": "failed", "timeout": "timed_out",
                              "cancelled": "cancelled"}[scenario], result
     if scenario == "isolation":
         assert result.exit_code == 0, result
+    if scenario == "tests_failed":
+        assert result.exit_code == 1, result
+        assert "acceptance-test-failure" in result.stdout, result
+    if scenario == "create_failed":
+        assert result.error_code in {"backend_unavailable", "execution_failed"}, result
     assert names
     assert not await executor._owned(names[0]), "owned sandbox remains"
