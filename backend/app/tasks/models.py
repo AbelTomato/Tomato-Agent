@@ -2,7 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.runs.models import TaskKind
+from app.runs.models import TaskAction, TaskKind
+from app.writing.execution_models import GeneratedOutline
 
 
 class TaskRecoveryObservation(BaseModel):
@@ -25,7 +26,12 @@ class UnifiedTaskRequest(BaseModel):
     def validate_kind(self):
         if not self.message.strip():
             raise ValueError("message cannot be blank")
-        if (self.kind == "code") != bool(self.workspace_id):
+        if self.kind == "assistant":
+            if not self.client_request_id.strip():
+                raise ValueError("client_request_id cannot be blank")
+            if self.workspace_id is not None and not self.workspace_id.strip():
+                raise ValueError("workspace_id cannot be blank")
+        elif (self.kind == "code") != bool(self.workspace_id):
             raise ValueError("workspace is required only for code")
         if self.kind != "knowledge" and self.options:
             raise ValueError("options are supported only for knowledge")
@@ -39,22 +45,37 @@ class UnifiedTaskRequest(BaseModel):
         return self
 
 
+
 class TaskActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     action_id: str = Field(min_length=1)
-    action: Literal["cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery"]
+    action: TaskAction
     expected_version: int = Field(ge=0)
     client_request_id: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_payload(self):
+        if self.action in {"provide_input", "approve_action", "reject_action", "bind_workspace"}:
+            if not self.action_id.strip() or not self.client_request_id.strip():
+                raise ValueError("action identity cannot be blank")
         if self.action == "confirm_outline":
             if set(self.payload) != {"outline"} or not isinstance(self.payload["outline"], dict):
                 raise ValueError("outline object required")
         elif self.action == "continue_recovery":
             if set(self.payload) != {"confirmed"} or type(self.payload["confirmed"]) is not bool:
                 raise ValueError("confirmed boolean required")
+        elif self.action in {"provide_input", "bind_workspace"}:
+            key = "message" if self.action == "provide_input" else "workspace_id"
+            if (set(self.payload) != {key} or not isinstance(self.payload[key], str)
+                    or not self.payload[key].strip()):
+                raise ValueError(f"nonblank {key} required")
+        elif self.action == "approve_action" and self.payload:
+            if set(self.payload) != {"outline"} or not isinstance(self.payload["outline"], dict):
+                raise ValueError("only outline object allowed")
+            # Structural validation here; evidence membership is checked against
+            # the server's frozen citation snapshot when the action is executed.
+            GeneratedOutline.model_validate(self.payload["outline"], strict=True)
         elif self.payload:
             raise ValueError("payload must be empty")
         return self

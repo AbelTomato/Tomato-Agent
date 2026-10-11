@@ -15,7 +15,11 @@ RunStatus = Literal[
     "timed_out",
 ]
 
-TaskKind = Literal["chat", "knowledge", "writing", "code"]
+TaskKind = Literal["chat", "knowledge", "writing", "code", "assistant"]
+TaskAction = Literal[
+    "cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery",
+    "provide_input", "approve_action", "reject_action", "bind_workspace",
+]
 
 
 class PendingAction(BaseModel):
@@ -23,11 +27,12 @@ class PendingAction(BaseModel):
 
     action_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
-    allowed_actions: list[Literal[
-        "cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery"
-    ]] = Field(min_length=1)
+    allowed_actions: list[TaskAction] = Field(min_length=1)
     business_version: int = Field(ge=0)
     display_data: dict[str, Any] = Field(default_factory=dict)
+    action_type: Literal["legacy", "clarification", "confirmation", "workspace_binding", "recovery"] = "legacy"
+    target_capability: str | None = Field(default=None, min_length=1)
+    frozen_parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunRecord(BaseModel):

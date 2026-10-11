@@ -21,7 +21,7 @@ def task_error(exc):
     code = str(exc)
     if isinstance(exc, KeyError):
         return HTTPException(404, {"code": "resource_not_found"})
-    if code in {"worker_disabled", "model_unconfigured", "validation_backend_unavailable"}:
+    if code in {"worker_disabled", "model_unconfigured", "validation_backend_unavailable", "assistant_disabled"}:
         return HTTPException(503, {"code": code})
     if code in {"Registered Docker test executor required", "Original project tests require Docker"}:
         return HTTPException(503, {"code": "validation_backend_unavailable"})
@@ -98,6 +98,10 @@ async def domain_messages(request, domain_id):
 async def submit_task(session_id: str, body: UnifiedTaskRequest, request: Request):
     session_id = ident(session_id, "session_id")
     await session_required(request, session_id)
+    # Task 1 publishes the schema only. Assistant execution is installed by
+    # the later capability/API slice, never through a legacy stage adapter.
+    if body.kind == "assistant":
+        raise task_error(RuntimeError("assistant_disabled"))
     try:
         run = await request.app.state.task_service.submit(session_id, body)
     except (KeyError, ValueError, RuntimeError) as exc:

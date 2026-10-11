@@ -1,0 +1,1 @@
+"""Shared assistant contracts and capabilities."""
