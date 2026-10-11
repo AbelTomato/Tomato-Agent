@@ -461,13 +461,18 @@ class ExecutionRepository:
                 raise
 
     async def scan_expired(self, limit: int) -> list[AttemptRecord]:
+        """Find expired leases and committed expirations awaiting a recovery decision."""
         if limit <= 0:
             raise ValueError("limit must be positive")
         async with aiosqlite.connect(self.path) as db:
             rows = await (await db.execute(
                 "SELECT a.* FROM execution_attempts a JOIN execution_run_heads h "
-                "ON h.active_attempt_id=a.id JOIN task_runs r ON r.id=a.run_id "
-                "WHERE a.status='running' AND a.lease_expires_at<=? AND r.status='running' "
+                "ON h.run_id=a.run_id JOIN task_runs r ON r.id=a.run_id "
+                "WHERE r.status='running' AND ((a.status='running' AND a.lease_expires_at<=? "
+                "AND h.active_attempt_id=a.id) OR (a.status='expired' AND h.active_attempt_id IS NULL "
+                "AND a.fencing_token=h.fencing_token AND NOT EXISTS "
+                "(SELECT 1 FROM execution_attempts newer WHERE newer.run_id=a.run_id "
+                "AND newer.attempt_no>a.attempt_no))) "
                 "ORDER BY a.lease_expires_at, a.id LIMIT ?",
                 (_dump_time(self._aware_now()), limit))).fetchall()
         return [_attempt_record(row) for row in rows]
@@ -522,6 +527,12 @@ class ExecutionRepository:
                 attempt = _attempt_record(row)
                 run = await self._run_row(db, attempt.run_id)
                 head = await self._head_row(db, attempt.run_id)
+                if (attempt.status == "expired" and run[4] == "running"
+                        and head[1] is None and head[0] == attempt.fencing_token):
+                    candidate = await self._candidate(db, attempt.run_id)
+                    if candidate.attempt_id == attempt_id:
+                        await db.rollback()
+                        return candidate
                 if (attempt.status != "running" or attempt.lease_expires_at > now
                         or head[1] != str(attempt_id) or run[4] != "running"):
                     raise RecoveryConflict("attempt_not_expired")

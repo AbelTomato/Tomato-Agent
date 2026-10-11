@@ -7,13 +7,15 @@ import json
 import os
 from pathlib import Path
 import sys
+from uuid import uuid4
 
 import pytest
 
 from app.execution.recovery import RecoveryConflict, RecoveryObservation, classify_recovery
 from app.execution.repository import ExecutionRepository
+from app.execution.models import OperationInput
 from app.runs.repository import RunRepository
-from test_execution_recovery import Clock
+from test_execution_recovery import Clock, snapshot
 
 
 WORKER = Path(__file__).parent / "fixtures" / "execution_crash_worker.py"
@@ -164,3 +166,42 @@ async def test_two_process_claim_and_paused_owner_is_fenced(tmp_path):
         assert await repository.get_snapshot(run_id) == snapshot
         assert (await repository.get_run(run_id)).status == "running"
         assert (await repository.latest_attempt(run_id)).id == new.attempt_id
+
+
+@pytest.mark.parametrize("fault", ["expiry_after", "recovery_before"])
+@pytest.mark.parametrize("recovery_class,status", [("read_only", "queued"), ("file_write", "waiting")])
+async def test_hard_exit_between_expiry_and_recovery_is_recovered_on_restart(
+    tmp_path, fault, recovery_class, status,
+):
+    path, run_id = await create_run(tmp_path)
+    repository = ExecutionRepository(path, clock=Clock())
+    lease = await repository.claim(run_id, "crashed-executor", lease_seconds=30)
+    operation = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="test",
+                               input_payload={}, recovery_class=recovery_class)
+    saved = snapshot(run_id).model_copy(update={"pending_operation_id": operation.id})
+    await repository.prepare_operation(lease, operation, saved)
+    await repository.start_step(lease, operation.id, saved)
+
+    async with worker(path, run_id, "recover", fault) as child:
+        assert await receive(child) == {"fault": fault}
+        await send(child, action="exit")
+        assert await asyncio.wait_for(child.wait(), 10) == 73
+
+    assert (await repository.get_run(run_id)).status == "running"
+    expired = await repository.get_attempt(lease.attempt_id)
+    assert expired.status == "expired"
+    before = await repository.get_snapshot(run_id)
+
+    async with worker(path, run_id, "recover") as child:
+        assert await receive(child) == {"statuses": [status]}
+        assert await asyncio.wait_for(child.wait(), 10) == 0
+
+    assert (await repository.get_run(run_id)).status == status
+    assert await repository.get_attempt(lease.attempt_id) == expired
+    assert (await repository.get_snapshot(run_id)).checkpoint_revision == before.checkpoint_revision + 1
+    assert (await repository.get_operation(operation.id)).status == (
+        "prepared" if status == "queued" else "unknown")
+    events = await RunRepository(path).list_events(run_id)
+    assert sum(event.event_type == "execution.expired" for event in events) == 1
+    assert sum(event.event_type in {"execution.recovered", "execution.waiting"} for event in events) == 1
+    assert await repository.scan_expired(10) == []

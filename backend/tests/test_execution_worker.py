@@ -297,3 +297,57 @@ async def test_recovery_scan_retries_while_executor_is_busy_and_stops_with_worke
         factory.release.set()
         await worker.stop()
     assert worker._recovery_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_class,status", [("read_only", "queued"), ("file_write", "waiting")])
+async def test_periodic_recovery_retries_after_recovery_commit_failure(
+    tmp_path, monkeypatch, recovery_class, status,
+):
+    from test_execution_recovery import snapshot
+
+    worker, runs, execution, _, created = await make_worker(tmp_path)
+    run = created[0]
+    saved = snapshot(run.id)
+    await execution.bootstrap_run(saved, event_type="code_task.created", event_payload={})
+    lease = await execution.claim(run.id, "crashed-worker", lease_seconds=1)
+    operation = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="test",
+                               input_payload={}, recovery_class=recovery_class)
+    saved = saved.model_copy(update={"pending_operation_id": operation.id})
+    await execution.prepare_operation(lease, operation, saved)
+    await execution.start_step(lease, operation.id, saved)
+    execution.clock.advance(2)
+    worker.recovery_observation_factory = lambda _: RecoveryObservation(policy_digest="policy")
+    commit = execution._commit
+    commits = 0
+    failed_states = []
+
+    async def fail_recovery_commit(db):
+        nonlocal commits
+        commits += 1
+        if commits == 2:
+            failed_states.append(((await runs.get_run(run.id)).status,
+                                  (await execution.get_attempt(lease.attempt_id)).status))
+            raise RuntimeError("temporary recovery commit failure")
+        await commit(db)
+
+    async def skip_execution():
+        return False
+
+    monkeypatch.setattr(execution, "_commit", fail_recovery_commit)
+    monkeypatch.setattr(worker, "run_once", skip_execution)
+    await worker.start()
+    try:
+        async with asyncio.timeout(2):
+            while (await runs.get_run(run.id)).status != status:
+                await asyncio.sleep(0.01)
+    finally:
+        await worker.stop()
+
+    assert failed_states == [("running", "expired")]
+    assert (await execution.get_operation(operation.id)).status == (
+        "prepared" if status == "queued" else "unknown")
+    events = await runs.list_events(run.id)
+    assert sum(event.event_type == "execution.expired" for event in events) == 1
+    assert sum(event.event_type in {"execution.recovered", "execution.waiting"} for event in events) == 1
+    assert await execution.scan_expired(10) == []

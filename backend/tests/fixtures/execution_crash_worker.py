@@ -14,6 +14,8 @@ from app.agent.models import LLMResponse, ToolCall
 from app.execution.models import OperationInput, StepOutcome
 from app.execution.ports import LeaseExecutionPort
 from app.execution.repository import ExecutionRepository
+from app.execution.recovery import RecoveryObservation
+from app.execution.worker import ExecutionWorker
 from app.execution.state_machine import StaleExecutionOwner
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
@@ -66,6 +68,15 @@ class CrashPort(LeaseExecutionPort):
 
 class CrashRepository(ExecutionRepository):
     transaction_fault = None
+
+    async def expire_and_classify(self, attempt_id):
+        candidate = await super().expire_and_classify(attempt_id)
+        self.faults.hit("expiry_after")
+        return candidate
+
+    async def apply_recovery(self, candidate, decision):
+        self.transaction_fault = "recovery_before"
+        return await super().apply_recovery(candidate, decision)
 
     async def _commit(self, db):
         if self.transaction_fault:
@@ -138,10 +149,16 @@ async def main():
     path, run_id, mode, fault, recovery_class = sys.argv[1:]
     path, run_id = Path(path), UUID(run_id)
     clock = Clock()
-    if mode == "resume":
+    if mode in {"resume", "recover"}:
         clock.value += timedelta(seconds=31)
     repository = CrashRepository(path, clock=clock)
     repository.faults = Faults(fault)
+    if mode == "recover":
+        coordinator = ExecutionWorker(repository, None, recovery_observation_factory=lambda _:
+                                      RecoveryObservation(policy_digest="policy"))
+        results = await coordinator.recover_on_startup()
+        emit({"statuses": [result.status for result in results]})
+        return
     if mode == "claim":
         await claim_worker(repository, run_id, clock)
         return
