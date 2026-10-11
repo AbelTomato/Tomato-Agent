@@ -56,7 +56,7 @@ class HarnessState(_ContractModel):
 
 
 class ExecutionResult(_ContractModel):
-    status: Literal["completed", "stopped", "failed"]
+    status: Literal["completed", "stopped", "failed", "waiting"]
     output: Any | None = None
     stop_reason: str | None = None
     usage: UsageSnapshot

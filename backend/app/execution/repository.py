@@ -273,7 +273,7 @@ class ExecutionRepository:
                 await self._set_run_status(db, lease.run_id, status, now)
                 await db.execute("UPDATE task_runs SET error=? WHERE id=?",
                                  (json.dumps(error) if error else None, str(lease.run_id)))
-                if row[1] in {"chat", "knowledge", "writing"}:
+                if row[1] in {"chat", "knowledge", "writing", "assistant"}:
                     await db.execute(
                         "UPDATE task_runs SET result=?, stage=?, pending_action=?, domain_run_id=? WHERE id=?",
                         (json.dumps(result) if result is not None else None, stage,
@@ -311,7 +311,7 @@ class ExecutionRepository:
                     await self._append_event(db, lease.run_id, event_type, payload, now)
                 await db.execute(
                     "UPDATE execution_attempts SET status=?, finished_at=? WHERE id=?",
-                    ("succeeded" if status == "completed" else "cancelled" if status == "cancelled" else "failed",
+                    ("succeeded" if status == "completed" else "released" if status == "waiting" else "cancelled" if status == "cancelled" else "failed",
                      _dump_time(now), str(lease.attempt_id)),
                 )
                 await db.execute(
@@ -553,6 +553,67 @@ class ExecutionRepository:
                 "UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
                 (snapshot.model_dump_json(), _dump_time(now), str(lease.run_id)))
             await self._commit(db)
+
+    async def queue_assistant_action(self, run_id, request, *, confirmation_validator=None):
+        """Consume a frozen assistant action atomically, without creating another Run."""
+        from .models import AssistantExecutionSnapshot, parse_execution_snapshot
+        from app.agent.models import Message
+        now = self._aware_now()
+        digest = canonical_digest(request.model_dump(mode="json"))
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            await db.execute("BEGIN IMMEDIATE")
+            row = await self._run_row(db, run_id)
+            existing = await (await db.execute(
+                "SELECT digest FROM task_actions WHERE run_id=? AND client_request_id=?",
+                (str(run_id), request.client_request_id))).fetchone()
+            if existing:
+                if existing[0] != digest:
+                    raise RunRepositoryConflict("action_request_conflict")
+                return _run_record(row)
+            head = await self._head_row(db, run_id)
+            if row[1] != "assistant" or row[4] != "waiting" or row[6] != request.expected_version or (head and head[1]):
+                raise RunRepositoryConflict("stale_action")
+            raw = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                                         (str(run_id),))).fetchone()
+            snapshot = parse_execution_snapshot(raw[0])
+            if not isinstance(snapshot, AssistantExecutionSnapshot):
+                raise RunRepositoryConflict("snapshot_type_conflict")
+            pending = snapshot.pending_action
+            if not pending or pending.action_id != request.action_id or request.action not in pending.allowed_actions:
+                raise RunRepositoryConflict("action_not_allowed")
+            if request.action not in {"provide_input", "reject_action", "approve_action"} or pending.action_type == "recovery":
+                raise RunRepositoryConflict("action_not_allowed")
+            if request.action == "approve_action":
+                if pending.action_type != "confirmation" or confirmation_validator is None:
+                    raise RunRepositoryConflict("confirmation_handler_unavailable")
+                confirmation_validator(pending.model_copy(deep=True), dict(request.payload))
+            state = dict(snapshot.harness_state)
+            dynamic = dict(state.get("structured_state", {}))
+            dynamic["action_feedback"] = {"action_id": pending.action_id, "action": request.action,
+                "payload": request.payload, "target_capability": pending.target_capability,
+                "frozen_parameters": pending.frozen_parameters, "business_version": pending.business_version}
+            if request.action == "reject_action":
+                dynamic["rejected_actions"] = [*dynamic.get("rejected_actions", []), pending.action_id]
+                if pending.target_capability:
+                    dynamic["blocked_capabilities"] = {**dynamic.get("blocked_capabilities", {}),
+                        pending.target_capability: "user_rejected"}
+            state["structured_state"] = dynamic
+            messages = [*snapshot.messages, Message(role="user", content=json.dumps(
+                {"action": request.action, "payload": request.payload}, ensure_ascii=False))]
+            saved = snapshot.model_copy(update={"phase": "ready_model", "pending_action": None,
+                "pending_decision": None, "pending_response": None, "harness_state": state,
+                "messages": messages, "checkpoint_revision": snapshot.checkpoint_revision + 1})
+            await self._set_run_status(db, run_id, "queued", now, resume_confirmed=True)
+            await db.execute("UPDATE task_runs SET pending_action=NULL WHERE id=?", (str(run_id),))
+            await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+                             (saved.model_dump_json(), _dump_time(now), str(run_id)))
+            await db.execute("INSERT INTO task_actions(run_id,client_request_id,digest) VALUES (?,?,?)",
+                             (str(run_id), request.client_request_id, digest))
+            await self._append_event(db, run_id, "assistant.action", {"schema_version": 1,
+                "action_id": pending.action_id, "action": request.action}, now)
+            await self._commit(db)
+            return _run_record(await self._run_row(db, run_id))
 
     async def queue_stage_action(self, run_id, request):
         from .models import parse_execution_snapshot

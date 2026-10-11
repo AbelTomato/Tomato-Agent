@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.tools.base import ToolContext, ToolResult
 from app.tools.registry import ToolRegistry
+from app.runs.models import PendingAction
 
 from .context import ContextManager
 from .harness_models import (
@@ -26,13 +27,21 @@ from .models import LLMResponse, Message, ToolCall
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    kind: Literal["call_tool", "respond", "stop"]
+    kind: Literal["call_tool", "respond", "stop", "wait"]
+    pending_action: PendingAction | None = None
     tool_name: str | None = None
     arguments: dict[str, Any] | None = None
     output: Any | None = None
     reason: str | None = None
 
     def validate_shape(self) -> None:
+        if self.kind == "wait":
+            if self.pending_action is None or any(value is not None for value in
+                    (self.tool_name, self.arguments, self.output, self.reason)):
+                raise ValueError("wait requires only a pending action")
+            return
+        if self.pending_action is not None:
+            raise ValueError("pending action requires wait")
         if self.kind == "call_tool":
             if not self.tool_name or self.arguments is None:
                 raise ValueError("call_tool requires tool_name and arguments")
@@ -103,6 +112,9 @@ class Harness:
         resume_snapshot=None,
     ) -> ExecutionResult:
         if execution_port is not None:
+            if resume_snapshot is not None and resume_snapshot.snapshot_type == "assistant":
+                return await execution_port.run_harness(self, initial_state, strategy, llm=llm,
+                    tools=tools, policy=policy, budget=budget, snapshot=resume_snapshot)
             return await self._run_persistent(initial_state, strategy, llm=llm, tools=tools,
                 policy=policy, budget=budget, port=execution_port, snapshot=resume_snapshot)
         if resume_snapshot is not None:
@@ -169,6 +181,8 @@ class Harness:
 
                 if decision.kind == "stop":
                     return result("stopped", decision.reason or "strategy stopped")
+                if decision.kind == "wait":
+                    return result("stopped", "wait requires assistant persistence")
                 if decision.kind == "respond":
                     output = decision.output
                     if len(self._text(output)) > budget.max_response_chars:
