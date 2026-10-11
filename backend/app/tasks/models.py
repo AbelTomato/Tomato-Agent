@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -32,9 +32,21 @@ class UnifiedTaskRequest(BaseModel):
 
 
 class TaskActionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     action_id: str = Field(min_length=1)
-    action: str
+    action: Literal["cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery"]
     expected_version: int = Field(ge=0)
     client_request_id: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if self.action == "confirm_outline":
+            if set(self.payload) != {"outline"} or not isinstance(self.payload["outline"], dict):
+                raise ValueError("outline object required")
+        elif self.action == "continue_recovery":
+            if set(self.payload) != {"confirmed"} or type(self.payload["confirmed"]) is not bool:
+                raise ValueError("confirmed boolean required")
+        elif self.payload:
+            raise ValueError("payload must be empty")
+        return self

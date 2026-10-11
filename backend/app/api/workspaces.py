@@ -57,6 +57,29 @@ async def get_workspace(workspace_id: str, request: Request):
         raise _error(exc) from exc
 
 
+@router.get("/api/workspaces")
+async def list_workspaces(request: Request):
+    service = _service(request)
+    items = []
+    if service.root.exists():
+        for directory in sorted(service.root.iterdir()):
+            try:
+                _, metadata = service.repository.load(directory.name)
+                if metadata.get("mode") != "original" or metadata.get("status") != "active":
+                    continue
+                record = await service.get(directory.name)
+                items.append({**record.model_dump(mode="json"), "available": True})
+            except (KeyError, ValueError, OSError):
+                # Invalid metadata names are not usable workspace identities.
+                try:
+                    workspace_id = str(UUID(directory.name))
+                except ValueError:
+                    continue
+                items.append({"workspace_id": workspace_id, "available": False,
+                              "error": {"code": "workspace_unavailable"}})
+    return {"workspaces": items}
+
+
 @router.post("/api/workspaces/{workspace_id}/unregister")
 async def unregister_workspace(workspace_id: str, request: Request):
     workspace_id = _workspace_id(workspace_id)

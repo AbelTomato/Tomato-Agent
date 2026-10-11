@@ -320,16 +320,18 @@ class RunRepository:
             )
             return (await cursor.fetchone())[0]
 
-    async def list_events(self, run_id: str | UUID, *, after: int = 0) -> list[RunEvent]:
+    async def list_events(self, run_id: str | UUID, *, after: int = 0, limit: int | None = None) -> list[RunEvent]:
         if after < 0:
             raise ValueError("after must be non-negative")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be positive")
         if await self.get_run(run_id) is None:
             raise KeyError(f"Run not found: {run_id}")
         async with aiosqlite.connect(self.path) as db:
             cursor = await db.execute(
                 "SELECT id, run_id, sequence, event_type, payload, created_at "
-                "FROM task_run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
-                (str(run_id), after),
+                "FROM task_run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+                (str(run_id), after, limit if limit is not None else -1),
             )
             rows = await cursor.fetchall()
         return [

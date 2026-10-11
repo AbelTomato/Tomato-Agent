@@ -91,6 +91,7 @@ class SessionRecord(BaseModel):
     id: UUID
     status: str
     metadata: dict[str, Any]
+    default_workspace_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

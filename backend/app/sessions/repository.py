@@ -33,6 +33,9 @@ class SessionRepository:
             CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id, sequence), FOREIGN KEY (session_id) REFERENCES sessions(id), FOREIGN KEY (run_id) REFERENCES runs(id));
             CREATE TABLE IF NOT EXISTS checkpoints (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (run_id) REFERENCES runs(id));
             """)
+            columns = await db.execute_fetchall("PRAGMA table_info(sessions)")
+            if "default_workspace_id" not in {column[1] for column in columns}:
+                await db.execute("ALTER TABLE sessions ADD COLUMN default_workspace_id TEXT")
             await db.commit()
 
     async def create_session(self, metadata: dict | None = None) -> UUID:
@@ -41,7 +44,7 @@ class SessionRepository:
         async with aiosqlite.connect(self.path) as db:
             await self._enable_foreign_keys(db)
             await db.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO sessions (id, status, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (
                     str(ident),
                     "active",
@@ -57,7 +60,7 @@ class SessionRepository:
         async with aiosqlite.connect(self.path) as db:
             await self._enable_foreign_keys(db)
             cursor = await db.execute(
-                "SELECT id, status, metadata, created_at, updated_at "
+                "SELECT id, status, metadata, created_at, updated_at, default_workspace_id "
                 "FROM sessions WHERE id = ?",
                 (str(session_id),),
             )
@@ -70,7 +73,43 @@ class SessionRepository:
             metadata=json.loads(row[2]),
             created_at=parse_datetime(row[3]),
             updated_at=parse_datetime(row[4]),
+            default_workspace_id=row[5],
         )
+
+    async def list_sessions(self, limit=50, offset=0):
+        async with aiosqlite.connect(self.path) as db:
+            rows = await db.execute_fetchall(
+                "SELECT id FROM sessions ORDER BY created_at, id LIMIT ? OFFSET ?", (limit, offset))
+        return [await self.get_session(UUID(row[0])) for row in rows]
+
+    async def set_default_workspace(self, session_id, workspace_id):
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "UPDATE sessions SET default_workspace_id=?, updated_at=? WHERE id=?",
+                (workspace_id, now(), str(session_id)))
+            if cursor.rowcount != 1:
+                raise KeyError("session_not_found")
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def task_history_ids(self, session_id, limit=50, offset=0):
+        """Merge unified and legacy records before paginating; never execute domains."""
+        async with aiosqlite.connect(self.path) as db:
+            return await db.execute_fetchall("""
+                SELECT id, source FROM (
+                    SELECT id, 'unified' AS source, created_at FROM task_runs WHERE session_id=?
+                    UNION ALL
+                    SELECT r.id, 'legacy_chat', r.created_at FROM runs r
+                    WHERE r.session_id=? AND NOT EXISTS (
+                        SELECT 1 FROM task_runs t WHERE t.domain_run_id=r.id)
+                    AND NOT EXISTS (SELECT 1 FROM writing_tasks w
+                        WHERE w.research_run_id=r.id OR w.drafting_run_id=r.id)
+                    UNION ALL
+                    SELECT w.task_id, 'legacy_writing', w.created_at FROM writing_tasks w
+                    WHERE w.session_id=? AND NOT EXISTS (
+                        SELECT 1 FROM task_runs t WHERE t.domain_run_id=w.task_id)
+                ) ORDER BY created_at, id LIMIT ? OFFSET ?
+            """, (str(session_id), str(session_id), str(session_id), limit, offset))
 
     async def session_exists(self, session_id: UUID) -> bool:
         return await self.get_session(session_id) is not None

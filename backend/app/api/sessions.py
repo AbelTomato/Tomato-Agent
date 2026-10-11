@@ -1,7 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.api.tasks import ident, session_required, task_error
 
 router = APIRouter()
 
@@ -12,6 +14,30 @@ class CreateSessionRequest(BaseModel):
 
 class RunRequest(BaseModel):
     message: str
+
+
+class SessionWorkspaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    workspace_id: str | None
+
+
+@router.get("/api/sessions")
+async def list_sessions(http_request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    sessions = await http_request.app.state.session_repository.list_sessions(limit, offset)
+    return {"sessions": [session.model_dump(mode="json") for session in sessions], "limit": limit, "offset": offset}
+
+
+@router.post("/api/sessions/{session_id}/workspace")
+async def set_workspace(session_id: str, body: SessionWorkspaceRequest, http_request: Request):
+    session_id = ident(session_id, "session_id")
+    await session_required(http_request, session_id)
+    if body.workspace_id is not None:
+        try:
+            await http_request.app.state.workspace_service.get(body.workspace_id)
+        except (KeyError, ValueError) as exc:
+            raise task_error(exc) from exc
+    session = await http_request.app.state.session_repository.set_default_workspace(session_id, body.workspace_id)
+    return session.model_dump(mode="json")
 
 
 @router.post("/api/sessions")

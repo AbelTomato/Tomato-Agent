@@ -16,6 +16,17 @@ class TaskService:
         self.config_digest = config_digest
         self.model_available = model_available
 
+    @staticmethod
+    def pending_action(run):
+        if run.pending_action is not None:
+            return run.pending_action
+        if run.task_type in {"code", "code_task"} and run.status == "waiting":
+            from app.runs.models import PendingAction
+            return PendingAction(action_id=f"{run.id}:{run.version}:recovery",
+                reason="recovery_required", business_version=run.version,
+                allowed_actions=["cancel", "inspect_recovery", "continue_recovery"])
+        return None
+
     async def submit(self, session_id, request):
         if not self.enabled:
             raise RuntimeError("worker_disabled")
@@ -67,6 +78,9 @@ class TaskService:
                 return await self.adapters["code"].service.cancel(str(run.id))
             return await self.runs.get_run(run.id)
         if run.task_type in {"code", "code_task"} and request.action in {"inspect_recovery", "continue_recovery"}:
+            pending = self.pending_action(run)
+            if not pending or request.action_id != pending.action_id:
+                raise RunRepositoryConflict("stale_action")
             if request.action == "continue_recovery" and request.payload.get("confirmed") is not True:
                 raise RunRepositoryConflict("confirmation_required")
             return await self.adapters["code"].service.recover(str(run.id),

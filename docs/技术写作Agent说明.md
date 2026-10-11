@@ -2,7 +2,9 @@
 
 ## 统一会话阶段适配（2026-10-11，MVP 任务 5）
 
-服务层 TaskService/WritingAdapter 已接入单 Worker：研究自动运行，提纲 waiting 后确认排队 drafting，草稿 waiting 后显式排队保存；一个顶层 Run 持续至保存完成。复用 WritingService/Executor 的证据校验、业务版本与保存幂等键，动作键同内容重放返回已有 Run，异内容拒绝。统一 HTTP/前端接入留任务 6～7，当前旧写作接口保持原契约。
+TaskService/WritingAdapter 已接入单 Worker，统一 HTTP 已于 MVP 任务 6 接入：研究自动运行，提纲 waiting 后确认排队 drafting，草稿 waiting 后显式排队保存；一个顶层 Run 持续至保存完成。复用 WritingService/Executor 的证据校验、业务版本与保存幂等键，动作键同内容重放返回已有 Run，异内容拒绝。统一前端留任务 7，当前旧写作接口保持原契约。
+
+统一入口 `POST /api/sessions/{id}/tasks` 使用 `kind=writing`、message 和 client_request_id；查询 `/api/tasks/{run_id}` 获取 pending_action.action_id、version 与允许动作，向 `/api/tasks/{run_id}/actions` 提交 action_id/action/expected_version/client_request_id/payload。确认提纲 payload 为 `{"outline": {...}}`，保存 payload 为空；保存幂等键由服务端固定。确认及保存均排队后由 Worker 执行，重复确认可返回已有终态，冲突返回 409。会话历史只读合并旧写作记录并排除已关联记录和内部研究/草稿 Run。任务 6 相关回归 194 passed，包含有证据 fake Provider 的 HTTP 提纲确认、草稿生成与保存重放；真实统一浏览器/Provider 闭环留任务 8。
 
 领域提纲/草稿/保存已发布但外层未提交时，按领域结果补齐，不重放生成或保存；生成中断返回 failed/interrupted。保存阶段事实未知或保存 key 不匹配时进入 waiting/save_outcome_unknown，只允许取消/只读核查，不自动重试。取消后迟到领域结果保留审计，但租约 fencing 拒绝顶层成功。仅阶段恢复，不保证写作内部逐操作恢复。任务 5 直接影响回归 183 passed、0 failed、0 skipped，使用 fake Provider/独立库，不代表统一真实浏览器闭环验收。
 
