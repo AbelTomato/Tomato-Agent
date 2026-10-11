@@ -10,6 +10,7 @@ from app.agent.code_task import CodeTaskService, CodeTaskStrategy
 from app.agent.models import CodeTaskRequest, LLMResponse
 from app.agent.harness_models import Budget
 from app.execution.repository import ExecutionRepository
+from app.execution.recovery import classify_recovery
 from app.execution.state_machine import StaleExecutionOwner
 from test_code_tasks_api import make_app, execution_dependencies
 
@@ -147,6 +148,53 @@ async def test_recover_inspect_is_read_only_and_legacy_is_rejected(tmp_path):
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "legacy_snapshot"
         assert await service.run_repository.get_run(run.id) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_changed", [False, True])
+async def test_manual_recovery_uses_current_policy_after_creation(tmp_path, policy_changed):
+    app = make_app(tmp_path)
+    async with app.router.lifespan_context(app):
+        service = app.state.code_task_service
+        repository = service.execution_repository
+        clock = Clock()
+        repository.clock = clock
+        run = await service.create(CodeTaskRequest(task="Recover with current policy"))
+        await repository.claim(run.id, "old", lease_seconds=30)
+        clock.value += timedelta(seconds=31)
+        before = await service.run_repository.get_run(run.id)
+        snapshot = await repository.get_snapshot(run.id)
+        attempt = await repository.latest_attempt(run.id)
+        events = await service.run_repository.list_events(run.id)
+        if policy_changed:
+            app.state.config.code_task_tool_timeout_seconds = 19
+
+        candidate = await repository.get_recovery_candidate(run.id)
+        observation = await app.state.execution_worker.recovery_observation_factory(candidate)
+        automatic = classify_recovery(candidate.snapshot, candidate.operation, observation)
+        reason = "policy_mismatch" if policy_changed else "snapshot_resumable"
+        action = "reject" if policy_changed else "retry"
+        assert automatic.reason_code == reason
+        assert automatic.action == action
+
+        inspected = await service.recover(str(run.id), expected_version=before.version, action="inspect")
+        assert inspected == {"status": "running", "recovery_reason": reason, "recovery_action": action}
+        assert await service.run_repository.get_run(run.id) == before
+        assert await repository.latest_attempt(run.id) == attempt
+        assert await repository.get_snapshot(run.id) == snapshot
+        assert await service.run_repository.list_events(run.id) == events
+
+        result = await service.recover(str(run.id), expected_version=before.version, action="continue")
+        status = "running" if policy_changed else "queued"
+        assert result == {"status": status, "recovery_reason": reason}
+        assert (await service.run_repository.get_run(run.id)).status == status
+        expired = await repository.latest_attempt(run.id)
+        assert expired.status == "expired"
+        assert expired.attempt_no == attempt.attempt_no
+        if policy_changed:
+            assert await repository.get_snapshot(run.id) == snapshot
+            assert not any(event.event_type == "execution.recovered"
+                           for event in await service.run_repository.list_events(run.id))
 
 
 @pytest.mark.asyncio

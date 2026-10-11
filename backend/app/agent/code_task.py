@@ -139,8 +139,7 @@ class CodeTaskService:
             if str(exc) == "legacy_execution":
                 raise RecoveryConflict("legacy_snapshot") from exc
             raise
-        observation = RecoveryObservation(policy_digest=(candidate.snapshot or {}).get("policy_digest", ""),
-                                          executor_exited=False)
+        observation = self.recovery_observation(run)
         from app.execution.recovery import classify_recovery
         decision = classify_recovery(candidate.snapshot, candidate.operation, observation)
         if action == "inspect":
@@ -156,6 +155,17 @@ class CodeTaskService:
         if recovered.status == "waiting":
             return {"status": "waiting", "recovery_reason": decision.reason_code}
         return {"status": recovered.status, "recovery_reason": decision.reason_code}
+
+    def recovery_observation(self, run) -> RecoveryObservation:
+        """Observe the live policy for both manual and automatic recovery."""
+        from app.agent.code_execution import execution_config
+        from app.execution.ports import canonical_digest
+
+        _, _, policy = execution_config(self, run)
+        return RecoveryObservation(
+            policy_digest=canonical_digest(policy.model_dump(mode="json")),
+            executor_exited=False,
+        )
 
     def build_capability_profile(self, run) -> CodeTaskCapabilityProfile:
         if run is None:

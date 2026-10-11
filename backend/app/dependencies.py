@@ -41,9 +41,6 @@ from app.writing.service import WritingService
 from app.workspaces.service import WorkspaceService
 from app.execution.repository import ExecutionRepository
 from app.execution.worker import ExecutionWorker
-from app.execution.recovery import RecoveryObservation
-from app.execution.ports import canonical_digest
-from app.agent.code_execution import execution_config
 
 
 class UnconfiguredLLM:
@@ -200,11 +197,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
 
     async def observe_recovery(candidate):
         run = await run_repository.get_run(candidate.run_id)
-        _, _, policy = execution_config(code_task_service, run)
-        return RecoveryObservation(
-            policy_digest=canonical_digest(policy.model_dump(mode="json")),
-            executor_exited=False,
-        )
+        return code_task_service.recovery_observation(run)
 
     execution_worker = ExecutionWorker(
         code_task_service.execution_repository, execute_claimed,
