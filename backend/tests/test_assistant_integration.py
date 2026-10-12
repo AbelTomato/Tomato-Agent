@@ -4,12 +4,17 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from app.agent.models import LLMResponse, ToolCall
+from app.agent.models import LLMResponse
 from app.knowledge.ingestion import ingest_manifest
 from app.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import KnowledgeService
 from test_assistant_api import assistant_api, register, request
 from test_writing_full_flow import rag_database_path
+
+
+def decision(kind, payload):
+    return LLMResponse(kind="final", content=json.dumps(
+        {"protocol_version": 1, "type": kind, "payload": payload}))
 
 
 async def seed(app, database):
@@ -31,11 +36,11 @@ async def test_same_run_knowledge_project_and_checked_citations(tmp_path, rag_da
         assert citations
         workspace = await register(app, tmp_path)
         provider.responses = iter([
-            LLMResponse(kind="tool_call", tool_call=ToolCall(name="search_knowledge", arguments={"query": "SETEX"})),
-            LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_knowledge", arguments={"chunk_id": citations[0].chunk_id})),
-            LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_file", arguments={"path": "cache.py"})),
-            LLMResponse(kind="final", content=json.dumps({"answer": "SETEX gives the cache a TTL of 60.",
-                                                         "citation_ids": [citations[0].citation_id]})),
+            decision("call_tool", {"name": "search_knowledge", "contract_version": "1", "arguments": {"query": "SETEX"}}),
+            decision("call_tool", {"name": "read_knowledge", "contract_version": "1", "arguments": {"chunk_id": citations[0].chunk_id}}),
+            decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "cache.py"}}),
+            decision("finish", {"result": {"answer": "SETEX gives the cache a TTL of 60.",
+                "citations": [citations[0].model_dump(mode="json")]}}),
         ])
         created = await client.post(f"/api/sessions/{session}/tasks", json=request(workspace_id=workspace.workspace_id))
         assert created.status_code == 202
@@ -60,9 +65,11 @@ async def test_domain_answer_model_calls_share_ledger(tmp_path, rag_database_pat
         repo = await seed(app, rag_database_path)
         citation = (await KnowledgeService(repo).retrieve("SETEX")).citations[0]
         provider.responses = iter([
-            LLMResponse(kind="tool_call", tool_call=ToolCall(name="answer_knowledge", arguments={"query": "SETEX"})),
-            LLMResponse(kind="final", content=json.dumps({"answer": "SETEX sets an expiry.", "citation_ids": ["R1"], "evidence_status": "supported"})),
-            LLMResponse(kind="final", content=json.dumps({"answer": "SETEX sets an expiry.", "citation_ids": [citation.citation_id]})),
+            decision("call_tool", {"name": "answer_knowledge", "contract_version": "1", "arguments": {"query": "SETEX"}}),
+            LLMResponse(kind="final", content=json.dumps({"answer": "SETEX sets an expiry.",
+                "citation_ids": ["R1"], "evidence_status": "supported"})),
+            decision("finish", {"result": {"answer": "SETEX sets an expiry.",
+                "citations": [citation.model_dump(mode="json")]}}),
         ])
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
@@ -79,16 +86,18 @@ async def test_domain_answer_model_calls_share_ledger(tmp_path, rag_database_pat
     '{"answer":"tests passed","validation_status":"passed"}',
 ])
 async def test_unverified_final_result_is_failed(tmp_path, response):
-    async with assistant_api(tmp_path, [LLMResponse(kind="final", content=response)]) as (app, client, session, _):
+    payload = {"answer": "fake source", "citation_ids": ["invented"]} if "fake source" in response else {"answer": "tests passed", "validation_status": "passed"}
+    async with assistant_api(tmp_path, [decision("finish", {"result": payload})]) as (app, client, session, _):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
         final = (await client.get(f"/api/tasks/{run_id}")).json()
-        assert final["status"] == "failed" and final["result"] is None
+        assert final["status"] == "failed"
+        assert final["result"] is None or final["result"]["output"] is None
 
 
 async def test_clarification_resume_preserves_history_and_budget(tmp_path):
-    responses = [LLMResponse(kind="tool_call", tool_call=ToolCall(name="request_input", arguments={"message": "Which topic?"})),
-                 LLMResponse(kind="final", content="explained")]
+    responses = [decision("ask_user", {"question": "Which topic?"}),
+                 decision("finish", {"result": {"answer": "explained"}})]
     async with assistant_api(tmp_path, responses) as (app, client, session, provider):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
@@ -102,10 +111,12 @@ async def test_clarification_resume_preserves_history_and_budget(tmp_path):
         assert (await app.state.execution_repository.get_snapshot(run_id)).reserved_model_calls == 2
 
 
-@pytest.mark.parametrize("call", [ToolCall(name="write_file", arguments={"path": "a.py", "content": "evil"}),
-    ToolCall(name="search_knowledge", arguments={"query": "ok", "workspace_id": "injected"})])
+@pytest.mark.parametrize("call", [
+    {"name": "write_file", "contract_version": "1", "arguments": {"path": "a.py", "content": "evil"}},
+    {"name": "search_knowledge", "contract_version": "1", "arguments": {"query": "ok", "workspace_id": "injected"}},
+])
 async def test_wrong_tool_or_arguments_are_feedback_without_execution(tmp_path, call):
-    responses = [LLMResponse(kind="tool_call", tool_call=call), LLMResponse(kind="final", content="Cannot perform that operation.")]
+    responses = [decision("call_tool", call), decision("finish", {"result": {"answer": "Cannot perform that operation."}})]
     async with assistant_api(tmp_path, responses) as (app, client, session, provider):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
@@ -117,7 +128,7 @@ async def test_wrong_tool_or_arguments_are_feedback_without_execution(tmp_path, 
 async def test_assistant_startup_recovery_without_workspace(tmp_path):
     from datetime import datetime, timedelta, timezone
     from uuid import UUID
-    async with assistant_api(tmp_path, [LLMResponse(kind="final", content="recovered")]) as (app, client, session, _):
+    async with assistant_api(tmp_path, [decision("finish", {"result": {"answer": "recovered"}})]) as (app, client, session, _):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         repository = app.state.execution_repository
         await repository.claim(UUID(run_id), "crashed", lease_seconds=30)
@@ -133,9 +144,9 @@ async def test_assistant_startup_recovery_without_workspace(tmp_path):
 
 @pytest.mark.parametrize("next_tool", ["read_file", "list_files"])
 async def test_rejected_workspace_request_is_not_requested_again(tmp_path, next_tool):
-    call = LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_file", arguments={"path": "cache.py"}))
-    repeated = LLMResponse(kind="tool_call", tool_call=ToolCall(name=next_tool, arguments={"path": "cache.py"}))
-    async with assistant_api(tmp_path, [call, repeated, LLMResponse(kind="final", content="Will explain without accessing files.")]) as (app, client, session, provider):
+    call = decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "cache.py"}})
+    repeated = decision("call_tool", {"name": next_tool, "contract_version": "1", "arguments": {"path": "cache.py"}})
+    async with assistant_api(tmp_path, [call, repeated, decision("finish", {"result": {"answer": "Will explain without accessing files."}})]) as (app, client, session, provider):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
         waiting = (await client.get(f"/api/tasks/{run_id}")).json()
@@ -149,7 +160,7 @@ async def test_rejected_workspace_request_is_not_requested_again(tmp_path, next_
 
 
 async def test_cancel_waiting_assistant_cannot_resume(tmp_path):
-    response = LLMResponse(kind="tool_call", tool_call=ToolCall(name="request_input", arguments={"message": "Which topic?"}))
+    response = decision("ask_user", {"question": "Which topic?"})
     async with assistant_api(tmp_path, [response]) as (app, client, session, provider):
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()
@@ -170,9 +181,9 @@ async def test_invalid_domain_citations_are_feedback_not_published(tmp_path, rag
     async with assistant_api(tmp_path) as (app, client, session, provider):
         await seed(app, rag_database_path)
         provider.responses = iter([
-            LLMResponse(kind="tool_call", tool_call=ToolCall(name="answer_knowledge", arguments={"query": "SETEX"})),
-            LLMResponse(kind="final", content='{"answer":"fake","citation_ids":["invented"],"evidence_status":"supported"}'),
-            LLMResponse(kind="final", content="生成的引用未通过校验。"),
+            decision("call_tool", {"name": "answer_knowledge", "contract_version": "1", "arguments": {"query": "SETEX"}}),
+            LLMResponse(kind="final", content='{"protocol_version":1,"type":"finish","payload":{"result":{"answer":"fake","citations":[]}}}'),
+            decision("finish", {"result": {"answer": "生成的引用未通过校验。"}}),
         ])
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         assert await app.state.execution_worker.run_once()

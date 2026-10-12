@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+import json
 
 import httpx
 import pytest
 
-from app.agent.models import LLMResponse, ToolCall
+from app.agent.models import LLMResponse
 from test_application_lifecycle import make_app
 
 
@@ -16,6 +17,7 @@ class Provider:
     async def complete(self, messages, tools):
         self.calls += 1
         self.messages.append(messages)
+        assert tools == []
         return next(self.responses)
 
 
@@ -36,8 +38,13 @@ def request(**changes):
     return {"kind": "assistant", "message": "Explain the project", "client_request_id": "first", **changes}
 
 
+def decision(kind, payload):
+    return LLMResponse(kind="final", content=json.dumps(
+        {"protocol_version": 1, "type": kind, "payload": payload}))
+
+
 async def test_assistant_http_worker_replay_and_history(tmp_path):
-    async with assistant_api(tmp_path, [LLMResponse(kind="final", content="hello")]) as (app, client, session, provider):
+    async with assistant_api(tmp_path, [decision("finish", {"result": {"answer": "hello"}})]) as (app, client, session, provider):
         route = f"/api/sessions/{session}/tasks"
         response = await client.post(route, json=request())
         assert response.status_code == 202
@@ -72,9 +79,9 @@ async def register(app, tmp_path):
 
 
 async def test_workspace_wait_bind_once_resume_and_budget(tmp_path):
-    responses = [LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_file", arguments={"path": "cache.py"})),
-                 LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_file", arguments={"path": "cache.py"})),
-                 LLMResponse(kind="final", content="TTL is 60")]
+    responses = [decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "cache.py"}}),
+                 decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "cache.py"}}),
+                 decision("finish", {"result": {"answer": "TTL is 60"}})]
     async with assistant_api(tmp_path, responses) as (app, client, session, provider):
         workspace = await register(app, tmp_path)
         created = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()
@@ -121,7 +128,7 @@ async def test_submit_rejects_invalid_or_busy_workspace(tmp_path, workspace):
 async def test_binding_transaction_rejects_invalid_facts(tmp_path, failure):
     import aiosqlite
     from uuid import uuid4
-    responses = [LLMResponse(kind="tool_call", tool_call=ToolCall(name="read_file", arguments={"path": "cache.py"}))]
+    responses = [decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "cache.py"}})]
     async with assistant_api(tmp_path, responses) as (app, client, session, _):
         workspace = await register(app, tmp_path)
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
