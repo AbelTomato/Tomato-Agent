@@ -1,6 +1,10 @@
-from typing import Any, Literal
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from datetime import datetime
+from typing import Annotated, Any, Literal, Union
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from app.artifacts.models import ArtifactRef
 from app.knowledge.service import CitationSnapshot
@@ -16,6 +20,100 @@ FailureCategory = Literal[
 
 class AssistantModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+
+class MessageDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["message"]
+    payload: "MessagePayload"
+
+
+class MessagePayload(AssistantModel):
+    text: str = Field(min_length=1)
+
+
+class AskUserDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["ask_user"]
+    payload: "AskUserPayload"
+
+
+class AskUserPayload(AssistantModel):
+    question: str = Field(min_length=1)
+    choices: list[str] = Field(default_factory=list)
+    allow_free_text: Literal[True] = True
+
+
+class DiscoverToolsDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["discover_tools"]
+    payload: "DiscoverToolsPayload"
+
+
+class DiscoverToolsPayload(AssistantModel):
+    category: str | None = None
+    query: str | None = None
+
+
+class DescribeToolDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["describe_tool"]
+    payload: "DescribeToolPayload"
+
+
+class DescribeToolPayload(AssistantModel):
+    name: str = Field(min_length=1)
+
+
+class CallToolDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["call_tool"]
+    payload: "CallToolPayload"
+
+
+class CallToolPayload(AssistantModel):
+    name: str = Field(min_length=1)
+    contract_version: str = Field(min_length=1)
+    arguments: dict[str, Any]
+
+
+class FinishDecision(AssistantModel):
+    protocol_version: Literal[1] = 1
+    type: Literal["finish"]
+    payload: "FinishPayload"
+
+
+class FinishPayload(AssistantModel):
+    result: AssistantResult
+
+
+AssistantDecision = Annotated[
+    Union[
+        MessageDecision,
+        AskUserDecision,
+        DiscoverToolsDecision,
+        DescribeToolDecision,
+        CallToolDecision,
+        FinishDecision,
+    ],
+    Field(discriminator="type"),
+]
+
+
+class RuntimeEventDetail(AssistantModel):
+    data: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class RuntimeEvent(AssistantModel):
+    schema_version: Literal[1] = 1
+    event_id: UUID
+    run_id: UUID
+    step_id: str | None = Field(default=None, min_length=1)
+    invocation_id: str | None = Field(default=None, min_length=1)
+    event_type: str = Field(min_length=1)
+    occurred_at: datetime
+    summary: str = Field(min_length=1)
+    detail: RuntimeEventDetail
 
 
 class AssistantResult(AssistantModel):

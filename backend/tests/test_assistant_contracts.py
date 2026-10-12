@@ -18,6 +18,64 @@ def outline():
         "citation_ids": ["evidence-1"]}], "gaps": []}
 
 
+@pytest.mark.parametrize("decision", [
+    {"type": "message", "payload": {"text": "阶段总结"}},
+    {"type": "ask_user", "payload": {"question": "选择哪个？", "choices": ["A", "B"], "allow_free_text": True}},
+    {"type": "discover_tools", "payload": {"category": "project", "query": "读取"}},
+    {"type": "describe_tool", "payload": {"name": "project.read_file"}},
+    {"type": "call_tool", "payload": {"name": "project.read_file", "contract_version": "1", "arguments": {"path": "README.md"}}},
+    {"type": "finish", "payload": {"result": {"answer": "完成"}}},
+])
+def test_assistant_decisions_are_versioned_and_discriminated(decision):
+    from pydantic import TypeAdapter
+    from app.assistant.models import AssistantDecision
+
+    parsed = TypeAdapter(AssistantDecision).validate_python({"protocol_version": 1, **decision})
+    assert parsed.type == decision["type"]
+    assert parsed.protocol_version == 1
+
+
+@pytest.mark.parametrize("decision", [
+    {"protocol_version": 2, "type": "message", "payload": {"text": "x"}},
+    {"protocol_version": 1, "type": "message", "payload": {"text": "x", "run_id": "forged"}},
+    {"protocol_version": 1, "type": "message", "payload": {"text": "x"}, "run_id": "forged"},
+    {"protocol_version": 1, "type": "finish", "payload": {}},
+    {"protocol_version": 1, "type": "call_tool", "payload": {"name": "tool", "contract_version": "1"}},
+    {"protocol_version": 1, "type": "unknown", "payload": {}},
+])
+def test_assistant_decisions_reject_unknown_versions_extra_fields_and_invalid_payloads(decision):
+    from pydantic import TypeAdapter
+    from app.assistant.models import AssistantDecision
+
+    with pytest.raises(ValidationError):
+        TypeAdapter(AssistantDecision).validate_python(decision)
+
+
+def test_runtime_event_is_separate_versioned_and_strict():
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from app.assistant.models import RuntimeEvent
+
+    event = RuntimeEvent(event_id=uuid4(), run_id=uuid4(), step_id="step-1", invocation_id="call-1",
+        event_type="tool.started", occurred_at=datetime.now(timezone.utc), summary="工具已启动",
+        detail={"data": {"name": "project.read_file"}})
+    assert RuntimeEvent.model_validate_json(event.model_dump_json()) == event
+    with pytest.raises(ValidationError):
+        RuntimeEvent(**{**event.model_dump(), "schema_version": 2})
+    with pytest.raises(ValidationError):
+        RuntimeEvent(**{**event.model_dump(), "unexpected": True})
+    with pytest.raises(ValidationError):
+        RuntimeEvent(**event.model_dump(), type="message")
+
+
+def test_runtime_event_detail_rejects_untyped_values():
+    from app.assistant.models import RuntimeEventDetail
+
+    with pytest.raises(ValidationError):
+        RuntimeEventDetail(data={"run_id": object()})
+
+
 @pytest.mark.parametrize("workspace", [None, "registered-project"])
 def test_assistant_workspace_is_optional(workspace):
     request = UnifiedTaskRequest(kind="assistant", message="解释缓存失效",
