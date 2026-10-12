@@ -76,6 +76,13 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     return await result("waiting", "action_required")
                 if snapshot.phase == "ready_finish":
                     decision = harness._decision(snapshot.pending_decision)
+                    if decision.kind == "continue":
+                        if len(harness._text(decision.output)) > budget.max_response_chars:
+                            return await result("failed", "output exceeds response budget")
+                        snapshot = await self.save_snapshot(updated(phase="ready_model",
+                            logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1,
+                            pending_response=None, pending_decision=None))
+                        continue
                     if decision.kind == "wait":
                         action = decision.pending_action
                         if action.action_id in state.structured_state.get("rejected_actions", []):
@@ -97,6 +104,28 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     parameters = inspect.signature(strategy.decide).parameters
                     raw = strategy.decide(state, available, response) if len(parameters) >= 3 else strategy.decide(state, available)
                     decision = harness._decision(await asyncio.wait_for(raw, timeout=remaining) if inspect.isawaitable(raw) else raw)
+                    if decision.kind == "continue":
+                        if len(harness._text(decision.output)) > budget.max_response_chars:
+                            return await result("failed", "output exceeds response budget")
+                        output = harness._text(decision.output)
+                        payload = None
+                        try:
+                            payload = json.loads(output)
+                            if isinstance(payload, dict) and payload.get("type") in {"discover_tools", "describe_tool"}:
+                                output = json.dumps(strategy.resolve_capability_decision(payload, self.capabilities),
+                                                    ensure_ascii=False)
+                        except (TypeError, json.JSONDecodeError):
+                            pass
+                        messages.append(Message(role="assistant", content=(
+                            harness._text(decision.output) if not isinstance(payload, dict)
+                            or payload.get("type") not in {"discover_tools", "describe_tool"}
+                            else response.content or "")))
+                        messages.append(Message(role="user", content=json.dumps({
+                            "assistant_runtime_result": output}, ensure_ascii=False)))
+                        snapshot = await self.save_snapshot(updated(phase="ready_model",
+                            logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1,
+                            pending_response=None, pending_decision=None))
+                        continue
                     operation = None
                     calls = []
                     if decision.kind == "call_tool":
@@ -214,8 +243,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         "artifact_ids": list(dict.fromkeys([*snapshot.artifact_ids,
                             *(str(item.artifact_id) for item in outcome.result.artifacts)]))})
                 state = state.model_copy(update={"structured_state": dynamic, "step_index": state.step_index + 1})
-                messages.append(Message(role="tool", tool_call_id=snapshot.pending_response.tool_call.call_id,
-                    content=json.dumps(outcome.model_dump(mode="json"), ensure_ascii=False)))
+                messages.append(Message(role="user", content=json.dumps({
+                    "assistant_tool_result": outcome.model_dump(mode="json")}, ensure_ascii=False)))
                 if outcome.kind == "waiting":
                     return await wait(outcome.pending_action, unknown=outcome.error is not None)
                 if outcome.error:

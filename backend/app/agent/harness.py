@@ -27,7 +27,7 @@ from .models import LLMResponse, Message, ToolCall
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    kind: Literal["call_tool", "respond", "stop", "wait"]
+    kind: Literal["call_tool", "respond", "continue", "stop", "wait"]
     pending_action: PendingAction | None = None
     tool_name: str | None = None
     arguments: dict[str, Any] | None = None
@@ -39,6 +39,11 @@ class Decision(BaseModel):
             if self.pending_action is None or any(value is not None for value in
                     (self.tool_name, self.arguments, self.output, self.reason)):
                 raise ValueError("wait requires only a pending action")
+            return
+        if self.kind == "continue":
+            if self.output is None or any(value is not None for value in
+                    (self.pending_action, self.tool_name, self.arguments, self.reason)):
+                raise ValueError("continue requires only output")
             return
         if self.pending_action is not None:
             raise ValueError("pending action requires wait")

@@ -120,6 +120,23 @@ async def test_wait_persists_and_releases_owner(tmp_path):
     assert (await repo.latest_attempt(run.id)).status == "released"
 
 
+async def test_protocol_messages_continue_until_explicit_finish(tmp_path):
+    run, repo, port, registry, gateway, provider, _ = await fixture(tmp_path)
+    strategy = Strategy([
+        Decision(kind="continue", output="阶段消息一"),
+        Decision(kind="continue", output="阶段消息二"),
+        Decision(kind="respond", output={"answer": "完成"}),
+    ])
+
+    result = await run_harness(repo, run, port, registry, gateway, strategy)
+
+    assert result.status == "completed"
+    assert provider.calls == 3
+    saved = await repo.get_snapshot(run.id)
+    assert [message.content for message in saved.messages if message.role == "assistant"] == [
+        "阶段消息一", "阶段消息二", "next"]
+
+
 @pytest.mark.parametrize("category,status", [("ownership_lost", "failed"), ("internal_error", "failed")])
 async def test_terminal_failure_does_not_call_model_again(tmp_path, category, status):
     outcome = CapabilityOutcome(kind="failed", error=CapabilityError(category=category, code=category))
