@@ -24,11 +24,13 @@ class DockerSandboxExecutor:
     """Execute one registered command in a short-lived, restricted container."""
 
     def __init__(self, image: str, *, docker_binary: str = "docker",
-                 registered_targets: dict[str, dict[str, tuple[str, ...]]] | None = None) -> None:
+                 registered_targets: dict[str, dict[str, tuple[str, ...]]] | None = None,
+                 docker_host: str | None = None) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:\-]*@sha256:[0-9a-f]{64}", image):
             raise ValueError("image must be pinned with a sha256 digest")
         self.image = image
         self.docker_binary = docker_binary
+        self.docker_host = docker_host
         self.registered_targets = {
             str(Path(root).resolve()): {name: tuple(argv) for name, argv in targets.items()}
             for root, targets in (registered_targets or {}).items()
@@ -73,7 +75,7 @@ class DockerSandboxExecutor:
             raise ValueError("sandbox cwd is outside the capability profile")
 
         return [
-            self.docker_binary,
+            *self._docker_argv(),
             "run",
             "--rm",
             "--pull",
@@ -120,11 +122,11 @@ class DockerSandboxExecutor:
         ]
 
     async def execute(
-        self, request: SandboxRequest, profile: CapabilityProfile
+        self, request: SandboxRequest, profile: CapabilityProfile, *, container_name: str | None = None
     ) -> SandboxResult:
         try:
             validate_capability_profile(profile)
-            container_name = f"tomato-agent-{uuid4().hex}"
+            container_name = container_name or f"tomato-agent-{uuid4().hex}"
             command = self.build_run_argv(request, profile, container_name)
         except (AttributeError, TypeError, ValueError):
             return SandboxResult(status="rejected", error_code="invalid_request")
@@ -205,7 +207,7 @@ class DockerSandboxExecutor:
         cleanup = None
         try:
             cleanup = await asyncio.wait_for(asyncio.create_subprocess_exec(
-                self.docker_binary, "rm", "-f", name,
+                *self._docker_argv(), "rm", "-f", name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 env={"PATH": os.environ.get("PATH", "")},
@@ -218,3 +220,6 @@ class DockerSandboxExecutor:
                 with contextlib.suppress(OSError, asyncio.TimeoutError):
                     await asyncio.wait_for(cleanup.wait(), 5)
             return False
+
+    def _docker_argv(self):
+        return [self.docker_binary, *(["--host", self.docker_host] if self.docker_host else [])]

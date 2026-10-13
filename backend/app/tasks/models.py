@@ -31,6 +31,11 @@ class UnifiedTaskRequest(BaseModel):
                 raise ValueError("client_request_id cannot be blank")
             if self.workspace_id is not None and not self.workspace_id.strip():
                 raise ValueError("workspace_id cannot be blank")
+            if set(self.options) - {"allow_test_execution"}:
+                raise ValueError("unknown assistant options")
+            if "allow_test_execution" in self.options and type(self.options["allow_test_execution"]) is not bool:
+                raise ValueError("allow_test_execution must be boolean")
+            return self
         elif (self.kind == "code") != bool(self.workspace_id):
             raise ValueError("workspace is required only for code")
         if self.kind != "knowledge" and self.options:

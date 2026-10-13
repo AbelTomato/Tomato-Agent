@@ -17,6 +17,8 @@ class ToolContext(BaseModel):
     deadline: float | None = None
     cancel_event: Any = None
     lease: Any = None
+    invocation_id: str | None = None
+    step_id: str | None = None
     model_client: Any = None
     read_chunk_ids: set[str] = Field(default_factory=set)
     read_document_versions: set[str] = Field(default_factory=set)

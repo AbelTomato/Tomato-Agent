@@ -290,6 +290,7 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         client.context = {"remaining_seconds": timeout, "deadline": deadline, "cancel_event": self.cancel_event}
                         context = ToolContext(session_id=str(snapshot.session_id), run_id=str(snapshot.run_id),
                             workspace_id=self.workspace_id, profile=self.profile, lease=self.lease,
+                            invocation_id=str(operation.id), step_id=str(step.id),
                             remaining_seconds=timeout, deadline=deadline, cancel_event=self.cancel_event, model_client=client)
                         request = asyncio.create_task(tools.execute(operation.tool_name, operation.input_payload, context, timeout=timeout))
                         cancellation = asyncio.create_task(self.cancel_event.wait())
@@ -325,7 +326,7 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         business_version=0, action_type="recovery", allowed_actions=["cancel", "inspect_recovery"]), unknown=True)
                 if len(harness._text(tool_result.model_dump())) > policy.max_result_chars:
                     return await result("failed", "tool result exceeds result budget")
-                outcome = CapabilityOutcome.model_validate(tool_result.data)
+                outcome = CapabilityOutcome.model_validate_json(json.dumps(tool_result.data))
                 dynamic = dict(state.structured_state)
                 dynamic["capability_feedback"] = outcome.model_dump(mode="json")
                 if outcome.result:

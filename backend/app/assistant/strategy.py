@@ -29,7 +29,7 @@ class AssistantStrategy:
             raw = json.loads(llm_response.content)
         except (json.JSONDecodeError, TypeError) as exc:
             raise ValueError("invalid_assistant_protocol_json") from exc
-        decision = _DECISION_ADAPTER.validate_python(raw)
+        decision = _DECISION_ADAPTER.validate_json(llm_response.content)
         if isinstance(decision, MessageDecision):
             return Decision(kind="continue", output=decision.payload.text)
         if isinstance(decision, AskUserDecision):

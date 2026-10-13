@@ -32,6 +32,8 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
             await self._configure(db)
             await db.executescript(";".join(execution_migration()) + ";")
             await db.executescript(_RECOVERY_SCHEMA)
+            from app.execution.docker import DOCKER_EXECUTION_SCHEMA
+            await db.executescript(DOCKER_EXECUTION_SCHEMA)
             from app.runs.migrations import MODEL_CALL_SCHEMA
             await db.executescript(MODEL_CALL_SCHEMA)
             await db.execute("CREATE TABLE IF NOT EXISTS task_actions (run_id TEXT NOT NULL REFERENCES task_runs(id), "
@@ -1017,7 +1019,7 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     status = "succeeded" if outcome.success else "failed"
                     if snapshot.snapshot_type == "assistant":
                         from app.assistant.models import CapabilityOutcome
-                        observed = CapabilityOutcome.model_validate(outcome.result_payload["data"])
+                        observed = CapabilityOutcome.model_validate_json(json.dumps(outcome.result_payload["data"]))
                         if observed.error and observed.error.category == "unknown_side_effect":
                             status = "unknown"
                     digest = canonical_digest(outcome.result_payload)

@@ -13,6 +13,7 @@ from .model_gateway import RunModelGateway
 from .strategy import AssistantStrategy
 from .tools.knowledge import register_knowledge
 from .tools.project import register_project_reads
+from .tools.tests import register_tests
 
 
 INSTRUCTION = (
@@ -52,6 +53,7 @@ class AssistantService:
         self.registry = CapabilityRegistry()
         register_knowledge(self.registry, knowledge, mode=config.writing_retrieval_mode)
         register_project_reads(self.registry, workspaces, artifacts, runs)
+        register_tests(self.registry, workspaces, artifacts, runs, execution, config)
         self.budget = Budget(max_loops=config.runtime_max_loops, max_tool_calls=config.runtime_max_tool_calls,
             max_duration_seconds=config.runtime_max_duration_seconds, max_context_tokens=config.code_task_max_context_tokens,
             max_response_chars=config.code_task_max_response_chars)
@@ -61,7 +63,9 @@ class AssistantService:
         self.policy_digest = canonical_digest({"policy": self.policy.model_dump(mode="json"),
             "budget": self.budget.model_dump(mode="json"), "llm_timeout_seconds": config.llm_timeout_seconds,
             "capabilities": [self.registry.resolve(item.name).model_dump(mode="json") for item in self.registry.definitions()],
-            "workspace_allowed_roots": [str(path) for path in config.workspace_allowed_roots], "instruction": INSTRUCTION})
+            "workspace_allowed_roots": [str(path) for path in config.workspace_allowed_roots], "instruction": INSTRUCTION,
+            "docker_image": config.code_task_docker_image, "docker_binary": config.code_task_docker_binary,
+            "sandbox_backend": config.code_task_sandbox_backend})
 
     def validate_workspace(self, workspace_id):
         root = self.workspaces.root_path(workspace_id)
@@ -104,8 +108,12 @@ class AssistantService:
         profile = None
         if run.workspace_id:
             root = self.validate_workspace(run.workspace_id)
+            tests_allowed = (self.config.code_task_sandbox_backend == "docker"
+                and run.request.get("options", {}).get("allow_test_execution") is True)
             profile = CodeTaskCapabilityProfile(allowed_paths=(str(root),),
-                allowed_tools=frozenset({"list_files", "read_file", "search_files"}),
+                allowed_tools=frozenset({"list_files", "read_file", "search_files"}
+                    | ({"run_tests"} if tests_allowed else set())),
+                sandbox_backend="docker" if tests_allowed else "local",
                 timeout_seconds=self.policy.timeout_seconds, max_output_chars=self.policy.max_result_chars)
         port = AssistantExecutionPort(self.execution, lease, run.workspace_id, capabilities=self.registry, profile=profile)
         gateway = RunModelGateway(AssistantProtocolClient(self.llm), port, config_digest=config_digest,
@@ -120,3 +128,26 @@ class AssistantService:
                 and descriptor.constraints.get("safe_retry_after_not_executed") is True)
         return await self.execution.queue_assistant_action(run.id, request, workspace_validator=self.validate_workspace,
             recovery_validator=safe_retry)
+
+    async def verify_test_termination(self, run_id, invocation_id):
+        """Server-only evidence query; never grants workspace write authority."""
+        operation = await self.execution.get_operation(invocation_id)
+        if (operation.tool_name != "run_tests"
+                or operation.recovery_class != "sandbox" or self.config.code_task_sandbox_backend != "docker"):
+            return None
+        from app.execution.docker import DockerTerminationVerifier
+        return await DockerTerminationVerifier(self.execution, self.config.code_task_docker_binary)(run_id, invocation_id)
+
+    async def reconcile_test_quarantine(self, run_id, invocation_id):
+        """Reconcile only the registered read-only test operation after user resolution."""
+        import json
+        async def verifier(run, invocation):
+            operation = await self.execution.get_operation(invocation)
+            if (operation.tool_name != "run_tests" or operation.recovery_class != "sandbox"
+                    or self.config.code_task_sandbox_backend != "docker"):
+                return None
+            from app.execution.docker import DockerTerminationVerifier
+            evidence = await DockerTerminationVerifier(self.execution, self.config.code_task_docker_binary,
+                persist=False)(run, invocation)
+            return json.dumps(evidence) if evidence else None
+        return await self.execution.reconcile_effect_quarantine(run_id, invocation_id, termination_verifier=verifier)
