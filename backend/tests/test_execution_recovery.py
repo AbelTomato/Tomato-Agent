@@ -178,6 +178,15 @@ async def test_safe_recovery_requeues_and_fences_old_owner(tmp_path):
     new = await repository.claim(run.id, "new-owner", lease_seconds=30)
     assert new.fencing_token > lease.fencing_token
     assert new.attempt_id != lease.attempt_id
+    async with aiosqlite.connect(repository.path) as db:
+        window = await (await db.execute(
+            "SELECT owner_id, fencing_token, closed_at, close_reason "
+            "FROM execution_start_windows WHERE attempt_id=?",
+            (str(lease.attempt_id),))).fetchone()
+    assert window[0:2] == ("owner", lease.fencing_token)
+    assert window[2] is not None and window[3] == "owner_revoked"
+    events = await RunRepository(repository.path).list_events(run.id)
+    assert sum(event.event_type == "execution.owner_revoked" for event in events) == 1
     with pytest.raises(RuntimeError):
         await repository.commit_checkpoint(lease, {})
     assert (await repository.get_snapshot(run.id)).reserved_model_calls == 1

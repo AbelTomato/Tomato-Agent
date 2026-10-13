@@ -125,6 +125,11 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     (str(attempt_id), str(run_id), attempt_no, owner_id, token,
                      _dump_time(expires), _dump_time(now), _dump_time(now)),
                 )
+                await db.execute(
+                    "INSERT INTO execution_start_windows "
+                    "(attempt_id, run_id, owner_id, fencing_token, opened_at) VALUES (?, ?, ?, ?, ?)",
+                    (str(attempt_id), str(run_id), owner_id, token, _dump_time(now)),
+                )
                 await self._set_run_status(db, run_id, "running", now)
                 await db.execute("UPDATE task_run_checkpoints SET created_at=? WHERE run_id=? "
                     "AND json_extract(state,'$.snapshot_type')='assistant'", (_dump_time(now), str(run_id)))
@@ -240,6 +245,11 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     "WHERE run_id=? AND status='running'",
                     (_dump_time(now), str(run_id)),
                 )
+                await db.execute(
+                    "UPDATE execution_start_windows SET closed_at=?, close_reason='cancelled' "
+                    "WHERE run_id=? AND closed_at IS NULL",
+                    (_dump_time(now), str(run_id)),
+                )
                 await self._set_run_status(db, run_id, "cancelled", now)
                 await self._append_event(db, run_id, "execution.cancelled", {}, now)
                 await self._commit(db)
@@ -330,6 +340,11 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     "UPDATE execution_attempts SET status=?, finished_at=? WHERE id=?",
                     ("succeeded" if status == "completed" else "released" if status == "waiting" else "cancelled" if status == "cancelled" else "failed",
                      _dump_time(now), str(lease.attempt_id)),
+                )
+                await db.execute(
+                    "UPDATE execution_start_windows SET closed_at=?, close_reason=? "
+                    "WHERE attempt_id=? AND closed_at IS NULL",
+                    (_dump_time(now), status, str(lease.attempt_id)),
                 )
                 await db.execute(
                     "UPDATE execution_run_heads SET active_attempt_id=NULL WHERE run_id=?",
@@ -1167,6 +1182,15 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                                  (_dump_time(now), str(attempt_id)))
                 await db.execute("UPDATE execution_run_heads SET active_attempt_id=NULL WHERE run_id=?",
                                  (str(attempt.run_id),))
+                await db.execute(
+                    "UPDATE execution_start_windows SET closed_at=?, close_reason='owner_revoked' "
+                    "WHERE attempt_id=? AND closed_at IS NULL",
+                    (_dump_time(now), str(attempt_id)),
+                )
+                await self._append_event(db, attempt.run_id, "execution.owner_revoked", {
+                    "attempt_id": str(attempt_id), "fencing_token": head[0],
+                    "reason": "lease_expired",
+                }, now)
                 await self._append_event(db, attempt.run_id, "execution.expired",
                     {"attempt_id": str(attempt_id), "fencing_token": head[0]}, now)
                 candidate = await self._candidate(db, attempt.run_id)
@@ -1320,6 +1344,17 @@ CREATE TABLE IF NOT EXISTS execution_steps (
     status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, error_code TEXT, output_digest TEXT,
     UNIQUE(operation_id, execution_no)
 );
+CREATE TABLE IF NOT EXISTS execution_start_windows (
+    attempt_id TEXT PRIMARY KEY REFERENCES execution_attempts(id),
+    run_id TEXT NOT NULL REFERENCES task_runs(id),
+    owner_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    close_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_execution_start_windows_open
+    ON execution_start_windows(run_id, closed_at);
 CREATE INDEX IF NOT EXISTS idx_execution_operations_status ON execution_operations(run_id, status);
 CREATE INDEX IF NOT EXISTS idx_execution_steps_attempt ON execution_steps(attempt_id);
 INSERT OR IGNORE INTO execution_schema_migrations VALUES (1);
