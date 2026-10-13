@@ -70,6 +70,30 @@ async def test_disabled_assistant_does_not_create_run(tmp_path):
         assert await app.state.run_repository.list_for_session(session) == []
 
 
+async def test_message_events_use_existing_http_cursor_and_versioned_payload(tmp_path):
+    from app.assistant.models import RuntimeEvent
+
+    responses = [decision("message", {"text": "first"}), decision("message", {"text": "second"}),
+                 decision("finish", {"result": {"answer": "done"}})]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        response = await client.post(f"/api/sessions/{session}/tasks", json=request())
+        run_id = response.json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        page = (await client.get(f"/api/tasks/{run_id}/events")).json()
+        messages = [item for item in page["events"] if item["event_type"] == "assistant.message"]
+        assert [item["payload"]["detail"]["data"]["text"] for item in messages] == ["first", "second"]
+        for item in messages:
+            parsed = RuntimeEvent.model_validate_json(json.dumps(item["payload"]))
+            assert str(parsed.event_id) == item["id"]
+            with pytest.raises(ValueError):
+                RuntimeEvent.model_validate_json(json.dumps({**item["payload"], "schema_version": 2}))
+        next_page = (await client.get(f"/api/tasks/{run_id}/events",
+            params={"after": messages[0]["sequence"], "limit": 1})).json()
+        assert next_page["events"][0]["sequence"] > messages[0]["sequence"]
+        assert next_page["next_cursor"] == next_page["events"][0]["sequence"]
+        assert provider.calls == 3
+
+
 async def register(app, tmp_path):
     root = tmp_path / "project"
     root.mkdir()

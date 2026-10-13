@@ -1,4 +1,5 @@
 import json
+import asyncio
 from uuid import UUID
 
 import aiosqlite
@@ -134,3 +135,15 @@ def test_run_status_is_restricted():
         "timed_out",
     )
     assert RunRecord.model_fields["status"].annotation == RunStatus
+
+
+async def test_concurrent_event_append_allocates_unique_run_sequences(tmp_path):
+    repository = RunRepository(tmp_path / "runs.db")
+    await repository.init()
+    run = await repository.create_run("chat", {})
+    events = await asyncio.gather(*[
+        RunRepository(repository.path).append_event(run.id, "legacy.event", {"index": index})
+        for index in range(8)])
+    assert sorted(item.sequence for item in events) == list(range(1, 9))
+    rebuilt = RunRepository(repository.path)
+    assert [item.sequence for item in await rebuilt.list_events(run.id)] == list(range(1, 9))

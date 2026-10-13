@@ -1,4 +1,5 @@
 import json
+import asyncio
 from datetime import timedelta
 from uuid import uuid4
 
@@ -7,6 +8,10 @@ import pytest
 from app.execution import models
 from app.execution.recovery import RecoveryObservation, classify_recovery
 from app.execution.state_machine import StaleExecutionOwner
+from app.execution.repository import ExecutionRepository
+from app.execution.recovery import RecoveryConflict
+from app.runs.repository import RunRepository
+from app.assistant.models import RuntimeEvent
 from test_execution_recovery import setup_repository, snapshot, operation
 
 
@@ -124,3 +129,79 @@ asyncio.run(main())
     await repo.expire_and_classify(lease.attempt_id)
     assert (await repo.get_model_calls(run.id))[0]["status"] == "unknown"
     assert (await repo.get_snapshot(run.id)).elapsed_upper_bound_seconds >= 31
+
+
+async def test_message_events_restore_in_order_and_keep_legacy_history(tmp_path):
+    repo, run, lease, clock = await setup_repository(tmp_path)
+    runs = RunRepository(repo.path)
+    legacy = (await runs.list_events(run.id))[0]
+    snap = await repo.save_snapshot(lease, assistant_snapshot(run.id))
+    for text in ["first", "second"]:
+        snap = await repo.commit_assistant_message(lease, snap.model_copy(update={
+            "logical_index": snap.logical_index + 1}), text=text,
+            expected_logical_index=snap.logical_index)
+    rebuilt = ExecutionRepository(repo.path, clock=clock)
+    await rebuilt.init()
+    assert await rebuilt.get_snapshot(run.id) == snap
+    events = await RunRepository(repo.path).list_events(run.id)
+    assert events[0] == legacy
+    messages = [item for item in events if item.event_type == "assistant.message"]
+    assert [item.sequence for item in messages] == [events[-2].sequence, events[-1].sequence]
+    assert messages[1].sequence == messages[0].sequence + 1
+    for index, item in enumerate(messages):
+        event = RuntimeEvent.model_validate_json(json.dumps(item.payload))
+        assert event.event_id == item.id and event.run_id == run.id
+        assert event.occurred_at == item.created_at
+        assert event.step_id == f"decision-{index}"
+        assert event.invocation_id is None
+        assert event.detail.data == {"text": ["first", "second"][index]}
+    assert snap.last_event_sequence == messages[-1].sequence
+
+
+async def test_concurrent_message_commit_rejects_duplicate_decision(tmp_path):
+    repo, run, lease, clock = await setup_repository(tmp_path)
+    snap = await repo.save_snapshot(lease, assistant_snapshot(run.id))
+    next_snap = snap.model_copy(update={"logical_index": snap.logical_index + 1})
+    other = ExecutionRepository(repo.path, clock=clock)
+    results = await asyncio.gather(*[
+        instance.commit_assistant_message(lease, next_snap, text="once",
+            expected_logical_index=snap.logical_index)
+        for instance in [repo, other]], return_exceptions=True)
+    assert sum(isinstance(item, models.AssistantExecutionSnapshot) for item in results) == 1
+    assert sum(isinstance(item, RecoveryConflict) for item in results) == 1
+    with pytest.raises(RecoveryConflict):
+        await other.commit_assistant_message(lease, next_snap, text="once",
+            expected_logical_index=snap.logical_index)
+    assert len([event for event in await RunRepository(repo.path).list_events(run.id)
+                if event.event_type == "assistant.message"]) == 1
+
+
+async def test_message_commit_failure_rolls_back_event_and_snapshot(tmp_path, monkeypatch):
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    snap = await repo.save_snapshot(lease, assistant_snapshot(run.id))
+    before = await RunRepository(repo.path).list_events(run.id)
+
+    async def fail_commit(db):
+        raise RuntimeError("injected commit failure")
+
+    monkeypatch.setattr(repo, "_commit", fail_commit)
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        await repo.commit_assistant_message(lease, snap.model_copy(update={
+            "logical_index": snap.logical_index + 1}), text="not committed",
+            expected_logical_index=snap.logical_index)
+    assert await repo.get_snapshot(run.id) == snap
+    assert await RunRepository(repo.path).list_events(run.id) == before
+
+
+async def test_message_event_redacts_structured_sensitive_text(tmp_path):
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    snap = await repo.save_snapshot(lease, assistant_snapshot(run.id))
+    text = json.dumps({"token": "private", "nested": {"password": "private"}, "text": "safe"})
+    await repo.commit_assistant_message(lease, snap.model_copy(update={
+        "logical_index": snap.logical_index + 1}), text=text,
+        expected_logical_index=snap.logical_index)
+    events = await RunRepository(repo.path).list_events(run.id)
+    event = next(item for item in events if item.event_type == "assistant.message")
+    assert event.payload["summary"] == "阶段消息已提交"
+    assert json.loads(event.payload["detail"]["data"]["text"]) == {
+        "token": "[REDACTED]", "nested": {"password": "[REDACTED]"}, "text": "safe"}

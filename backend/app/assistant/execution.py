@@ -79,9 +79,13 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     if decision.kind == "continue":
                         if len(harness._text(decision.output)) > budget.max_response_chars:
                             return await result("failed", "output exceeds response budget")
-                        snapshot = await self.save_snapshot(updated(phase="ready_model",
+                        messages.append(Message(role="assistant", content=harness._text(decision.output)))
+                        messages.append(Message(role="user", content=json.dumps({
+                            "assistant_runtime_result": harness._text(decision.output)}, ensure_ascii=False)))
+                        snapshot = await self.repository.commit_assistant_message(self.lease, updated(phase="ready_model",
                             logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1,
-                            pending_response=None, pending_decision=None))
+                            pending_response=None, pending_decision=None), text=harness._text(decision.output),
+                            expected_logical_index=snapshot.logical_index)
                         continue
                     if decision.kind == "wait":
                         action = decision.pending_action
@@ -108,23 +112,24 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         if len(harness._text(decision.output)) > budget.max_response_chars:
                             return await result("failed", "output exceeds response budget")
                         output = harness._text(decision.output)
-                        payload = None
-                        try:
-                            payload = json.loads(output)
-                            if isinstance(payload, dict) and payload.get("type") in {"discover_tools", "describe_tool"}:
-                                output = json.dumps(strategy.resolve_capability_decision(payload, self.capabilities),
-                                                    ensure_ascii=False)
-                        except (TypeError, json.JSONDecodeError):
-                            pass
+                        payload = decision.output if isinstance(decision.output, dict) else None
+                        if payload is not None and payload.get("type") in {"discover_tools", "describe_tool"}:
+                            output = json.dumps(strategy.resolve_capability_decision(payload, self.capabilities),
+                                                ensure_ascii=False)
                         messages.append(Message(role="assistant", content=(
                             harness._text(decision.output) if not isinstance(payload, dict)
                             or payload.get("type") not in {"discover_tools", "describe_tool"}
                             else response.content or "")))
                         messages.append(Message(role="user", content=json.dumps({
                             "assistant_runtime_result": output}, ensure_ascii=False)))
-                        snapshot = await self.save_snapshot(updated(phase="ready_model",
+                        next_snapshot = updated(phase="ready_model",
                             logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1,
-                            pending_response=None, pending_decision=None))
+                            pending_response=None, pending_decision=None)
+                        if isinstance(decision.output, dict):
+                            snapshot = await self.save_snapshot(next_snapshot)
+                        else:
+                            snapshot = await self.repository.commit_assistant_message(self.lease, next_snapshot,
+                                text=harness._text(decision.output), expected_logical_index=snapshot.logical_index)
                         continue
                     operation = None
                     calls = []

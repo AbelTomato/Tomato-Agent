@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import aiosqlite
 
 from app.runs.models import RunRecord, RunRepositoryConflict
-from app.runs.repository import _RUN_COLUMNS, run_record_from_row
+from app.runs.repository import _RUN_COLUMNS, _json_safe, run_record_from_row
 from app.runs.state_machine import transition_run
 
 from .models import (AttemptRecord, LeaseHandle, PROTOCOL_VERSION, ExecutionSnapshot,
@@ -418,6 +418,14 @@ class ExecutionRepository:
     async def save_snapshot(self, lease: LeaseHandle, snapshot: ExecutionSnapshot):
         return await self._operation_transaction(lease, snapshot)
 
+    async def commit_assistant_message(self, lease, snapshot, *, text, expected_logical_index):
+        """Commit the visible message and its next checkpoint in one fenced transaction."""
+        if (snapshot.snapshot_type != "assistant" or snapshot.phase != "ready_model"
+                or snapshot.logical_index != expected_logical_index + 1):
+            raise RecoveryConflict("invalid_message_transition")
+        return await self._operation_transaction(lease, snapshot,
+            assistant_message=(expected_logical_index, text))
+
     async def get_model_calls(self, run_id):
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -756,7 +764,7 @@ class ExecutionRepository:
         return RecoveryOperation(**values)
 
     async def _operation_transaction(self, lease, snapshot, *, operation=None,
-                                     start=None, finish_step=None, event_type=None):
+                                     start=None, finish_step=None, event_type=None, assistant_message=None):
         if snapshot.run_id != lease.run_id:
             raise RecoveryConflict("snapshot_run_mismatch")
         now = self._aware_now()
@@ -771,10 +779,27 @@ class ExecutionRepository:
                         (str(lease.run_id),))).fetchone()
                     if current:
                         raw = json.loads(current[0])
+                        if assistant_message is not None and (
+                                raw.get("snapshot_type") != "assistant"
+                                or raw.get("logical_index") != assistant_message[0]
+                                or raw.get("checkpoint_revision") != snapshot.checkpoint_revision
+                                or raw.get("phase") not in {"ready_model", "ready_finish"}):
+                            raise RecoveryConflict("message_checkpoint_conflict")
                         snapshot = snapshot.model_copy(update={
                             "reserved_model_calls": max(snapshot.reserved_model_calls, raw.get("reserved_model_calls", 0)),
                             "elapsed_upper_bound_seconds": max(snapshot.elapsed_upper_bound_seconds,
                                 raw.get("elapsed_upper_bound_seconds", 0))})
+                    elif assistant_message is not None:
+                        raise RecoveryConflict("message_checkpoint_missing")
+                if assistant_message is not None:
+                    from app.assistant.models import RuntimeEvent, RuntimeEventDetail
+                    index, text = assistant_message
+                    event = RuntimeEvent(event_id=uuid4(), run_id=lease.run_id,
+                        step_id=f"decision-{index}", event_type="assistant.message", occurred_at=now,
+                        summary="阶段消息已提交",
+                        detail=RuntimeEventDetail(data={"text": _assistant_audit_text(text)}))
+                    await self._append_event(db, lease.run_id, event.event_type,
+                        event.model_dump(mode="json"), now, event_id=event.event_id)
                 if operation is not None:
                     digest = canonical_digest(operation.input_payload)
                     existing = await (await db.execute(
@@ -1041,12 +1066,14 @@ class ExecutionRepository:
         await db.execute("UPDATE task_runs SET status=?, version=version+1, updated_at=? WHERE id=?",
                          (status, _dump_time(now), str(run_id)))
 
-    async def _append_event(self, db, run_id: UUID, event_type: str, payload: dict[str, Any], now: datetime) -> None:
+    async def _append_event(self, db, run_id: UUID, event_type: str, payload: dict[str, Any], now: datetime,
+                            *, event_id=None) -> None:
         row = await (await db.execute(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_run_events WHERE run_id=?",
             (str(run_id),))).fetchone()
         await db.execute("INSERT INTO task_run_events (id, run_id, sequence, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                         (str(uuid4()), str(run_id), row[0], event_type, json.dumps(payload), _dump_time(now)))
+                         (str(event_id or uuid4()), str(run_id), row[0], event_type,
+                          json.dumps(_json_safe(payload)), _dump_time(now)))
 
     async def _configure(self, db) -> None:
         await db.execute("PRAGMA foreign_keys=ON")
@@ -1060,6 +1087,15 @@ class ExecutionRepository:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("clock must return timezone-aware datetime")
         return value.astimezone(timezone.utc)
+
+
+def _assistant_audit_text(text):
+    """Apply the existing keyed redaction policy to structured message text."""
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return text
+    return json.dumps(_json_safe(value), ensure_ascii=False)
 
 
 class _SystemClock:

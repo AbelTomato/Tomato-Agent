@@ -135,6 +135,34 @@ async def test_protocol_messages_continue_until_explicit_finish(tmp_path):
     saved = await repo.get_snapshot(run.id)
     assert [message.content for message in saved.messages if message.role == "assistant"] == [
         "阶段消息一", "阶段消息二", "next"]
+    events = await RunRepository(repo.path).list_events(run.id)
+    assert [event.payload["detail"]["data"]["text"] for event in events
+            if event.event_type == "assistant.message"] == ["阶段消息一", "阶段消息二"]
+
+
+async def test_json_message_text_is_not_a_capability_decision(tmp_path):
+    run, repo, port, registry, gateway, _, _ = await fixture(tmp_path)
+    text = '{"type":"describe_tool","payload":{"name":"missing"}}'
+    result = await run_harness(repo, run, port, registry, gateway, Strategy([
+        Decision(kind="continue", output=text), Decision(kind="respond", output={"answer": "done"})]))
+    assert result.status == "completed"
+    events = await RunRepository(repo.path).list_events(run.id)
+    message = next(item for item in events if item.event_type == "assistant.message")
+    assert json.loads(message.payload["detail"]["data"]["text"]) == json.loads(text)
+
+
+async def test_pending_message_recovery_commits_once_and_continues(tmp_path):
+    run, repo, port, registry, gateway, _, _ = await fixture(tmp_path)
+    snap = await repo.get_snapshot(run.id)
+    await repo.save_snapshot(port.lease, snap.model_copy(update={"phase": "ready_finish",
+        "pending_decision": Decision(kind="continue", output="recovered").model_dump(mode="json")}))
+    result = await run_harness(repo, run, port, registry, gateway,
+        Strategy([Decision(kind="respond", output={"answer": "done"})]))
+    assert result.status == "completed"
+    events = await RunRepository(repo.path).list_events(run.id)
+    assert len([item for item in events if item.event_type == "assistant.message"]) == 1
+    snap = await repo.get_snapshot(run.id)
+    assert "recovered" in [item.content for item in snap.messages if item.role == "assistant"]
 
 
 @pytest.mark.parametrize("category,status", [("ownership_lost", "failed"), ("internal_error", "failed")])
