@@ -42,7 +42,12 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                 "message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested', UNIQUE(run_id,client_request_id))")
             await db.execute("CREATE TABLE IF NOT EXISTS assistant_effect_settlements ("
                 "invocation_id TEXT PRIMARY KEY REFERENCES execution_operations(id), resolution TEXT NOT NULL, "
-                "quarantined INTEGER NOT NULL DEFAULT 1, termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0)")
+                "quarantined INTEGER NOT NULL DEFAULT 1, termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0, "
+                "risk_accepted INTEGER NOT NULL DEFAULT 0)")
+            settlement_columns = {row[1] for row in await (await db.execute(
+                "PRAGMA table_info(assistant_effect_settlements)")).fetchall()}
+            if "risk_accepted" not in settlement_columns:
+                await db.execute("ALTER TABLE assistant_effect_settlements ADD COLUMN risk_accepted INTEGER NOT NULL DEFAULT 0")
             await db.commit()
 
     async def claim_next(self, owner_id: str, *, lease_seconds: int) -> tuple[RunRecord, LeaseHandle] | None:
@@ -632,7 +637,8 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
                     "AND (o.status='running' OR (o.status='unknown' AND NOT EXISTS "
                     "(SELECT 1 FROM assistant_effect_settlements s WHERE s.invocation_id=o.id "
-                    "AND s.quarantined=0 AND s.conflict=0 AND s.termination_evidence IS NOT NULL)))", (workspace_id,))).fetchone():
+                    "AND s.conflict=0 AND (s.risk_accepted=1 OR "
+                    "(s.quarantined=0 AND s.termination_evidence IS NOT NULL)))))", (workspace_id,))).fetchone():
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
                 await db.execute("UPDATE task_runs SET workspace_id=? WHERE id=?", (workspace_id, str(run_id)))
             if request.action == "approve_action":
@@ -692,23 +698,30 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
         """Append user observations; preserve the original unknown operation and Step."""
         from app.agent.models import Message
         resolution = request.payload["resolution"]
+        accept_risk = request.payload.get("accept_risk", False)
         invocation_id = pending.frozen_parameters.get("invocation_id")
         op = await (await db.execute("SELECT status,tool_name FROM execution_operations WHERE id=? AND run_id=?",
             (invocation_id, str(snapshot.run_id)))).fetchone()
+        existing_settlement = await (await db.execute(
+            "SELECT conflict FROM assistant_effect_settlements WHERE invocation_id=?", (invocation_id,))).fetchone()
         if (pending.action_type != "recovery" or invocation_id != str(snapshot.pending_operation_id)
-                or not op or op[0] != "unknown"):
+                or not op or op[0] != "unknown" or (accept_risk and resolution == "unknown")
+                or (accept_risk and existing_settlement and existing_settlement[0])):
             raise RunRepositoryConflict("action_not_allowed")
         await self._assistant_recovery_event(db, snapshot.run_id, "tool.reconciled", now,
             {"resolution": resolution, "observation_scope": "user_reported", "action_id": pending.action_id}, invocation_id)
-        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?) "
-            "ON CONFLICT(invocation_id) DO UPDATE SET resolution=excluded.resolution,quarantined=1",
-            (invocation_id, resolution))
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution,risk_accepted) VALUES (?,?,?) "
+            "ON CONFLICT(invocation_id) DO UPDATE SET resolution=excluded.resolution,quarantined=1, "
+            "risk_accepted=excluded.risk_accepted", (invocation_id, resolution, int(accept_risk)))
         if resolution != "unknown":
             await self._assistant_recovery_event(db, snapshot.run_id, "tool.settled", now,
-                {"resolution": resolution, "quarantined": True, "basis": "user_reported"}, invocation_id)
+                {"resolution": resolution, "quarantined": True, "risk_accepted": accept_risk,
+                 "basis": "user_reported"}, invocation_id)
         state = dict(snapshot.harness_state)
         dynamic = dict(state.get("structured_state", {}))
         dynamic["side_effect_resolutions"] = {**dynamic.get("side_effect_resolutions", {}), invocation_id: resolution}
+        if accept_risk:
+            dynamic["side_effect_risk_accepted"] = {**dynamic.get("side_effect_risk_accepted", {}), invocation_id: True}
         dynamic["action_feedback"] = {"action": request.action, "payload": request.payload, "invocation_id": invocation_id}
         state["structured_state"] = dynamic
         waiting = resolution == "unknown"
@@ -752,6 +765,11 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
             "AND recovery_class != 'read_only' AND status='unknown'", (str(run_id),))).fetchall()
         if any(resolved.get(op[0]) not in {"executed", "not_executed"} for op in operations):
             raise RecoveryConflict("unknown_side_effect")
+        for op in operations:
+            settlement = await (await db.execute(
+                "SELECT conflict FROM assistant_effect_settlements WHERE invocation_id=?", (op[0],))).fetchone()
+            if settlement and settlement[0]:
+                raise RecoveryConflict("unknown_side_effect")
         if not for_model:
             retry = state.get("harness_state", {}).get("structured_state", {}).get("retry_invocation_id")
             for op in operations:
@@ -759,7 +777,9 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     continue
                 settled = await (await db.execute("SELECT quarantined,conflict FROM assistant_effect_settlements "
                     "WHERE invocation_id=?", (op[0],))).fetchone()
-                if not settled or settled[0] or settled[1]:
+                risk_accepted = await (await db.execute(
+                    "SELECT risk_accepted FROM assistant_effect_settlements WHERE invocation_id=?", (op[0],))).fetchone()
+                if not settled or (settled[0] and not risk_accepted[0]):
                     raise RecoveryConflict("unknown_side_effect")
 
     async def record_assistant_late_result(self, lease, step_id, outcome):

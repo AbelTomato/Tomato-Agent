@@ -60,6 +60,23 @@ test('验证失败、不可用和缺少事实有独立展示', () => {
   }
 });
 
+test('未知副作用核查提供独立分支，风险继续必须显式确认且不声称终止', () => {
+  const calls = [];
+  const task = { ...base, capabilities: ['resolve_side_effect'], pending_action: {
+    ...base.pending_action, action_type: 'recovery', allowed_actions: ['resolve_side_effect'],
+    target_capability: 'write_file', display_data: {},
+  } };
+  const html = renderToStaticMarkup(PendingActionPanel({ task, busy: false, workspaces: [],
+    onAction: (...args) => calls.push(args) }));
+  assert.match(html, /确认已执行/);
+  assert.match(html, /确认未执行/);
+  assert.match(html, /仍无法确认/);
+  assert.match(html, /不代表旧操作已终止/);
+  assert.match(html, /我接受旧操作仍可能产生影响/);
+  assert.match(html, /确认已执行并继续/);
+  assert.match(html, /disabled=""/);
+});
+
 test('工作区绑定和拒绝只发送服务端允许的版本动作，未选择和不可用项目禁止绑定', async () => {
   slots = [];
   const calls = [];

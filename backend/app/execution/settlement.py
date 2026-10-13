@@ -8,11 +8,11 @@ class AssistantSettlementRepository:
     async def list_effect_settlements(self, run_id):
         async with aiosqlite.connect(self.path) as db:
             rows = await (await db.execute("SELECT s.invocation_id,s.resolution,s.quarantined,"
-                "s.termination_evidence,s.conflict FROM assistant_effect_settlements s "
+                "s.termination_evidence,s.conflict,s.risk_accepted FROM assistant_effect_settlements s "
                 "JOIN execution_operations o ON o.id=s.invocation_id WHERE o.run_id=?",
                 (str(run_id),))).fetchall()
         return [{"invocation_id": row[0], "resolution": row[1], "quarantined": bool(row[2]),
-            "termination_evidence": row[3], "conflict": bool(row[4])} for row in rows]
+            "termination_evidence": row[3], "conflict": bool(row[4]), "risk_accepted": bool(row[5])} for row in rows]
 
     async def reconcile_effect_quarantine(self, run_id, invocation_id, *, termination_verifier=None):
         """Only a server-owned verifier may attest stopped/revoked write authority.

@@ -281,7 +281,7 @@ export function loadCodeTaskArtifact(runId: string, artifactId: string, signal?:
 }
 
 export type TaskKind = 'assistant' | 'chat' | 'knowledge' | 'writing' | 'code';
-export type TaskAction = 'provide_input' | 'approve_action' | 'reject_action' | 'bind_workspace' | 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery';
+export type TaskAction = 'provide_input' | 'approve_action' | 'reject_action' | 'bind_workspace' | 'cancel' | 'confirm_outline' | 'save_draft' | 'inspect_recovery' | 'continue_recovery' | 'resolve_side_effect';
 export type TaskRecoveryObservation = {
   version: number; reason: string;
   action: 'reuse' | 'retry' | 'reconcile' | 'manual_review' | 'reject';

@@ -66,9 +66,14 @@ class TaskActionRequest(BaseModel):
             if set(self.payload) != {"confirmed"} or type(self.payload["confirmed"]) is not bool:
                 raise ValueError("confirmed boolean required")
         elif self.action == "resolve_side_effect":
-            if (set(self.payload) != {"resolution"} or not isinstance(self.payload["resolution"], str)
+            if (not {"resolution"} <= set(self.payload) or set(self.payload) - {"resolution", "accept_risk"}
+                    or not isinstance(self.payload["resolution"], str)
                     or self.payload["resolution"] not in {"executed", "not_executed", "unknown"}):
                 raise ValueError("side effect resolution required")
+            if "accept_risk" in self.payload and type(self.payload["accept_risk"]) is not bool:
+                raise ValueError("accept_risk must be boolean")
+            if self.payload.get("accept_risk") and self.payload["resolution"] == "unknown":
+                raise ValueError("unknown effect cannot be risk-accepted")
         elif self.action == "provide_input":
             if (len(self.payload) != 1 or not set(self.payload) <= {"message", "choice"}
                     or not isinstance(next(iter(self.payload.values())), str)

@@ -94,7 +94,11 @@ class RunRepository(SessionQueueRepository):
             await migrate_unified_runs(db)
             await db.execute("CREATE TABLE IF NOT EXISTS assistant_effect_settlements ("
                 "invocation_id TEXT PRIMARY KEY, resolution TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 1, "
-                "termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0)")
+                "termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0, risk_accepted INTEGER NOT NULL DEFAULT 0)")
+            settlement_columns = {row[1] for row in await (await db.execute(
+                "PRAGMA table_info(assistant_effect_settlements)")).fetchall()}
+            if "risk_accepted" not in settlement_columns:
+                await db.execute("ALTER TABLE assistant_effect_settlements ADD COLUMN risk_accepted INTEGER NOT NULL DEFAULT 0")
             await db.commit()
 
     async def create_run(
@@ -205,7 +209,8 @@ class RunRepository(SessionQueueRepository):
                     "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
                     "AND (o.status='running' OR (o.status='unknown' AND NOT EXISTS "
                     "(SELECT 1 FROM assistant_effect_settlements s WHERE s.invocation_id=o.id "
-                    "AND s.quarantined=0 AND s.conflict=0 AND s.termination_evidence IS NOT NULL)))", (workspace_id,),
+                    "AND s.conflict=0 AND (s.risk_accepted=1 OR "
+                    "(s.quarantined=0 AND s.termination_evidence IS NOT NULL)))))", (workspace_id,),
                 )).fetchone():
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
             run_id, timestamp = uuid4(), _now()

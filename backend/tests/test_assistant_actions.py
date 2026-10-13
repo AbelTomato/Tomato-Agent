@@ -231,6 +231,45 @@ async def test_settlement_without_termination_evidence_keeps_quarantine(tmp_path
         await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verified)
 
 
+async def test_user_risk_acceptance_allows_new_run_without_claiming_termination(tmp_path):
+    import aiosqlite
+    from app.runs.repository import RunRepository
+    from app.sessions.repository import SessionRepository
+    from app.agent.harness import Decision
+    from test_assistant_harness import Strategy, run_harness
+    run, repo, port, registry, gateway, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "executed", "accept_risk": True},
+        expected_version=current.version, client_request_id="accept-risk"))
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection == {"invocation_id": str(invocation), "resolution": "executed", "quarantined": True,
+        "termination_evidence": None, "conflict": False, "risk_accepted": True}
+    async with aiosqlite.connect(repo.path) as db:
+        accepted = await db.execute_fetchall("SELECT risk_accepted,quarantined,termination_evidence "
+            "FROM assistant_effect_settlements WHERE invocation_id=?", (str(invocation),))
+    assert accepted == [(1, 1, None)]
+    await repo.assert_assistant_effect_allowed(run.id)
+    with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+        await repo.reconcile_effect_quarantine(run.id, invocation)
+    lease = await repo.claim(run.id, "risk-accepted-owner", lease_seconds=30)
+    port.lease = lease
+    result = await run_harness(repo, run, port, registry, gateway,
+        Strategy([Decision(kind="respond", output="continued")]))
+    assert result.status == "completed"
+    runs = RunRepository(repo.path)
+    await runs.init()
+    sessions = SessionRepository(repo.path)
+    await sessions.init()
+    session_id = await sessions.create_session()
+    new_run = await runs.create_session_run(session_id, "assistant", {"message": "continue"},
+        workspace_id="workspace-1",
+        client_request_id="risk-accepted-run")
+    assert new_run.status == "queued"
+
+
 async def test_late_success_conflicts_with_not_executed_report_and_retains_lock(tmp_path):
     import aiosqlite
     from app.execution.models import StepOutcome
@@ -247,6 +286,28 @@ async def test_late_success_conflicts_with_not_executed_report_and_retains_lock(
     await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={}))
     projection = (await repo.list_effect_settlements(run.id))[0]
     assert projection["resolution"] == "not_executed" and projection["conflict"] and projection["quarantined"]
+    with pytest.raises(RunRepositoryConflict, match="effect_unresolved"):
+        await repo.reconcile_effect_quarantine(run.id, invocation)
+
+
+async def test_risk_acceptance_is_rejected_after_late_conflict(tmp_path):
+    import aiosqlite
+    from app.execution.models import StepOutcome
+    from app.execution.recovery import RecoveryConflict
+    run, repo, port, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    await repo.queue_assistant_action(run.id, TaskActionRequest(action_id=current.pending_action.action_id,
+        action="resolve_side_effect", payload={"resolution": "not_executed"},
+        expected_version=current.version, client_request_id="record-report"))
+    await repo.request_cancel(run.id)
+    async with aiosqlite.connect(repo.path) as db:
+        step = (await db.execute_fetchall("SELECT id FROM execution_steps WHERE operation_id=?", (str(invocation),)))[0][0]
+    await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={}))
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["conflict"] and projection["quarantined"] and not projection["risk_accepted"]
+    with pytest.raises(RecoveryConflict, match="unknown_side_effect"):
+        await repo.assert_assistant_effect_allowed(run.id)
     with pytest.raises(RunRepositoryConflict, match="effect_unresolved"):
         await repo.reconcile_effect_quarantine(run.id, invocation)
 
