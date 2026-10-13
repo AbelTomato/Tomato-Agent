@@ -12,6 +12,8 @@ logs/
 *.egg-info/
 *.tsbuildinfo
 .clinerules
+.cline/
+openspec/
 
 # Keep non-secret configuration templates visible in version control.
 !.env.example
