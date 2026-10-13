@@ -135,6 +135,8 @@ class CapabilityDescriptor(AssistantModel):
 
     name: str = Field(min_length=1)
     parameters: dict[str, Any]
+    contract_version: str = Field(default="1", min_length=1)
+    category: str = Field(default="general", min_length=1)
     requires_workspace: bool
     side_effect: Literal["read_only", "file_write", "artifact", "sandbox", "domain_publication"]
     recovery_class: Literal["read_only", "file_write", "artifact", "sandbox", "domain_publication"]

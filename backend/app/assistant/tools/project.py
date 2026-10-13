@@ -6,6 +6,8 @@ from app.agent.models import ToolDefinition
 from app.assistant.models import AssistantResult, CapabilityDescriptor, CapabilityError, CapabilityOutcome
 from app.tools.base import ToolResult
 from app.tools.code_workspace import CodeWorkspaceTool, DirectoryArguments, FileArguments, SearchArguments
+from app.agent.policies import CodeTaskCapabilityProfile
+from app.workspaces.service import WorkspacePathError
 
 
 class ClarificationInput(BaseModel):
@@ -22,9 +24,10 @@ class RequestInput:
                               parameters=self.input_model.model_json_schema())
 
 
-def register_read_only(registry, tool, *, workspace=False):
+def register_read_only(registry, tool, *, workspace=False, category="general"):
     registry.register(tool, CapabilityDescriptor(name=tool.name, parameters=tool.definition().parameters,
-        requires_workspace=workspace, side_effect="read_only", recovery_class="read_only", available=True))
+        requires_workspace=workspace, side_effect="read_only", recovery_class="read_only", available=True,
+        category=category))
 
 
 class ProjectRead:
@@ -35,6 +38,21 @@ class ProjectRead:
 
     def definition(self):
         return self.tool.definition()
+
+    async def preflight(self, arguments, context):
+        try:
+            if not isinstance(context.profile, CodeTaskCapabilityProfile):
+                raise PermissionError
+            profile = CodeTaskCapabilityProfile.model_validate(context.profile.model_dump())
+            if not context.workspace_id or self.name not in profile.allowed_tools:
+                raise PermissionError
+            run = await self.tool.runs.get_run(context.run_id)
+            if run is None or run.workspace_id != context.workspace_id:
+                raise PermissionError
+            self.tool._authorize_path(context, "")
+            self.tool._authorize_path(context, arguments.get("path", ""))
+        except (PermissionError, WorkspacePathError, KeyError):
+            raise PermissionError("permission_denied") from None
 
     async def execute(self, arguments, context):
         result = await self.tool.execute(arguments, context)
@@ -51,5 +69,5 @@ class ProjectRead:
 def register_project_reads(registry, workspaces, artifacts, runs):
     for name, model in (("list_files", DirectoryArguments), ("read_file", FileArguments), ("search_files", SearchArguments)):
         register_read_only(registry, ProjectRead(CodeWorkspaceTool(name, model, workspaces, artifacts, runs,
-                          persist_events=False)), workspace=True)
+                          persist_events=False)), workspace=True, category="project")
     register_read_only(registry, RequestInput())

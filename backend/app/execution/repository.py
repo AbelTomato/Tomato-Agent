@@ -840,6 +840,9 @@ class ExecutionRepository:
                     await db.execute("UPDATE execution_operations SET status='running' WHERE id=?", (str(operation_id),))
                     payload.update(operation_id=str(operation_id), step_id=str(step_id))
                     event_type = "step.started"
+                    if snapshot.snapshot_type == "assistant":
+                        await self._append_assistant_tool_event(db, lease.run_id, operation_id,
+                            step_id, "tool.started", now)
                 if finish_step:
                     step_id, outcome = finish_step
                     row = await (await db.execute(
@@ -851,6 +854,11 @@ class ExecutionRepository:
                     if row[1] != "running" or row[2] != str(lease.attempt_id):
                         raise RecoveryConflict("invalid_transition")
                     status = "succeeded" if outcome.success else "failed"
+                    if snapshot.snapshot_type == "assistant":
+                        from app.assistant.models import CapabilityOutcome
+                        observed = CapabilityOutcome.model_validate(outcome.result_payload["data"])
+                        if observed.error and observed.error.category == "unknown_side_effect":
+                            status = "unknown"
                     digest = canonical_digest(outcome.result_payload)
                     await db.execute("UPDATE execution_steps SET status=?, finished_at=?, output_digest=? WHERE id=?",
                                      (status, _dump_time(now), digest, str(step_id)))
@@ -858,6 +866,12 @@ class ExecutionRepository:
                                      (status, json.dumps(outcome.result_payload), digest, row[0]))
                     payload.update(operation_id=row[0], step_id=str(step_id))
                     event_type = "step." + status
+                    if snapshot.snapshot_type == "assistant":
+                        tool_status = ("unknown" if observed.error and observed.error.category == "unknown_side_effect"
+                            else "waiting" if observed.kind == "waiting"
+                            else "succeeded" if observed.kind == "result" else "failed")
+                        await self._append_assistant_tool_event(db, lease.run_id, row[0],
+                            step_id, "tool." + tool_status, now, observed=observed)
                 if event_type:
                     await self._append_event(db, lease.run_id, event_type, payload, now)
                 row = await (await db.execute("SELECT state, sequence FROM task_run_checkpoints WHERE run_id=?",
@@ -874,6 +888,22 @@ class ExecutionRepository:
             except BaseException:
                 await db.rollback()
                 raise
+
+    async def _append_assistant_tool_event(self, db, run_id, operation_id, step_id, event_type, now, *, observed=None):
+        from app.assistant.models import RuntimeEvent, RuntimeEventDetail
+        row = await (await db.execute("SELECT tool_name FROM execution_operations WHERE id=? AND run_id=?",
+            (str(operation_id), str(run_id)))).fetchone()
+        details = {"tool_name": row[0], "observation_scope": "runtime_local"}
+        if observed is not None and observed.error is not None:
+            details["category"] = observed.error.category
+        summaries = {"tool.started": "工具已进入执行", "tool.succeeded": "工具返回成功结果",
+            "tool.failed": "工具返回失败结果", "tool.waiting": "工具请求等待",
+            "tool.unknown": "工具副作用结果无法确认"}
+        event = RuntimeEvent(event_id=uuid4(), run_id=run_id, step_id=str(step_id),
+            invocation_id=str(operation_id), event_type=event_type, occurred_at=now,
+            summary=summaries[event_type], detail=RuntimeEventDetail(data=details))
+        await self._append_event(db, run_id, event_type, event.model_dump(mode="json"), now,
+            event_id=event.event_id)
 
     async def scan_expired(self, limit: int) -> list[AttemptRecord]:
         """Find expired leases and committed expirations awaiting a recovery decision."""
@@ -959,6 +989,14 @@ class ExecutionRepository:
                     await db.execute("UPDATE execution_model_calls SET status='unknown',finished_at=? "
                         "WHERE lease_attempt_id=? AND status='reserved'", (_dump_time(now), str(attempt_id)))
                 await self._settle_assistant_time(db, attempt.run_id, now, minimum=calls[0])
+                checkpoint = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?",
+                    (str(attempt.run_id),))).fetchone()
+                if checkpoint and json.loads(checkpoint[0]).get("snapshot_type") == "assistant":
+                    running = await (await db.execute("SELECT id, operation_id FROM execution_steps "
+                        "WHERE attempt_id=? AND status='running'", (str(attempt_id),))).fetchall()
+                    for step_id, operation_id in running:
+                        await self._append_assistant_tool_event(db, attempt.run_id, operation_id,
+                            step_id, "tool.unknown", now)
                 await db.execute("UPDATE execution_operations SET status='unknown' WHERE status='running' "
                                  "AND id IN (SELECT operation_id FROM execution_steps WHERE attempt_id=? AND status='running')",
                                  (str(attempt_id),))

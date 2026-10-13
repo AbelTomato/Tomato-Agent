@@ -66,7 +66,7 @@ pnpm dev
 
 ## 文档导航
 
-2026-10-13 Runtime 决策与事件协议计划任务 1～3 已完成工程验收。阶段消息以 `assistant.message` 追加到既有 RunEvent，payload 为 RuntimeEvent v1（身份、时间、`decision-N` 关联、固定摘要和筛选后的 `detail.data.text`）；事件与检查点原子提交，重复提交冲突不会新增消息。既有 `GET /api/tasks/{run_id}/events?after=...&limit=...` 返回有序事件及 `next_cursor`，外层响应和旧事件保持兼容。任务 3 持久化/Harness/API/执行恢复 100 项、契约/策略/集成补充 95 项通过。助手顶层严格解析协议 v1 JSON，知识领域子调用继续旧契约；工具状态事件、完整回答形式校验和真实 Provider 资格验收仍待后续，当前不提供实时事件 UI，详见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。
+2026-10-13 Runtime 决策与事件协议计划任务 1～4 已完成工程验收。阶段消息以 `assistant.message` 追加到既有 RunEvent；工具目录提供版本、可用性与前置条件，调用启动前校验当前契约、参数和权限，旧版本仅允许服务端显式无损迁移。`tool.started/succeeded/failed/waiting/unknown` 关联同一操作与执行 Step，和操作事实事务提交；启动前等待/拒绝不会显示执行中，副作用异常保持未知并等待核查。事件使用 RuntimeEvent v1、固定摘要和最小详情，仅表明本地观察，不证明外部副作用。既有 `GET /api/tasks/{run_id}/events?after=...&limit=...` 返回有序事件及 `next_cursor`，外层响应和旧事件保持兼容。任务 4 助手/执行/API 回归 226 项、共享执行补充 57 项通过。助手顶层严格解析协议 v1 JSON，知识领域子调用继续旧契约；完整人工核查与回答形式校验、完成门禁和真实 Provider 资格验收仍待后续，当前不提供实时事件 UI，详见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。
 
 | 文档 | 内容 |
 | --- | --- |

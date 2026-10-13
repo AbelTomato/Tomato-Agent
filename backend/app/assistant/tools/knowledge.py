@@ -71,4 +71,4 @@ class KnowledgeCapability:
 
 def register_knowledge(registry, service, *, mode="hybrid"):
     for name in ("search_knowledge", "read_knowledge", "answer_knowledge"):
-        register_read_only(registry, KnowledgeCapability(name, service, mode=mode))
+        register_read_only(registry, KnowledgeCapability(name, service, mode=mode), category="knowledge")

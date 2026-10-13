@@ -31,6 +31,7 @@ class Decision(BaseModel):
     pending_action: PendingAction | None = None
     tool_name: str | None = None
     arguments: dict[str, Any] | None = None
+    contract_version: str | None = None
     output: Any | None = None
     reason: str | None = None
 

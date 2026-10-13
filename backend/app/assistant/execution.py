@@ -15,6 +15,7 @@ from app.agent.models import Message, ToolCall
 from app.execution.models import OperationInput, StepOutcome
 from app.execution.ports import LeaseExecutionPort
 from app.execution.state_machine import StaleExecutionOwner
+from app.errors import ToolNotFoundError
 from app.runs.models import PendingAction
 from app.tools.base import ToolContext, ToolResult
 from .models import CapabilityError, CapabilityOutcome
@@ -32,6 +33,12 @@ class AssistantExecutionPort(LeaseExecutionPort):
         recovery = "domain_publish" if descriptor.recovery_class == "domain_publication" else descriptor.recovery_class
         return OperationInput(id=uuid4(), logical_index=logical_index, kind="tool", tool_name=tool_name,
                               input_payload=arguments, recovery_class=recovery)
+
+    async def preflight(self, tool_name, arguments, snapshot):
+        check = getattr(self.capabilities.get(tool_name), "preflight", None)
+        if check is not None:
+            await check(arguments, ToolContext(session_id=str(snapshot.session_id), run_id=str(snapshot.run_id),
+                workspace_id=self.workspace_id, profile=self.profile, lease=self.lease))
 
     async def run_harness(self, harness, state, strategy, *, llm, tools, policy, budget, snapshot):
         started = monotonic()
@@ -146,10 +153,20 @@ class AssistantExecutionPort(LeaseExecutionPort):
                                 logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
                             continue
                         try:
-                            arguments = tools.get(decision.tool_name).input_model.model_validate(decision.arguments).model_dump(mode="json")
-                        except ValidationError:
+                            descriptor = self.capabilities.resolve(decision.tool_name)
+                            if not descriptor.available:
+                                raise ValueError("capability_unavailable")
+                            arguments = self.capabilities.prepare_call(decision.tool_name,
+                                decision.contract_version, decision.arguments)
+                        except (ValidationError, ValueError, ToolNotFoundError) as exc:
+                            code = ("unknown_tool" if isinstance(exc, ToolNotFoundError) else
+                                "invalid_arguments" if isinstance(exc, ValidationError) else
+                                "stale_contract" if str(exc) == "stale_contract" else "capability_unavailable")
                             feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
-                                category="recoverable_error", code="invalid_arguments")).model_dump(mode="json")
+                                category="unavailable" if code == "capability_unavailable" else "recoverable_error",
+                                code=code)).model_dump(mode="json")
+                            if code == "stale_contract":
+                                feedback["current_contract"] = descriptor.model_dump(mode="json")
                             state = state.model_copy(update={"structured_state": {
                                 **state.structured_state, "capability_feedback": feedback}})
                             messages.append(Message(role="assistant", content=response.content or ""))
@@ -174,7 +191,21 @@ class AssistantExecutionPort(LeaseExecutionPort):
                                 frozen_parameters=arguments, allowed_actions=["bind_workspace", "reject_action"])
                             snapshot = snapshot.model_copy(update={"loop_count": snapshot.loop_count + 1})
                             return await wait(action)
+                        try:
+                            await self.preflight(decision.tool_name, arguments, snapshot)
+                        except PermissionError:
+                            feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
+                                category="permission_denied", code="permission_denied")).model_dump(mode="json")
+                            blocked[decision.tool_name] = "permission_denied"
+                            state = state.model_copy(update={"structured_state": {**state.structured_state,
+                                "capability_feedback": feedback, "blocked_capabilities": blocked}})
+                            messages.append(Message(role="user", content=json.dumps(feedback)))
+                            snapshot = await self.save_snapshot(updated(phase="ready_model",
+                                logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
+                            continue
                         call = ToolCall(name=decision.tool_name, arguments=arguments)
+                        decision = decision.model_copy(update={"arguments": arguments,
+                            "contract_version": descriptor.contract_version})
                         response = response.model_copy(update={"kind": "tool_call", "tool_call": call})
                         calls = [call]
                         operation = await self.describe_operation(snapshot.logical_index, decision.tool_name, arguments)
@@ -195,6 +226,22 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     if snapshot.reserved_tool_calls >= min(budget.max_tool_calls, policy.max_calls):
                         return await result("stopped", "tool call budget exhausted")
                     descriptor = self.capabilities.resolve(operation.tool_name)
+                    # Recheck persisted operations before reserving budget or entering execution.
+                    if operation.tool_name not in policy.allowed_tools or blocked.get(operation.tool_name):
+                        return await result("failed", "tool_not_allowed")
+                    if not descriptor.available:
+                        return await result("failed", "capability_unavailable")
+                    if descriptor.requires_workspace and self.workspace_id is None:
+                        return await wait(PendingAction(action_id=str(uuid4()), reason="workspace_required",
+                            business_version=0, action_type="workspace_binding", target_capability=operation.tool_name,
+                            frozen_parameters=operation.input_payload, allowed_actions=["bind_workspace", "reject_action"]))
+                    self.capabilities.prepare_call(operation.tool_name,
+                        snapshot.pending_decision.get("contract_version") if snapshot.pending_decision else None,
+                        operation.input_payload)
+                    try:
+                        await self.preflight(operation.tool_name, operation.input_payload, snapshot)
+                    except PermissionError:
+                        return await result("failed", "permission_denied")
                     timeout = min(policy.timeout_seconds, remaining,
                         getattr(self.profile, "timeout_seconds", policy.timeout_seconds))
                     step = await self.start_step(operation.id, updated(
@@ -224,6 +271,16 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             if cancellation in done:
                                 raise asyncio.CancelledError
                             tool_result = await request
+                        except Exception:
+                            # No exception text is persisted or sent to the model. Writes may have happened.
+                            unknown = descriptor.side_effect != "read_only"
+                            outcome = CapabilityOutcome(kind="waiting" if unknown else "failed",
+                                pending_action=PendingAction(action_id=f"recovery-{operation.id}",
+                                    reason="unknown_side_effect", business_version=0, action_type="recovery",
+                                    allowed_actions=["cancel", "inspect_recovery"]) if unknown else None,
+                                error=CapabilityError(category="unknown_side_effect" if unknown else "recoverable_error",
+                                    code="tool_result_unknown" if unknown else "tool_execution_failed"))
+                            tool_result = ToolResult(success=False, data=outcome.model_dump(mode="json"))
                         finally:
                             request.cancel()
                             cancellation.cancel()

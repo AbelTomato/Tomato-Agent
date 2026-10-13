@@ -38,7 +38,7 @@ class AssistantStrategy:
                 action_type="clarification", allowed_actions=["provide_input", "reject_action"]))
         if isinstance(decision, CallToolDecision):
             return Decision(kind="call_tool", tool_name=decision.payload.name,
-                            arguments=decision.payload.arguments)
+                            arguments=decision.payload.arguments, contract_version=decision.payload.contract_version)
         if isinstance(decision, FinishDecision):
             return Decision(kind="respond", output=decision.payload.result.model_dump(mode="json"))
         if isinstance(decision, (DiscoverToolsDecision, DescribeToolDecision)):
@@ -48,21 +48,13 @@ class AssistantStrategy:
     def resolve_capability_decision(self, value: dict[str, Any], capabilities) -> dict[str, Any]:
         decision = _DECISION_ADAPTER.validate_python(value)
         if isinstance(decision, DiscoverToolsDecision):
-            if decision.payload.category is not None:
-                raise ValueError("assistant_capability_categories_not_available")
-            descriptors = [
-                {**tool.model_dump(mode="json"), **capabilities.resolve(tool.name).model_dump(mode="json")}
-                for tool in capabilities.definitions()
-                if (decision.payload.query is None
-                    or decision.payload.query.casefold() in tool.name.casefold()
-                    or decision.payload.query.casefold() in tool.description.casefold())
-            ]
+            descriptors = capabilities.catalog(category=decision.payload.category, query=decision.payload.query)
             return {"type": decision.type, "tools": descriptors}
         if isinstance(decision, DescribeToolDecision):
-            tool = next((item for item in capabilities.definitions()
-                         if item.name == decision.payload.name), None)
+            tool = next((item for item in capabilities.catalog()
+                         if item["name"] == decision.payload.name), None)
             if tool is None:
-                raise ValueError("assistant_capability_unavailable")
-            return {"type": decision.type, "tool": tool.model_dump(mode="json"),
-                    "descriptor": capabilities.resolve(tool.name).model_dump(mode="json")}
+                return {"type": decision.type, "error": {"code": "unknown_tool"}}
+            return {"type": decision.type, "tool": tool,
+                    "descriptor": capabilities.resolve(decision.payload.name).model_dump(mode="json")}
         raise ValueError("not_a_capability_discovery_decision")
