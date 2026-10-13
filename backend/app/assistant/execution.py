@@ -15,6 +15,7 @@ from app.agent.models import Message, ToolCall
 from app.execution.models import OperationInput, StepOutcome
 from app.execution.ports import LeaseExecutionPort
 from app.execution.state_machine import StaleExecutionOwner
+from app.execution.recovery import RecoveryConflict
 from app.errors import ToolNotFoundError
 from app.runs.models import PendingAction
 from app.tools.base import ToolContext, ToolResult
@@ -63,6 +64,20 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 tool_calls=current.reserved_tool_calls, duration_ms=(monotonic() - started) * 1000)
 
         async def wait(action, *, unknown=False):
+            if unknown:
+                operation = await self.get_operation(snapshot.pending_operation_id)
+                descriptor = self.capabilities.resolve(operation.tool_name)
+                dynamic = dict(state.structured_state)
+                dynamic.pop("retry_invocation_id", None)
+                dynamic["side_effect_resolutions"] = {**dynamic.get("side_effect_resolutions", {}),
+                    str(operation.id): "unknown"}
+                state.structured_state.update(dynamic)
+                state.structured_state.pop("retry_invocation_id", None)
+                action = action.model_copy(update={"action_id": str(uuid4()),
+                    "allowed_actions": ["cancel", "resolve_side_effect"],
+                    "target_capability": operation.tool_name,
+                    "frozen_parameters": {"invocation_id": str(operation.id),
+                        "contract_version": descriptor.contract_version}})
             saved = updated(phase="waiting", pending_action=action,
                 pending_operation_id=snapshot.pending_operation_id if unknown else None,
                 pending_response=None, pending_decision=None,
@@ -75,6 +90,11 @@ class AssistantExecutionPort(LeaseExecutionPort):
             while True:
                 if self.cancel_event.is_set():
                     raise asyncio.CancelledError
+                revised = await self.repository.apply_steer(self.lease, updated())
+                if revised is not None:
+                    snapshot = revised
+                    messages = list(revised.messages)
+                    state = state.model_copy(update={"structured_state": revised.harness_state["structured_state"]})
                 remaining = min(budget.max_duration_seconds,
                     snapshot.budget_limits.get("max_execution_seconds", budget.max_duration_seconds)) - baseline - (monotonic() - started)
                 if remaining <= 0:
@@ -220,6 +240,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 if snapshot.phase != "pending_tool" or not snapshot.pending_operation_id:
                     return await result("failed", "invalid_snapshot")
                 operation = await self.get_operation(snapshot.pending_operation_id)
+                if operation.status == "unknown" and state.structured_state.get("retry_invocation_id") == str(operation.id):
+                    operation = operation.model_copy(update={"status": "prepared"})
                 if operation.status in {"succeeded", "failed"}:
                     tool_result = ToolResult.model_validate(operation.result_payload)
                 elif operation.status == "prepared":
@@ -244,9 +266,14 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         return await result("failed", "permission_denied")
                     timeout = min(policy.timeout_seconds, remaining,
                         getattr(self.profile, "timeout_seconds", policy.timeout_seconds))
-                    step = await self.start_step(operation.id, updated(
-                        reserved_tool_calls=snapshot.reserved_tool_calls + 1,
-                        in_flight_started_at=datetime.now(timezone.utc), in_flight_max_seconds=timeout))
+                    try:
+                        step = await self.start_step(operation.id, updated(
+                            reserved_tool_calls=snapshot.reserved_tool_calls + 1,
+                            in_flight_started_at=datetime.now(timezone.utc), in_flight_max_seconds=timeout))
+                    except RecoveryConflict as exc:
+                        if str(exc) != "steer_pending":
+                            raise
+                        continue
                     snapshot = await self.repository.get_snapshot(self.lease.run_id)
                     category = blocked.get(operation.tool_name)
                     if category or descriptor.requires_workspace and self.workspace_id is None:
@@ -285,9 +312,14 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             request.cancel()
                             cancellation.cancel()
                             await asyncio.gather(request, cancellation, return_exceptions=True)
-                    snapshot = await self.commit_step(step.id, StepOutcome(success=tool_result.success,
-                        result_payload=tool_result.model_dump(mode="json")), updated(
+                    step_outcome = StepOutcome(success=tool_result.success, result_payload=tool_result.model_dump(mode="json"))
+                    try:
+                        snapshot = await self.commit_step(step.id, step_outcome, updated(
                             in_flight_started_at=None, in_flight_max_seconds=0.0))
+                    except StaleExecutionOwner:
+                        if (await self.repository.get_run(self.lease.run_id)).status == "cancelled":
+                            await self.repository.record_assistant_late_result(self.lease, step.id, step_outcome)
+                        raise
                 else:
                     return await wait(PendingAction(action_id=f"recovery-{operation.id}", reason="unknown_side_effect",
                         business_version=0, action_type="recovery", allowed_actions=["cancel", "inspect_recovery"]), unknown=True)

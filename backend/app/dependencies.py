@@ -244,6 +244,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         recovery_observation_factory=observe_recovery,
     )
     execution_worker.stage_recovery_factory = task_service.recover_stage
+    execution_worker.queue_dispatcher = task_service.dispatch_queue
     return AppDependencies(
         session_repository=session_repository,
         run_repository=run_repository,

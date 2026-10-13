@@ -62,6 +62,29 @@ class TaskService:
         return await self.adapters[run.task_type if run.task_type != "code_task" else "code"].execute(
             run, lease, port)
 
+    async def enqueue(self, session_id, request):
+        if not self.enabled or not self.model_available:
+            raise RuntimeError("worker_disabled" if not self.enabled else "model_unconfigured")
+        if request.kind != "assistant" or self.assistant is None or not self.assistant.config.assistant_enabled:
+            raise RuntimeError("assistant_disabled")
+        if request.workspace_id:
+            self.assistant.validate_workspace(request.workspace_id)
+        return await self.runs.enqueue_request(session_id, request)
+
+    async def dispatch_queue(self):
+        from .models import UnifiedTaskRequest
+        if not self.enabled or not self.model_available or self.assistant is None:
+            return
+        for identity, session, payload in await self.runs.pending_queue_heads():
+            try:
+                await self.assistant.submit(UUID(session), UnifiedTaskRequest.model_validate(payload),
+                    self.config_digest, queued_request_id=identity)
+                return
+            except (RunRepositoryConflict, ValueError, RuntimeError):
+                # Preserve the request when its Session, workspace or configuration
+                # cannot safely start it; a later poll revalidates the conditions.
+                continue
+
     async def recover_stage(self, candidate):
         run = await self.runs.get_run(candidate.run_id)
         snapshot = await self.execution.get_snapshot(run.id)
@@ -81,11 +104,11 @@ class TaskService:
             if run.task_type in {"code", "code_task"}:
                 return await self.adapters["code"].service.cancel(str(run.id))
             return cancelled
+        if run.task_type == "assistant":
+            return await self.assistant.act(run, request)
         replay = await self.execution.get_stage_action_replay(run.id, request)
         if replay is not None:
             return replay
-        if run.task_type == "assistant":
-            return await self.assistant.act(run, request)
         if run.task_type == "writing":
             return await self.adapters["writing"].act(run, request)
         if run.version != request.expected_version:

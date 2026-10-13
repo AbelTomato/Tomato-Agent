@@ -311,6 +311,20 @@ export type TaskActionRequest = { action_id: string; action: TaskAction; expecte
   client_request_id: string; payload: Record<string, unknown> };
 const sessionPath = (id: string) => `/api/sessions/${encodeURIComponent(id)}`;
 const taskPath = (id: string) => `/api/tasks/${encodeURIComponent(id)}`;
+export type SessionQueue = { paused: boolean; requests: Array<{ request_id: string; status: string;
+  run_id: string | null; request: UnifiedTaskRequest }> };
+export function listSessionQueue(id: string, signal?: AbortSignal): Promise<SessionQueue> {
+  return request(`${sessionPath(id)}/queue`, { signal });
+}
+export function enqueueTask(id: string, body: UnifiedTaskRequest, signal?: AbortSignal): Promise<{ request_id: string }> {
+  return request(`${sessionPath(id)}/queue`, { ...jsonRequest(body), signal });
+}
+export function controlSessionQueue(id: string, action: 'resume' | 'clear', signal?: AbortSignal): Promise<SessionQueue> {
+  return request(`${sessionPath(id)}/queue/${action}`, { ...jsonRequest({}), signal });
+}
+export function steerTask(id: string, body: { client_request_id: string; message: string }, signal?: AbortSignal): Promise<{ request_id: string; status: string }> {
+  return request(`${taskPath(id)}/steer`, { ...jsonRequest(body), signal });
+}
 export function listSessions(limit = 200, offset = 0, signal?: AbortSignal): Promise<{ sessions: Session[] }> {
   return request(`/api/sessions?limit=${limit}&offset=${offset}`, { signal });
 }

@@ -70,6 +70,29 @@ async def test_disabled_assistant_does_not_create_run(tmp_path):
         assert await app.state.run_repository.list_for_session(session) == []
 
 
+async def test_question_answer_is_explicit_single_consumption_and_same_run(tmp_path):
+    responses = [decision("ask_user", {"question": "Choose", "choices": ["A", "B"], "allow_free_text": True}),
+        decision("finish", {"result": {"answer": "continued"}})]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting = (await client.get(f"/api/tasks/{run_id}")).json()
+        action = {"action": "provide_input", "action_id": waiting["pending_action"]["action_id"],
+            "expected_version": waiting["version"], "client_request_id": "answer", "payload": {"choice": "A"}}
+        assert (await client.post(f"/api/sessions/{session}/tasks", json=request(message="ordinary", client_request_id="ordinary"))).status_code == 409
+        route = f"/api/tasks/{run_id}/actions"
+        assert (await client.post(route, json={**action, "action": "approve_action", "payload": {}})).status_code == 409
+        assert (await client.post(route, json={**action, "payload": {"choice": "invalid"}})).status_code == 422
+        assert (await client.post(route, json=action)).status_code == 200
+        assert (await client.post(route, json=action)).status_code == 409
+        assert await app.state.execution_worker.run_once()
+        completed = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert completed["status"] == "completed" and completed["run_id"] == run_id
+        assert provider.calls == 2
+        events = (await client.get(f"/api/tasks/{run_id}/events")).json()["events"]
+        assert len([e for e in events if e["event_type"] == "assistant.resumed"]) == 1
+
+
 async def test_message_events_use_existing_http_cursor_and_versioned_payload(tmp_path):
     from app.assistant.models import RuntimeEvent
 
@@ -124,7 +147,7 @@ async def test_workspace_wait_bind_once_resume_and_budget(tmp_path):
         route = f"/api/tasks/{run_id}/actions"
         assert (await client.post(route, json={**action, "expected_version": 999})).status_code == 409
         assert (await client.post(route, json=action)).status_code == 200
-        assert (await client.post(route, json=action)).status_code == 200
+        assert (await client.post(route, json=action)).status_code == 409
         assert (await client.post(route, json={**action, "payload": {"workspace_id": "missing"}})).status_code == 409
         assert await app.state.execution_worker.run_once()
         final = (await client.get(f"/api/tasks/{run_id}")).json()

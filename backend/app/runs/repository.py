@@ -11,6 +11,7 @@ import aiosqlite
 from .models import PendingAction, RunCheckpoint, RunEvent, RunRecord, RunRepositoryConflict, RunStatus
 from .state_machine import transition_run
 from .migrations import migrate_unified_runs
+from .queue import SessionQueueRepository
 
 
 _SENSITIVE_KEYS = {"authorization", "api_key", "credential", "password", "secret", "token"}
@@ -52,7 +53,7 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-class RunRepository:
+class RunRepository(SessionQueueRepository):
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -91,6 +92,10 @@ class RunRepository:
                 """
             )
             await migrate_unified_runs(db)
+            await db.execute("CREATE TABLE IF NOT EXISTS assistant_effect_settlements ("
+                "invocation_id TEXT PRIMARY KEY, resolution TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 1, "
+                "termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0)")
+            await db.commit()
 
     async def create_run(
         self, task_type: str, request: dict[str, Any], workspace_id: str | None = None,
@@ -145,6 +150,7 @@ class RunRepository:
         workspace_id: str | None, client_request_id: str,
         *, snapshot_factory: Callable[[RunRecord], Any] | None = None,
         event_type: str | None = None, event_payload: dict[str, Any] | None = None,
+        queued_request_id: str | None = None,
     ) -> RunRecord:
         if kind not in {"chat", "knowledge", "writing", "code", "assistant"}:
             raise ValueError("unsupported task kind")
@@ -169,6 +175,17 @@ class RunRepository:
                 if existing[-1] != digest:
                     raise RunRepositoryConflict("request_conflict")
                 return run_record_from_row(existing)
+            if queued_request_id:
+                queued = await (await db.execute("SELECT id FROM session_task_queue WHERE session_id=? AND status='pending' "
+                    "ORDER BY sequence LIMIT 1", (str(session_id),))).fetchone()
+                if not queued or queued[0] != queued_request_id:
+                    raise RunRepositoryConflict("stale_action")
+                latest = await (await db.execute("SELECT id,status FROM task_runs WHERE session_id=? "
+                    "ORDER BY created_at DESC,id DESC LIMIT 1", (str(session_id),))).fetchone()
+                control = await (await db.execute("SELECT paused,acknowledged_run_id FROM session_queue_control WHERE session_id=?",
+                    (str(session_id),))).fetchone()
+                if control and control[0] or latest and latest[1] in {"failed", "cancelled", "timed_out"} and (not control or control[1] != latest[0]):
+                    raise RunRepositoryConflict("session_busy")
             if await (await db.execute(
                 "SELECT 1 FROM task_runs WHERE session_id=? AND status IN ('queued','running','waiting')",
                 (str(session_id),),
@@ -186,7 +203,9 @@ class RunRepository:
                 if operations and await (await db.execute(
                     "SELECT 1 FROM execution_operations o JOIN task_runs r ON r.id=o.run_id "
                     "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
-                    "AND o.status IN ('running','unknown')", (workspace_id,),
+                    "AND (o.status='running' OR (o.status='unknown' AND NOT EXISTS "
+                    "(SELECT 1 FROM assistant_effect_settlements s WHERE s.invocation_id=o.id "
+                    "AND s.quarantined=0 AND s.conflict=0 AND s.termination_evidence IS NOT NULL)))", (workspace_id,),
                 )).fetchone():
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
             run_id, timestamp = uuid4(), _now()
@@ -198,6 +217,9 @@ class RunRepository:
             )
             await self._initialize_run(db, run_id, timestamp, snapshot_factory,
                                        event_type, event_payload)
+            if queued_request_id:
+                await db.execute("UPDATE session_task_queue SET status='started',run_id=? WHERE id=? AND status='pending'",
+                    (str(run_id), queued_request_id))
             await db.commit()
         result = await self.get_run(run_id)
         assert result is not None

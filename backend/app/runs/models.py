@@ -19,6 +19,7 @@ TaskKind = Literal["chat", "knowledge", "writing", "code", "assistant"]
 TaskAction = Literal[
     "cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery",
     "provide_input", "approve_action", "reject_action", "bind_workspace",
+    "resolve_side_effect",
 ]
 
 

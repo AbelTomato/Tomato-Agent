@@ -19,6 +19,8 @@ const { TaskCard } = await compile('../src/components/TaskCard.tsx', [
   [/from 'react'/g, `from ${JSON.stringify(import.meta.resolve('react'))}`],
   [/import \{[^;]*\} from '..\/api';/, 'const loadCodeTaskArtifact = () => { throw new Error("unexpected artifact request"); };'],
   [/import \{ CitationList \} from '.\/CitationList';/, 'const CitationList = () => null;'],
+  [/import \{ AssistantResult \} from '.\/AssistantResult';/, 'const AssistantResult = () => null;'],
+  [/import \{ PendingActionPanel \} from '.\/PendingActionPanel';/, 'const PendingActionPanel = () => null;'],
 ]);
 const originalFetch = globalThis.fetch;
 try {

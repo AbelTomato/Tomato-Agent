@@ -42,6 +42,7 @@ class ExecutionWorker:
         self.recovery_observation_factory = recovery_observation_factory
         self.recovery_scan_limit = recovery_scan_limit
         self.stage_recovery_factory = None
+        self.queue_dispatcher = None
         self._owner_id = f"worker-{uuid4()}"
         self._active: dict[asyncio.Task, object] = {}
         self._loop_task: asyncio.Task | None = None
@@ -122,6 +123,8 @@ class ExecutionWorker:
                 return False
             if len(self._active) >= self.max_concurrency:
                 return False
+            if self.queue_dispatcher is not None:
+                await self.queue_dispatcher()
             claimed = await self.repository.claim_next(self._owner_id, lease_seconds=self.lease_seconds)
             if claimed is None:
                 return False

@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.tasks.models import TaskActionRequest, TaskRecoveryObservation, UnifiedTaskRequest
+from app.tasks.models import SteerRequest, TaskActionRequest, TaskRecoveryObservation, UnifiedTaskRequest
 from app.workspaces.service import WorkspacePathError
 
 router = APIRouter()
@@ -115,6 +115,37 @@ async def get_task(run_id: str, request: Request):
     return await task_payload(request, await task_required(request, run_id))
 
 
+@router.post("/api/sessions/{session_id}/queue", status_code=202)
+async def enqueue_task(session_id: str, body: UnifiedTaskRequest, request: Request):
+    session_id = ident(session_id, "session_id")
+    await session_required(request, session_id)
+    try:
+        return await request.app.state.task_service.enqueue(session_id, body)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise task_error(exc) from exc
+
+
+@router.get("/api/sessions/{session_id}/queue")
+async def session_queue(session_id: str, request: Request):
+    session_id = ident(session_id, "session_id")
+    await session_required(request, session_id)
+    return await request.app.state.run_repository.list_queued_requests(session_id)
+
+
+@router.post("/api/sessions/{session_id}/queue/resume")
+async def resume_queue(session_id: str, request: Request):
+    session_id = ident(session_id, "session_id")
+    await session_required(request, session_id)
+    return await request.app.state.run_repository.control_queue(session_id)
+
+
+@router.post("/api/sessions/{session_id}/queue/clear")
+async def clear_queue(session_id: str, request: Request):
+    session_id = ident(session_id, "session_id")
+    await session_required(request, session_id)
+    return await request.app.state.run_repository.control_queue(session_id, clear=True)
+
+
 @router.get("/api/tasks/{run_id}/events")
 async def task_events(run_id: str, request: Request, after: int = Query(0, ge=0), limit: int = PageLimit):
     run = await task_required(request, run_id)
@@ -140,6 +171,21 @@ async def task_action(run_id: str, body: TaskActionRequest, request: Request):
                              if action in {"cancel", "inspect_recovery", "continue_recovery"}],
         ).model_dump(mode="json")
     return payload
+
+
+@router.post("/api/tasks/{run_id}/steer", status_code=202)
+async def steer_task(run_id: str, body: SteerRequest, request: Request):
+    run = await task_required(request, run_id)
+    try:
+        return await request.app.state.execution_repository.request_steer(run.id, body)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise task_error(exc) from exc
+
+
+@router.get("/api/tasks/{run_id}/effect-settlements")
+async def effect_settlements(run_id: str, request: Request):
+    run = await task_required(request, run_id)
+    return {"settlements": await request.app.state.execution_repository.list_effect_settlements(run.id)}
 
 
 @router.get("/api/sessions/{session_id}/tasks")

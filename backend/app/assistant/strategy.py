@@ -35,7 +35,9 @@ class AssistantStrategy:
         if isinstance(decision, AskUserDecision):
             return Decision(kind="wait", pending_action=PendingAction(
                 action_id=str(uuid4()), reason=decision.payload.question, business_version=0,
-                action_type="clarification", allowed_actions=["provide_input", "reject_action"]))
+                action_type="clarification", allowed_actions=["provide_input", "cancel"],
+                display_data=decision.payload.model_dump(mode="json"),
+                frozen_parameters={"choices": list(decision.payload.choices), "allow_free_text": True}))
         if isinstance(decision, CallToolDecision):
             return Decision(kind="call_tool", tool_name=decision.payload.name,
                             arguments=decision.payload.arguments, contract_version=decision.payload.contract_version)

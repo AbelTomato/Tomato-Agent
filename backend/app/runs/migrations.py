@@ -46,6 +46,12 @@ async def migrate_unified_runs(db: aiosqlite.Connection) -> None:
                 await db.execute(statement)
         await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_request ON task_runs(session_id, client_request_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_session ON task_runs(session_id, created_at, id)")
+        await db.execute("CREATE TABLE IF NOT EXISTS session_task_queue (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL REFERENCES sessions(id), client_request_id TEXT NOT NULL, "
+            "request TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', run_id TEXT, "
+            "created_at TEXT NOT NULL, UNIQUE(session_id, client_request_id))")
+        await db.execute("CREATE TABLE IF NOT EXISTS session_queue_control (session_id TEXT PRIMARY KEY REFERENCES sessions(id), "
+            "paused INTEGER NOT NULL DEFAULT 0, acknowledged_run_id TEXT)")
         if await (await db.execute("PRAGMA foreign_key_check")).fetchall():
             raise RuntimeError("run migration foreign key check failed")
         await db.commit()

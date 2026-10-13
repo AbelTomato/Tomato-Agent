@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents,
   actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument,
+  listSessionQueue, enqueueTask, controlSessionQueue, steerTask, type SessionQueue,
   type Session, type Workspace, type UnifiedTask, type TaskKind, type TaskAction,
   type RetrievalMode, type Citation, type KnowledgeDocument, type CodeTaskEvent,
 } from '../api';
@@ -45,6 +46,8 @@ export function ConversationShell() {
   // 动作检查是一次观察；只在同一 Run 版本内保留，轮询不能把它丢弃。
   const recoveryObservations = useRef(new Map<string, UnifiedTask['recovery']>());
   const active = tasks.some((task) => !terminal(task));
+  const [queue, setQueue] = useState<SessionQueue>({ paused: false, requests: [] });
+  const [steerNotice, setSteerNotice] = useState('');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -62,6 +65,7 @@ export function ConversationShell() {
     setBusy(false); setLoading(true); setTasks([]); setEvents({}); setWorkspaceId('');
     setDocument(null); setDocumentError(''); documentController.current += 1;
     setPollError('');
+    setQueue({ paused: false, requests: [] });
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
@@ -79,7 +83,9 @@ export function ConversationShell() {
     async function poll() {
       try {
         const historyTasks = await history();
+        const queued = sessionId ? await listSessionQueue(sessionId, controller.signal) : { paused: false, requests: [] };
         if (!current()) return;
+        setQueue(queued);
         let moreEvents = false;
         const loaded = await Promise.all(historyTasks.map(async (task) => {
           if (task.legacy) return task;
@@ -99,7 +105,7 @@ export function ConversationShell() {
         }));
         if (!current()) return;
         setTasks(loaded); setLoading(false); setPollError(''); failures = 0;
-        if (moreEvents || loaded.some((task) => !terminal(task))) timer = setTimeout(() => void poll(), 1000);
+        if (moreEvents || loaded.some((task) => !terminal(task)) || queued.requests.some((item) => item.status === 'pending')) timer = setTimeout(() => void poll(), 1000);
       } catch (reason) {
         if (!current()) return;
         setLoading(false); setPollError(message(reason));
@@ -132,6 +138,7 @@ export function ConversationShell() {
   }, [sessionId, refresh]);
 
   function selectSession(id: string) {
+    setSteerNotice('');
     if (id === sessionId) return;
     generation.current += 1; actionController.current?.abort(); documentController.current += 1;
     submission.current = null; actionRequest.current = null;
@@ -156,16 +163,39 @@ export function ConversationShell() {
     });
   }
   async function send() {
-    if (!sessionId || !input.trim() || active || loading || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))) return;
+    if (!sessionId || !input.trim() || loading || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))) return;
     await operate(async (signal, current) => {
       const body = { kind, message: input.trim(), ...((kind === 'code' || kind === 'assistant' && workspaceId) ? { workspace_id: workspaceId } : {}),
         ...(kind === 'knowledge' ? { options: { retrieval_mode: retrievalMode } } : kind === 'assistant' ? { options: {} } : {}) };
-      const fingerprint = JSON.stringify({ sessionId, ...body });
+      const queued = active || queue.requests.some((item) => item.status === 'pending');
+      const fingerprint = JSON.stringify({ sessionId, queued, ...body });
       if (submission.current?.fingerprint !== fingerprint) submission.current = { fingerprint, id: crypto.randomUUID() };
+      if (queued) {
+        await enqueueTask(sessionId, { ...body, client_request_id: submission.current!.id }, signal);
+        if (current()) { submission.current = null; setInput(''); setRefresh((value) => value + 1); }
+        return;
+      }
       const task = await submitTask(sessionId, { ...body, client_request_id: submission.current!.id }, signal);
       if (!current()) return;
       submission.current = null; setInput(''); setTasks((previous) => [...previous.filter((item) => item.run_id !== task.run_id), task]);
       setRefresh((value) => value + 1);
+    });
+  }
+  async function steer() {
+    const task = tasks.find((item) => item.kind === 'assistant' && !terminal(item));
+    if (!task || !input.trim()) return;
+    await operate(async (signal, current) => {
+      const body = { message: input.trim() };
+      const fingerprint = JSON.stringify({ steer: task.run_id, ...body });
+      if (submission.current?.fingerprint !== fingerprint) submission.current = { fingerprint, id: crypto.randomUUID() };
+      await steerTask(task.run_id, { ...body, client_request_id: submission.current!.id }, signal);
+      if (current()) { submission.current = null; setInput(''); setSteerNotice('调整请求已接收，等待服务端安全点生效；未决动作仍需单独处理。'); setRefresh((value) => value + 1); }
+    });
+  }
+  async function queueControl(action: 'resume' | 'clear') {
+    await operate(async (signal, current) => {
+      const next = await controlSessionQueue(sessionId, action, signal);
+      if (current()) { setQueue(next); setRefresh((value) => value + 1); }
     });
   }
   async function action(task: UnifiedTask, action: TaskAction, payload: Record<string, unknown>) {
@@ -235,9 +265,19 @@ export function ConversationShell() {
           {!task.legacy && <details className="task-events"><summary>事件（{events[task.run_id]?.length ?? 0}）</summary><ol>{events[task.run_id]?.map((event) => <li key={event.sequence}><b>#{event.sequence} {event.event_type}</b><pre>{JSON.stringify(event.payload, null, 2)}</pre></li>)}</ol></details>}
         </div>)}
       </div>
-      {active && <p className="notice">本会话有活动任务，请等待完成、确认动作或取消后再提交。</p>}
+      {active && <p className="notice">后续消息进入队列；回答、审批、绑定和核查请使用任务动作。</p>}
+      {steerNotice && <p role="status">{steerNotice}</p>}
+      {tasks.some((task) => events[task.run_id]?.some((event) => event.event_type === 'assistant.steer_applied')) && <p role="status">当前任务调整已生效（详见事件）。</p>}
+      {queue.requests.some((item) => item.status === 'pending') && <section aria-label="后续消息队列">
+        <p>{queue.paused ? '队列已暂停' : '队列等待启动'}</p>
+        <ol>{queue.requests.filter((item) => item.status === 'pending').map((item) => <li key={item.request_id}>{item.request.message}</li>)}</ol>
+        {queue.paused && <button type="button" disabled={busy || loading} onClick={() => void queueControl('resume')}>继续队列</button>}
+        <button type="button" disabled={busy || loading} onClick={() => void queueControl('clear')}>清空待启动队列</button>
+      </section>}
       {kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false) && <p className="notice">代码任务需要绑定可用原目录工作区。</p>}
-      <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea aria-label="任务输入" value={input} rows={3} onChange={(event) => setInput(event.target.value)} disabled={busy || loading || active || !sessionId} placeholder="输入本轮任务…" /><button type="submit" disabled={busy || loading || active || !sessionId || !input.trim() || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))}>提交任务</button></form>
+      <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}><textarea aria-label="任务输入" value={input} rows={3} onChange={(event) => setInput(event.target.value)} disabled={busy || loading || !sessionId} placeholder="输入本轮任务…" /><button type="submit" disabled={busy || loading || !sessionId || !input.trim() || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))}>{active || queue.requests.some((item) => item.status === 'pending') ? '排队发送' : '提交任务'}</button>
+        {tasks.some((task) => task.kind === 'assistant' && !terminal(task)) && <button type="button" disabled={busy || loading || !input.trim()} onClick={() => void steer()}>调整当前任务</button>}
+      </form>
       <small>当前 Session：{sessionId || '未选择'} · 新任务通过单 Worker 后台执行。</small>
     </section>
     {(document || documentError) && <section className="document-panel"><button className="close-button" type="button" onClick={() => { documentController.current += 1; setDocument(null); setDocumentError(''); }}>关闭</button>

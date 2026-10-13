@@ -17,9 +17,11 @@ from .models import (AttemptRecord, LeaseHandle, PROTOCOL_VERSION, ExecutionSnap
 from .ports import Clock, canonical_digest, execution_migration
 from .state_machine import StaleExecutionOwner
 from .recovery import RecoveryCandidate, RecoveryConflict, RecoveryOperation, classify_recovery
+from .steer import AssistantSteerRepository
+from .settlement import AssistantSettlementRepository
 
 
-class ExecutionRepository:
+class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepository):
     def __init__(self, path: Path, *, clock: Clock | None = None) -> None:
         self.path = Path(path)
         self.clock = clock or _SystemClock()
@@ -35,6 +37,12 @@ class ExecutionRepository:
             await db.execute("CREATE TABLE IF NOT EXISTS task_actions (run_id TEXT NOT NULL REFERENCES task_runs(id), "
                              "client_request_id TEXT NOT NULL, digest TEXT NOT NULL, "
                              "PRIMARY KEY(run_id,client_request_id))")
+            await db.execute("CREATE TABLE IF NOT EXISTS assistant_steer (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL REFERENCES task_runs(id), client_request_id TEXT NOT NULL, "
+                "message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested', UNIQUE(run_id,client_request_id))")
+            await db.execute("CREATE TABLE IF NOT EXISTS assistant_effect_settlements ("
+                "invocation_id TEXT PRIMARY KEY REFERENCES execution_operations(id), resolution TEXT NOT NULL, "
+                "quarantined INTEGER NOT NULL DEFAULT 1, termination_evidence TEXT, conflict INTEGER NOT NULL DEFAULT 0)")
             await db.commit()
 
     async def claim_next(self, owner_id: str, *, lease_seconds: int) -> tuple[RunRecord, LeaseHandle] | None:
@@ -484,11 +492,11 @@ class ExecutionRepository:
                             return dict(old)
                         if old["status"] == "reserved":
                             raise RecoveryConflict("model_call_in_flight")
-                unknown = await (await db.execute("SELECT 1 FROM execution_operations WHERE run_id=? "
-                    "AND status IN ('running','unknown') AND recovery_class NOT IN ('model','read_only') LIMIT 1",
-                    (str(lease.run_id),))).fetchone()
-                if unknown:
+                if await (await db.execute("SELECT 1 FROM execution_operations WHERE run_id=? "
+                    "AND status='running' AND recovery_class NOT IN ('model','read_only') LIMIT 1",
+                    (str(lease.run_id),))).fetchone():
                     raise RecoveryConflict("unknown_side_effect")
+                await self._assert_assistant_effect_allowed(db, lease.run_id, for_model=True)
                 count, inflight = await (await db.execute("SELECT COUNT(*), "
                     "COALESCE(SUM(CASE WHEN status='reserved' THEN timeout_seconds ELSE 0 END),0) "
                     "FROM execution_model_calls WHERE run_id=?", (str(lease.run_id),))).fetchone()
@@ -564,7 +572,7 @@ class ExecutionRepository:
                 (snapshot.model_dump_json(), _dump_time(now), str(lease.run_id)))
             await self._commit(db)
 
-    async def queue_assistant_action(self, run_id, request, *, confirmation_validator=None, workspace_validator=None):
+    async def queue_assistant_action(self, run_id, request, *, confirmation_validator=None, workspace_validator=None, recovery_validator=None):
         """Consume a frozen assistant action atomically, without creating another Run."""
         from .models import AssistantExecutionSnapshot, parse_execution_snapshot
         from app.agent.models import Message
@@ -578,9 +586,7 @@ class ExecutionRepository:
                 "SELECT digest FROM task_actions WHERE run_id=? AND client_request_id=?",
                 (str(run_id), request.client_request_id))).fetchone()
             if existing:
-                if existing[0] != digest:
-                    raise RunRepositoryConflict("action_request_conflict")
-                return _run_record(row)
+                raise RunRepositoryConflict("stale_action")
             head = await self._head_row(db, run_id)
             if row[1] != "assistant" or row[4] != "waiting" or row[6] != request.expected_version or (head and head[1]):
                 raise RunRepositoryConflict("stale_action")
@@ -592,8 +598,17 @@ class ExecutionRepository:
             pending = snapshot.pending_action
             if not pending or pending.action_id != request.action_id or request.action not in pending.allowed_actions:
                 raise RunRepositoryConflict("action_not_allowed")
+            if request.action == "resolve_side_effect":
+                return await self._resolve_assistant_side_effect(db, row, snapshot, pending, request, digest, now, recovery_validator)
             if request.action not in {"provide_input", "reject_action", "approve_action", "bind_workspace"} or pending.action_type == "recovery":
                 raise RunRepositoryConflict("action_not_allowed")
+            if request.action == "provide_input":
+                if pending.action_type != "clarification":
+                    raise RunRepositoryConflict("action_not_allowed")
+                answer = request.payload
+                if (set(answer) == {"choice"} and answer["choice"] not in pending.frozen_parameters.get("choices", [])
+                        or set(answer) == {"message"} and not pending.frozen_parameters.get("allow_free_text", True)):
+                    raise ValueError("invalid_answer")
             workspace_id = snapshot.workspace_id
             if request.action == "bind_workspace":
                 if pending.action_type != "workspace_binding" or workspace_id is not None or row[3] is not None:
@@ -615,7 +630,9 @@ class ExecutionRepository:
                     raise RunRepositoryConflict("workspace_busy")
                 if await (await db.execute("SELECT 1 FROM execution_operations o JOIN task_runs r ON r.id=o.run_id "
                     "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
-                    "AND o.status IN ('running','unknown')", (workspace_id,))).fetchone():
+                    "AND (o.status='running' OR (o.status='unknown' AND NOT EXISTS "
+                    "(SELECT 1 FROM assistant_effect_settlements s WHERE s.invocation_id=o.id "
+                    "AND s.quarantined=0 AND s.conflict=0 AND s.termination_evidence IS NOT NULL)))", (workspace_id,))).fetchone():
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
                 await db.execute("UPDATE task_runs SET workspace_id=? WHERE id=?", (workspace_id, str(run_id)))
             if request.action == "approve_action":
@@ -650,8 +667,120 @@ class ExecutionRepository:
                              (str(run_id), request.client_request_id, digest))
             await self._append_event(db, run_id, "assistant.action", {"schema_version": 1,
                 "action_id": pending.action_id, "action": request.action}, now)
+            await self._assistant_recovery_event(db, run_id, "assistant.resumed", now,
+                {"action_id": pending.action_id, "action": request.action})
             await self._commit(db)
             return _run_record(await self._run_row(db, run_id))
+
+    async def _assistant_recovery_event(self, db, run_id, event_type, now, data, invocation_id=None):
+        from app.assistant.models import RuntimeEvent, RuntimeEventDetail
+        summaries = {"assistant.resumed": "用户动作已提交，原 Run 等待继续",
+            "tool.reconciled": "用户已提交副作用核查事实", "tool.late_result": "已取消操作的迟到结果已归档",
+            "assistant.interrupt_requested": "当前任务调整请求已接收",
+            "assistant.safe_point_reached": "当前执行已到达安全点",
+            "assistant.input_revision_added": "当前任务输入修订已保存",
+            "assistant.steer_applied": "当前任务调整已生效",
+            "tool.settled": "核查结论已结算，隔离权限单独判定",
+            "tool.quarantine_released": "服务端已验证旧执行终止并解除隔离",
+            "tool.abandoned": "旧方向操作在启动前已放弃"}
+        event = RuntimeEvent(event_id=uuid4(), run_id=UUID(str(run_id)), invocation_id=str(invocation_id) if invocation_id else None,
+            event_type=event_type, occurred_at=now, summary=summaries[event_type],
+            detail=RuntimeEventDetail(data=data))
+        await self._append_event(db, run_id, event_type, event.model_dump(mode="json"), now, event_id=event.event_id)
+
+    async def _resolve_assistant_side_effect(self, db, row, snapshot, pending, request, digest, now, recovery_validator):
+        """Append user observations; preserve the original unknown operation and Step."""
+        from app.agent.models import Message
+        resolution = request.payload["resolution"]
+        invocation_id = pending.frozen_parameters.get("invocation_id")
+        op = await (await db.execute("SELECT status,tool_name FROM execution_operations WHERE id=? AND run_id=?",
+            (invocation_id, str(snapshot.run_id)))).fetchone()
+        if (pending.action_type != "recovery" or invocation_id != str(snapshot.pending_operation_id)
+                or not op or op[0] != "unknown"):
+            raise RunRepositoryConflict("action_not_allowed")
+        await self._assistant_recovery_event(db, snapshot.run_id, "tool.reconciled", now,
+            {"resolution": resolution, "observation_scope": "user_reported", "action_id": pending.action_id}, invocation_id)
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?) "
+            "ON CONFLICT(invocation_id) DO UPDATE SET resolution=excluded.resolution,quarantined=1",
+            (invocation_id, resolution))
+        if resolution != "unknown":
+            await self._assistant_recovery_event(db, snapshot.run_id, "tool.settled", now,
+                {"resolution": resolution, "quarantined": True, "basis": "user_reported"}, invocation_id)
+        state = dict(snapshot.harness_state)
+        dynamic = dict(state.get("structured_state", {}))
+        dynamic["side_effect_resolutions"] = {**dynamic.get("side_effect_resolutions", {}), invocation_id: resolution}
+        dynamic["action_feedback"] = {"action": request.action, "payload": request.payload, "invocation_id": invocation_id}
+        state["structured_state"] = dynamic
+        waiting = resolution == "unknown"
+        retry = (resolution == "not_executed" and recovery_validator is not None
+            and recovery_validator(pending.model_copy(deep=True), op[1]) is True)
+        if retry:
+            dynamic["retry_invocation_id"] = invocation_id
+        next_action = pending.model_copy(update={"action_id": str(uuid4())}) if waiting else None
+        saved = snapshot.model_copy(update={"phase": "waiting" if waiting else "pending_tool" if retry else "ready_model",
+            "pending_action": next_action, "pending_operation_id": snapshot.pending_operation_id if waiting or retry else None,
+            "logical_index": snapshot.logical_index + (0 if waiting or retry else 1), "harness_state": state,
+            "pending_response": None, "pending_decision": None,
+            "messages": [*snapshot.messages, Message(role="user", content=json.dumps({
+                "side_effect_verification": {"invocation_id": invocation_id, "resolution": resolution,
+                    "retry_allowed": retry}}, ensure_ascii=False))],
+            "checkpoint_revision": snapshot.checkpoint_revision + 1})
+        if not waiting:
+            await self._set_run_status(db, snapshot.run_id, "queued", now, resume_confirmed=True)
+            await self._assistant_recovery_event(db, snapshot.run_id, "assistant.resumed", now,
+                {"action_id": pending.action_id, "action": request.action}, invocation_id)
+        else:
+            await db.execute("UPDATE task_runs SET version=version+1,updated_at=? WHERE id=?", (_dump_time(now), str(snapshot.run_id)))
+        await db.execute("UPDATE task_runs SET pending_action=? WHERE id=?",
+            (next_action.model_dump_json() if next_action else None, str(snapshot.run_id)))
+        await db.execute("UPDATE task_run_checkpoints SET sequence=sequence+1,state=?,created_at=? WHERE run_id=?",
+            (saved.model_dump_json(), _dump_time(now), str(snapshot.run_id)))
+        await db.execute("INSERT INTO task_actions(run_id,client_request_id,digest) VALUES (?,?,?)",
+            (str(snapshot.run_id), request.client_request_id, digest))
+        await self._commit(db)
+        return _run_record(await self._run_row(db, snapshot.run_id))
+
+    async def assert_assistant_effect_allowed(self, run_id):
+        async with aiosqlite.connect(self.path) as db:
+            await self._assert_assistant_effect_allowed(db, run_id)
+
+    async def _assert_assistant_effect_allowed(self, db, run_id, *, for_model=False):
+        row = await (await db.execute("SELECT state FROM task_run_checkpoints WHERE run_id=?", (str(run_id),))).fetchone()
+        state = json.loads(row[0]) if row else {}
+        resolved = state.get("harness_state", {}).get("structured_state", {}).get("side_effect_resolutions", {})
+        operations = await (await db.execute("SELECT id FROM execution_operations WHERE run_id=? "
+            "AND recovery_class != 'read_only' AND status='unknown'", (str(run_id),))).fetchall()
+        if any(resolved.get(op[0]) not in {"executed", "not_executed"} for op in operations):
+            raise RecoveryConflict("unknown_side_effect")
+        if not for_model:
+            retry = state.get("harness_state", {}).get("structured_state", {}).get("retry_invocation_id")
+            for op in operations:
+                if op[0] == retry:
+                    continue
+                settled = await (await db.execute("SELECT quarantined,conflict FROM assistant_effect_settlements "
+                    "WHERE invocation_id=?", (op[0],))).fetchone()
+                if not settled or settled[0] or settled[1]:
+                    raise RecoveryConflict("unknown_side_effect")
+
+    async def record_assistant_late_result(self, lease, step_id, outcome):
+        now = self._aware_now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._configure(db)
+            await db.execute("BEGIN IMMEDIATE")
+            run = await self._run_row(db, lease.run_id)
+            step = await (await db.execute("SELECT s.operation_id FROM execution_steps s JOIN execution_operations o "
+                "ON o.id=s.operation_id WHERE s.id=? AND s.attempt_id=? AND o.run_id=?",
+                (str(step_id), str(lease.attempt_id), str(lease.run_id)))).fetchone()
+            if not step or run[1] != "assistant" or run[4] != "cancelled":
+                raise StaleExecutionOwner("late_result_not_allowed")
+            await self._assistant_recovery_event(db, lease.run_id, "tool.late_result", now,
+                {"step_id": str(step_id), "success": outcome.success,
+                    "result_digest": canonical_digest(outcome.result_payload), "observation_scope": "runtime_local"}, step[0])
+            # A returned local call is not proof that a remote/background writer has stopped.
+            # Preserve quarantine and flag contradictions independently of the user's report.
+            await db.execute("UPDATE assistant_effect_settlements SET conflict=1,quarantined=1 "
+                "WHERE invocation_id=? AND resolution='not_executed' AND ?=1", (step[0], int(outcome.success)))
+            await self._commit(db)
 
     async def queue_stage_action(self, run_id, request):
         from .models import parse_execution_snapshot
@@ -824,13 +953,21 @@ class ExecutionRepository:
                     await self._append_event(db, lease.run_id, "operation.prepared", payload, now)
                 if start:
                     step_id, operation_id = start
+                    if snapshot.snapshot_type == "assistant" and await (await db.execute(
+                        "SELECT 1 FROM assistant_steer WHERE run_id=? AND status='requested'",
+                        (str(lease.run_id),))).fetchone():
+                        raise RecoveryConflict("steer_pending")
                     op = await (await db.execute(
-                        "SELECT status FROM execution_operations WHERE id=? AND run_id=?",
+                        "SELECT status,recovery_class FROM execution_operations WHERE id=? AND run_id=?",
                         (str(operation_id), str(lease.run_id)))).fetchone()
                     if op is None:
                         raise KeyError(str(operation_id))
-                    if op[0] != "prepared":
+                    retry = snapshot.snapshot_type == "assistant" and snapshot.harness_state.get(
+                        "structured_state", {}).get("retry_invocation_id") == str(operation_id)
+                    if op[0] != "prepared" and not (op[0] == "unknown" and retry):
                         raise RecoveryConflict("invalid_transition")
+                    if snapshot.snapshot_type == "assistant" and op[1] != "read_only":
+                        await self._assert_assistant_effect_allowed(db, lease.run_id)
                     number = await (await db.execute(
                         "SELECT COALESCE(MAX(execution_no),0)+1 FROM execution_steps WHERE operation_id=?",
                         (str(operation_id),))).fetchone()

@@ -34,6 +34,10 @@ const task = (id, status = 'completed', kind = 'chat') => ({ run_id: id, session
   phase: 'finished', version: 3, capabilities: status === 'running' ? ['cancel'] : [],
   pending_action: null, result: { answer: `answer-${id}` }, messages: [], legacy: false });
 globalThis.__conversationApi = {
+  async listSessionQueue() { return { paused: false, requests: [] }; },
+  async enqueueTask(id, body) { calls.push(['enqueue', id, body]); return { request_id: 'queued' }; },
+  async steerTask(id, body) { calls.push(['steer', id, body]); return { request_id: 'steer', status: 'requested' }; },
+  async controlSessionQueue() { return { paused: false, requests: [] }; },
   async listSessions() { return { sessions: [session('s1'), session('s2')] }; },
   async listWorkspaces() { return { workspaces: [{ workspace_id: 'ws', repo_path: '/project', available: true }] }; },
   async listSessionTasks(id, limit, offset, signal) { calls.push(['history', id, offset, signal]); return historyReader(id, offset); },
@@ -55,7 +59,7 @@ async function compile(path, replacements) {
 }
 const { ConversationShell } = await compile('../src/components/ConversationShell.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
-  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument } = globalThis.__conversationApi;'],
+  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument, listSessionQueue, enqueueTask, controlSessionQueue, steerTask } = globalThis.__conversationApi;'],
   [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { assistant: "助手", chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
   [/import \{ WorkspacePicker \} from '.\/WorkspacePicker';/, 'const WorkspacePicker = "workspace-picker";'],
 ]);
@@ -179,12 +183,16 @@ test('切换清理计时器与请求，旧会话迟到历史不能覆盖新会�
   assert.equal(timers.size, 0);
 }));
 
-test('活动任务阻止提交、增量游标排空、失败动作不被成功轮询清除', async () => scenario(async ({ timers }) => {
+test('活动任务可编辑并排队、增量游标排空、失败动作不被成功轮询清除', async () => scenario(async ({ timers }) => {
   let state = 'running';
   historyReader = async () => ({ tasks: [task('active', state)] });
   actionReader = async () => { throw new Error('version_conflict'); };
   mount(); await flush();
-  assert.equal(button('提交任务').props.disabled, true);
+  const input = elements().find((node) => node.type === 'textarea');
+  assert.equal(input.props.disabled, false);
+  input.props.onChange({ target: { value: 'next task' } }); await flush();
+  elements().find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush();
+  assert.equal(calls.find((call) => call[0] === 'enqueue')[2].message, 'next task');
   assert.equal(timers.size, 1);
   await cards()[0].props.onAction(cards()[0].props.task, 'cancel', {}); await flush();
   assert.match(text(), /version_conflict/);
@@ -288,6 +296,22 @@ test('统一动作携带 pending ID 与 Run 版本，成功后刷新取消终态
   assert.equal(body.action_id, 'save:7'); assert.equal(body.expected_version, 3);
   assert.equal(body.action, 'save_draft'); assert.deepEqual(body.payload, {});
   assert.equal(cards()[0].props.task.status, 'completed');
+}));
+
+test('调整当前任务使用独立入口并展示接收状态，不消费等待动作', async () => scenario(async () => {
+  const currentTask = { ...task('assistant-run', 'waiting', 'assistant'),
+    pending_action: { action_id: 'input:1', reason: 'clarification' }, capabilities: ['provide_input'] };
+  historyReader = async () => ({ tasks: [currentTask] });
+  taskReader = async () => currentTask;
+  mount(); await flush();
+  elements().find((node) => node.type === 'textarea').props.onChange({ target: { value: 'change direction' } });
+  await flush();
+  button('调整当前任务').props.onClick(); await flush();
+  const sent = calls.find((call) => call[0] === 'steer');
+  assert.equal(sent[1], 'assistant-run'); assert.equal(sent[2].message, 'change direction');
+  assert.equal(calls.some((call) => call[0] === 'action'), false);
+  assert.match(text(), /调整请求已接收/);
+  assert.equal(cards()[0].props.task.pending_action.action_id, 'input:1');
 }));
 
 test('卸载取消正在读取的任务与事件，不发布迟到结果', async () => scenario(async () => {

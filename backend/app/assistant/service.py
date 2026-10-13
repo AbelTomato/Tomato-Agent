@@ -69,7 +69,7 @@ class AssistantService:
             raise ValueError("workspace_not_authorized")
         return root
 
-    async def submit(self, session_id, request, config_digest):
+    async def submit(self, session_id, request, config_digest, *, queued_request_id=None):
         if not self.config.assistant_enabled:
             raise RuntimeError("assistant_disabled")
         if request.workspace_id:
@@ -93,7 +93,7 @@ class AssistantService:
 
         return await self.runs.create_session_run(session_id, "assistant",
             {"message": request.message, "options": request.options}, request.workspace_id,
-            request.client_request_id, snapshot_factory=snapshot_factory)
+            request.client_request_id, snapshot_factory=snapshot_factory, queued_request_id=queued_request_id)
 
     async def execute(self, run, lease, worker_port, config_digest):
         snapshot = await self.execution.get_snapshot(run.id)
@@ -114,4 +114,9 @@ class AssistantService:
                                        llm=gateway, policy=self.policy, budget=self.budget)
 
     async def act(self, run, request):
-        return await self.execution.queue_assistant_action(run.id, request, workspace_validator=self.validate_workspace)
+        def safe_retry(pending, tool_name):
+            descriptor = self.registry.resolve(tool_name)
+            return (descriptor.available and descriptor.contract_version == pending.frozen_parameters.get("contract_version")
+                and descriptor.constraints.get("safe_retry_after_not_executed") is True)
+        return await self.execution.queue_assistant_action(run.id, request, workspace_validator=self.validate_workspace,
+            recovery_validator=safe_retry)

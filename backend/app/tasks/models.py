@@ -65,8 +65,17 @@ class TaskActionRequest(BaseModel):
         elif self.action == "continue_recovery":
             if set(self.payload) != {"confirmed"} or type(self.payload["confirmed"]) is not bool:
                 raise ValueError("confirmed boolean required")
-        elif self.action in {"provide_input", "bind_workspace"}:
-            key = "message" if self.action == "provide_input" else "workspace_id"
+        elif self.action == "resolve_side_effect":
+            if (set(self.payload) != {"resolution"} or not isinstance(self.payload["resolution"], str)
+                    or self.payload["resolution"] not in {"executed", "not_executed", "unknown"}):
+                raise ValueError("side effect resolution required")
+        elif self.action == "provide_input":
+            if (len(self.payload) != 1 or not set(self.payload) <= {"message", "choice"}
+                    or not isinstance(next(iter(self.payload.values())), str)
+                    or not next(iter(self.payload.values())).strip()):
+                raise ValueError("nonblank answer required")
+        elif self.action == "bind_workspace":
+            key = "workspace_id"
             if (set(self.payload) != {key} or not isinstance(self.payload[key], str)
                     or not self.payload[key].strip()):
                 raise ValueError(f"nonblank {key} required")
@@ -78,4 +87,16 @@ class TaskActionRequest(BaseModel):
             GeneratedOutline.model_validate(self.payload["outline"], strict=True)
         elif self.payload:
             raise ValueError("payload must be empty")
+        return self
+
+
+class SteerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_request_id: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1, max_length=20000)
+
+    @model_validator(mode="after")
+    def nonblank(self):
+        if not self.message.strip() or not self.client_request_id.strip():
+            raise ValueError("nonblank steer required")
         return self
