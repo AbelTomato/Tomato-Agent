@@ -769,6 +769,10 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
             settlement = await (await db.execute(
                 "SELECT conflict FROM assistant_effect_settlements WHERE invocation_id=?", (op[0],))).fetchone()
             if settlement and settlement[0]:
+                accepted = await (await db.execute(
+                    "SELECT risk_accepted FROM assistant_effect_settlements WHERE invocation_id=?", (op[0],))).fetchone()
+                if accepted and accepted[0]:
+                    continue
                 raise RecoveryConflict("unknown_side_effect")
         if not for_model:
             retry = state.get("harness_state", {}).get("structured_state", {}).get("retry_invocation_id")
@@ -798,7 +802,7 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     "result_digest": canonical_digest(outcome.result_payload), "observation_scope": "runtime_local"}, step[0])
             # A returned local call is not proof that a remote/background writer has stopped.
             # Preserve quarantine and flag contradictions independently of the user's report.
-            await db.execute("UPDATE assistant_effect_settlements SET conflict=1,quarantined=1 "
+            await db.execute("UPDATE assistant_effect_settlements SET conflict=1,quarantined=1,risk_accepted=0 "
                 "WHERE invocation_id=? AND resolution='not_executed' AND ?=1", (step[0], int(outcome.success)))
             await self._commit(db)
 

@@ -246,7 +246,7 @@ async def test_user_risk_acceptance_allows_new_run_without_claiming_termination(
         expected_version=current.version, client_request_id="accept-risk"))
     projection = (await repo.list_effect_settlements(run.id))[0]
     assert projection == {"invocation_id": str(invocation), "resolution": "executed", "quarantined": True,
-        "termination_evidence": None, "conflict": False, "risk_accepted": True}
+        "termination_evidence": None, "conflict": False, "risk_accepted": True, "admission_blocked": False}
     async with aiosqlite.connect(repo.path) as db:
         accepted = await db.execute_fetchall("SELECT risk_accepted,quarantined,termination_evidence "
             "FROM assistant_effect_settlements WHERE invocation_id=?", (str(invocation),))
@@ -306,10 +306,44 @@ async def test_risk_acceptance_is_rejected_after_late_conflict(tmp_path):
     await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={}))
     projection = (await repo.list_effect_settlements(run.id))[0]
     assert projection["conflict"] and projection["quarantined"] and not projection["risk_accepted"]
-    with pytest.raises(RecoveryConflict, match="unknown_side_effect"):
-        await repo.assert_assistant_effect_allowed(run.id)
+    assert projection["admission_blocked"] is True
+    await repo.accept_effect_conflict_risk(run.id, invocation)
+    accepted = (await repo.list_effect_settlements(run.id))[0]
+    assert accepted["conflict"] and accepted["quarantined"]
+    assert accepted["risk_accepted"] and not accepted["admission_blocked"]
+    await repo.assert_assistant_effect_allowed(run.id)
     with pytest.raises(RunRepositoryConflict, match="effect_unresolved"):
         await repo.reconcile_effect_quarantine(run.id, invocation)
+
+
+async def test_late_success_revokes_previously_accepted_conflict_risk(tmp_path):
+    import aiosqlite
+    from app.execution.models import StepOutcome
+    from app.execution.recovery import RecoveryConflict
+    run, repo, port, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    await repo.queue_assistant_action(run.id, TaskActionRequest(action_id=current.pending_action.action_id,
+        action="resolve_side_effect", payload={"resolution": "not_executed"},
+        expected_version=current.version, client_request_id="record-before-late"))
+    await repo.request_cancel(run.id)
+    async with aiosqlite.connect(repo.path) as db:
+        step = (await db.execute_fetchall("SELECT id FROM execution_steps WHERE operation_id=?", (str(invocation),)))[0][0]
+    await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={}))
+    await repo.accept_effect_conflict_risk(run.id, invocation, "accept-before-later-result")
+    await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={"late": True}))
+    settlement = (await repo.list_effect_settlements(run.id))[0]
+    assert settlement["conflict"] and settlement["quarantined"]
+    assert not settlement["risk_accepted"] and settlement["admission_blocked"]
+    with pytest.raises(RecoveryConflict, match="unknown_side_effect"):
+        await repo.assert_assistant_effect_allowed(run.id)
+
+
+async def test_effect_conflict_risk_acceptance_requires_conflict_and_unblocks_admission(tmp_path):
+    run, repo, port, *_ = await unknown_fixture(tmp_path)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    with pytest.raises(RunRepositoryConflict, match="effect_conflict_required"):
+        await repo.accept_effect_conflict_risk(run.id, invocation)
 
 
 async def test_confirmed_not_executed_retries_only_under_current_contract(tmp_path):

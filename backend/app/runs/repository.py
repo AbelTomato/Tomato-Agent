@@ -209,9 +209,8 @@ class RunRepository(SessionQueueRepository):
                     "WHERE r.workspace_id=? AND o.recovery_class IN ('file_write','sandbox','artifact') "
                     "AND (o.status='running' OR (o.status='unknown' AND NOT EXISTS "
                     "(SELECT 1 FROM assistant_effect_settlements s WHERE s.invocation_id=o.id "
-                    "AND s.conflict=0 AND (s.risk_accepted=1 OR "
-                    "(s.quarantined=0 AND s.termination_evidence IS NOT NULL)))))", (workspace_id,),
-                )).fetchone():
+                    "AND (s.risk_accepted=1 OR (s.conflict=0 AND s.quarantined=0 "
+                    "AND s.termination_evidence IS NOT NULL)))))", (workspace_id,))).fetchone():
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
             run_id, timestamp = uuid4(), _now()
             await db.execute(

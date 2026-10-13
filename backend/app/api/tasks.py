@@ -1,12 +1,18 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.tasks.models import SteerRequest, TaskActionRequest, TaskRecoveryObservation, UnifiedTaskRequest
 from app.workspaces.service import WorkspacePathError
 
 router = APIRouter()
 PageLimit = Query(default=50, ge=1, le=200)
+
+
+class EffectRiskAcceptanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    client_request_id: str = Field(min_length=1, max_length=200)
 
 
 def ident(value, name="run_id"):
@@ -28,7 +34,8 @@ def task_error(exc):
     conflicts = {"session_busy", "workspace_busy", "workspace_busy_unknown_outcome", "request_conflict", "version_conflict",
                  "stale_action", "action_not_allowed", "confirmation_required", "workspace_changed",
                  "domain_version_conflict", "action_conflict", "action_request_conflict", "config_changed", "file_conflict",
-                 "project_operation_exists", "session_mismatch"}
+                 "project_operation_exists", "session_mismatch", "effect_conflict_required", "risk_already_accepted",
+                 "action_request_conflict"}
     if code in conflicts:
         return HTTPException(409, {"code": code})
     if isinstance(exc, WorkspacePathError):
@@ -185,6 +192,19 @@ async def steer_task(run_id: str, body: SteerRequest, request: Request):
 @router.get("/api/tasks/{run_id}/effect-settlements")
 async def effect_settlements(run_id: str, request: Request):
     run = await task_required(request, run_id)
+    return {"settlements": await request.app.state.execution_repository.list_effect_settlements(run.id)}
+
+
+@router.post("/api/tasks/{run_id}/effect-settlements/{invocation_id}/accept-risk")
+async def accept_effect_conflict_risk(run_id: str, invocation_id: str,
+                                     request: Request, body: EffectRiskAcceptanceRequest | None = None):
+    run = await task_required(request, run_id)
+    try:
+        invocation = ident(invocation_id, "invocation_id")
+        await request.app.state.execution_repository.accept_effect_conflict_risk(
+            run.id, invocation, body.client_request_id if body else None)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise task_error(exc) from exc
     return {"settlements": await request.app.state.execution_repository.list_effect_settlements(run.id)}
 
 

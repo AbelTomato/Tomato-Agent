@@ -47,6 +47,17 @@ async def test_submit_replay_conflict_and_cancel_version(tmp_path):
         assert (await client.get(f"/api/tasks/{run['run_id']}")).json()["capabilities"] == []
 
 
+async def test_effect_conflict_risk_acceptance_requires_existing_conflict(tmp_path):
+    async with api(tmp_path) as (_, client, session):
+        run = (await client.post(f"/api/sessions/{session}/tasks", json=body())).json()
+        invocation_id = str(uuid4())
+        response = await client.post(
+            f"/api/tasks/{run['run_id']}/effect-settlements/{invocation_id}/accept-risk",
+            json={"client_request_id": "accept-risk"})
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"code": "effect_conflict_required"}}
+
+
 @pytest.mark.parametrize("kind", ["chat", "knowledge", "writing"])
 async def test_cancel_replay_rejects_changed_content_and_new_stale_key(tmp_path, kind):
     async with api(tmp_path) as (app, client, session):
