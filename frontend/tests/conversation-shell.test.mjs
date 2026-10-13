@@ -24,6 +24,7 @@ const hooks = {
 };
 globalThis.__conversationHooks = hooks;
 const calls = [];
+let settlementReader = async () => ({ settlements: [] });
 let historyReader;
 let eventReader;
 let submitReader;
@@ -63,10 +64,14 @@ const { ConversationShell } = await compile('../src/components/ConversationShell
   [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { assistant: "助手", chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
   [/import \{ WorkspacePicker \} from '.\/WorkspacePicker';/, 'const WorkspacePicker = "workspace-picker";'],
 ]);
-globalThis.__cardApi = { async loadCodeTaskArtifact() { return { content: 'diff-content' }; } };
+globalThis.__cardApi = {
+  async loadCodeTaskArtifact() { return { content: 'diff-content' }; },
+  async listEffectSettlements() { return settlementReader(); },
+  async acceptEffectConflictRisk() { return { settlements: [] }; },
+};
 const { TaskCard, CodeTestResults } = await compile('../src/components/TaskCard.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
-  [/import \{.*?\} from '..\/api';/s, 'const { loadCodeTaskArtifact } = globalThis.__cardApi;'],
+  [/import \{.*?\} from '..\/api';/s, 'const { loadCodeTaskArtifact, listEffectSettlements, acceptEffectConflictRisk } = globalThis.__cardApi;'],
   [/import \{ CitationList \} from '.\/CitationList';/, 'const CitationList = "citations";'],
   [/import \{ AssistantResult \} from '.\/AssistantResult';/, 'const AssistantResult = "assistant-result";'],
   [/import \{ PendingActionPanel \} from '.\/PendingActionPanel';/, 'const PendingActionPanel = "pending-action-panel";'],
@@ -263,6 +268,14 @@ test('材料不足、来源、legacy、无动作与未知测试事实明确展�
   assert.match(text(), /材料不足|无来源/); assert.match(text(), /legacy/);
   assert.equal(elements().some((node) => node.type === 'button' && text(node) === '取消任务'), false);
 }));
+
+test('冲突结算 UI 使用独立 admission 接受操作且明确保留隔离', () => {
+  const source = readFileSync(new URL('../src/components/TaskCard.tsx', import.meta.url), 'utf8');
+  assert.match(source, /settlements\.filter\(\(item\) => item\.conflict\)/);
+  assert.match(source, /acceptEffectConflictRisk\(task\.run_id, invocationId/);
+  assert.match(source, /风险接受不会证明操作已终止，也不会解除隔离/);
+  assert.match(source, /item\.admission_blocked/);
+});
 
 test('原目录注册保留目标，选择 unavailable 禁用，不自动执行命令', async () => scenario(async () => {
   const registrations = [];

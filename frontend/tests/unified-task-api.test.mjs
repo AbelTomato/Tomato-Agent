@@ -29,15 +29,19 @@ test('统一协议编码 ID、分页、动作版本、原目录目标和 AbortSi
     await api.listWorkspaces(signal);
     await api.registerWorkspace('/project', ['tests'], signal);
     await api.setSessionWorkspace('s/a', null, signal);
+    await api.listEffectSettlements('r/a', signal);
+    await api.acceptEffectConflictRisk('r/a', 'i/a', 'risk/a', signal);
     assert.deepEqual(calls.map((call) => call.path), [
       '/api/sessions?limit=200&offset=4', '/api/sessions/s%2Fa/tasks?limit=200&offset=2',
       '/api/sessions/s%2Fa/tasks', '/api/tasks/r%2Fa', '/api/tasks/r%2Fa/events?after=7&limit=200',
       '/api/tasks/r%2Fa/actions', '/api/workspaces', '/api/workspaces', '/api/sessions/s%2Fa/workspace',
+      '/api/tasks/r%2Fa/effect-settlements', '/api/tasks/r%2Fa/effect-settlements/i%2Fa/accept-risk',
     ]);
     assert.deepEqual(JSON.parse(calls[2].init.body), body);
     assert.deepEqual(JSON.parse(calls[5].init.body), action);
     assert.deepEqual(JSON.parse(calls[7].init.body), { path: '/project', pytest_paths: ['tests'] });
     assert.deepEqual(JSON.parse(calls[8].init.body), { workspace_id: null });
+    assert.deepEqual(JSON.parse(calls[10].init.body), { client_request_id: 'risk/a' });
     assert.ok(calls.every((call) => call.init.signal === signal));
   } finally { globalThis.fetch = original; }
 });

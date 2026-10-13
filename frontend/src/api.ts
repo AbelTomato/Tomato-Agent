@@ -309,8 +309,18 @@ export type UnifiedTaskRequest = { kind: TaskKind; message: string; client_reque
   workspace_id?: string | null; options?: { retrieval_mode?: RetrievalMode; limit?: number } };
 export type TaskActionRequest = { action_id: string; action: TaskAction; expected_version: number;
   client_request_id: string; payload: Record<string, unknown> };
+export type EffectSettlement = { invocation_id: string; resolution: string; quarantined: boolean;
+  termination_evidence: string | null; conflict: boolean; risk_accepted: boolean; admission_blocked: boolean };
 const sessionPath = (id: string) => `/api/sessions/${encodeURIComponent(id)}`;
 const taskPath = (id: string) => `/api/tasks/${encodeURIComponent(id)}`;
+export function listEffectSettlements(id: string, signal?: AbortSignal): Promise<{ settlements: EffectSettlement[] }> {
+  return request(`${taskPath(id)}/effect-settlements`, { signal });
+}
+export function acceptEffectConflictRisk(id: string, invocationId: string, clientRequestId: string,
+  signal?: AbortSignal): Promise<{ settlements: EffectSettlement[] }> {
+  return request(`${taskPath(id)}/effect-settlements/${encodeURIComponent(invocationId)}/accept-risk`,
+    { ...jsonRequest({ client_request_id: clientRequestId }), signal });
+}
 export type SessionQueue = { paused: boolean; requests: Array<{ request_id: string; status: string;
   run_id: string | null; request: UnifiedTaskRequest }> };
 export function listSessionQueue(id: string, signal?: AbortSignal): Promise<SessionQueue> {

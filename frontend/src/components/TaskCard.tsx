@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { loadCodeTaskArtifact, type Citation, type CodeTask, type TaskAction, type UnifiedTask, type Workspace } from '../api';
+import { acceptEffectConflictRisk, listEffectSettlements, loadCodeTaskArtifact, type Citation, type CodeTask,
+  type EffectSettlement, type TaskAction, type UnifiedTask, type Workspace } from '../api';
 import { CitationList } from './CitationList';
 import { AssistantResult } from './AssistantResult';
 import { PendingActionPanel } from './PendingActionPanel';
@@ -33,6 +34,8 @@ export function TaskCard({ task, busy, onAction, onOpenDocument, workspaces = []
   const [error, setError] = useState('');
   const [artifact, setArtifact] = useState('');
   const [loading, setLoading] = useState(false);
+  const [settlements, setSettlements] = useState<EffectSettlement[]>([]);
+  const [acceptingConflict, setAcceptingConflict] = useState('');
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
     setOutline(JSON.stringify(result.outline ?? {}, null, 2));
@@ -42,6 +45,14 @@ export function TaskCard({ task, busy, onAction, onOpenDocument, workspaces = []
     setArtifact(''); setLoading(false);
     return () => request.current?.abort();
   }, [task.run_id]);
+  useEffect(() => {
+    if (task.legacy || task.kind !== 'assistant') { setSettlements([]); return; }
+    const controller = new AbortController();
+    void listEffectSettlements(task.run_id, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setSettlements(result.settlements); })
+      .catch(() => { if (!controller.signal.aborted) setSettlements([]); });
+    return () => controller.abort();
+  }, [task.run_id, task.version, task.kind, task.legacy]);
   const allowed = (action: TaskAction) => !task.legacy && task.capabilities.includes(action);
   const recovery = task.recovery?.version === task.version ? task.recovery : undefined;
   async function confirmOutline() {
@@ -62,6 +73,19 @@ export function TaskCard({ task, busy, onAction, onOpenDocument, workspaces = []
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : '无法读取产物。');
     } finally { if (!controller.signal.aborted) setLoading(false); }
   }
+  async function acceptConflictRisk(invocationId: string) {
+    setAcceptingConflict(invocationId);
+    setError('');
+    try {
+      const result = await acceptEffectConflictRisk(task.run_id, invocationId,
+        `accept-conflict-risk:${task.run_id}:${invocationId}`);
+      setSettlements(result.settlements);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法记录风险接受。');
+    } finally {
+      setAcceptingConflict('');
+    }
+  }
   return <article className="task-card" aria-label={`${taskLabels[task.kind]}任务`}>
     <div className="panel-heading"><h2>{taskLabels[task.kind]}</h2><span className={`task-status task-status-${task.status}`}>{statusLabels[task.status] ?? task.status}</span></div>
     <small>Run：{task.run_id} · 阶段：{task.phase ?? '无'} · 版本：{task.version}</small>
@@ -74,6 +98,16 @@ export function TaskCard({ task, busy, onAction, onOpenDocument, workspaces = []
     </>}
     {task.kind === 'assistant' && <AssistantResult result={result} onOpenDocument={onOpenDocument} />}
     {task.kind === 'assistant' && <PendingActionPanel key={`${task.run_id}:${task.version}:${task.pending_action?.action_id}`} task={task} busy={busy} workspaces={workspaces} onAction={onAction} />}
+    {task.kind === 'assistant' && settlements.filter((item) => item.conflict).map((item) => <section className="pending-action-panel" aria-label="副作用冲突处置" key={item.invocation_id}>
+      <h3>检测到迟到结果与核查报告冲突</h3>
+      <p>原操作仍保持隔离；风险接受不会证明操作已终止，也不会解除隔离。</p>
+      <p>调用：{item.invocation_id} · 核查：{item.resolution}</p>
+      {item.admission_blocked
+        ? <button type="button" disabled={busy || !!acceptingConflict} onClick={() => void acceptConflictRisk(item.invocation_id)}>
+          {acceptingConflict === item.invocation_id ? '正在记录…' : '我接受冲突风险并允许后续任务继续'}
+        </button>
+        : <p>已接受 admission 风险；冲突和隔离状态仍保留。</p>}
+    </section>)}
     {task.kind !== 'assistant' && result.citations && <CitationList citations={result.citations} onOpenDocument={onOpenDocument} />}
     {task.kind === 'writing' && <>
       <p>主题：{result.topic ?? '研究中'}</p>
