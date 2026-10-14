@@ -307,6 +307,26 @@ async def test_real_run_tests_execution_status_is_terminal_without_retry(
 
 
 @pytest.mark.asyncio
+async def test_unclassified_model_failure_is_not_reported_as_permission_denied(tmp_path):
+    service = CodeTaskService.for_testing(tmp_path)
+    run = await service.create(CodeTaskRequest(task="Run tests"))
+
+    class FailingLLM:
+        async def complete(self, messages, tools):
+            raise RuntimeError("provider request failed")
+
+    result = await service.execute(
+        str(run.id), llm=FailingLLM(), strategy=object(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "execution_failed"
+    assert "provider request failed" not in str(result)
+    checkpoint = await service.run_repository.get_checkpoint(run.id)
+    assert checkpoint.state["harness_state"]["error_code"] == "execution_failed"
+
+
+@pytest.mark.asyncio
 async def test_harness_invalid_arguments_are_terminal_without_running_tool(tmp_path):
     from pydantic import BaseModel
 

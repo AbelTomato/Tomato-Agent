@@ -422,6 +422,10 @@ async def test_expired_docker_operation_uses_recovery_verifier_once_and_stays_qu
         await db.commit()
 
     clock.value += timedelta(seconds=31)
+    # Model an application restart: discard the original repository object and
+    # reconstruct recovery against the same durable SQLite database.
+    from app.execution.repository import ExecutionRepository
+    repository = ExecutionRepository(repository.path, clock=clock)
     docker_commands = []
     removed = False
 
@@ -445,6 +449,8 @@ async def test_expired_docker_operation_uses_recovery_verifier_once_and_stays_qu
     second = await worker.recover_on_startup()
 
     assert sum(command[0] == "rm" for command in docker_commands) == 1
+    assert any(command[:2] == ("ps", "-a") and "name=^/orphaned-container$" in command
+               for command in docker_commands)
     assert first[0].status == "waiting"
     assert first[0].action == "manual_review"
     assert second == []

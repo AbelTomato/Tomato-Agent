@@ -245,7 +245,7 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget, execut
             elif result.stop_reason == "invalid tool call":
                 code = "invalid_arguments"
             elif result.stop_reason == "harness execution failed":
-                code = "permission_denied" if not saved.test_results else "execution_failed"
+                code = "execution_failed"
             else:
                 code = "completion_validation_failed"
         status = state.get("execution_status", "failed")

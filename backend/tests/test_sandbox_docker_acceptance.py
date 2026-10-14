@@ -16,7 +16,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("scenario", ["isolation", "tests_failed", "create_failed", "timeout", "cancelled"])
+@pytest.mark.parametrize("scenario", [
+    "isolation", "tests_failed", "create_failed", "timeout", "cancelled",
+    "completed", "cleanup_failed",
+])
 async def test_real_docker_gate(tmp_path, monkeypatch, scenario):
     image = os.environ["SANDBOX_IMAGE"]
     subprocess.run(["docker", "version"], check=True, capture_output=True, timeout=10)
@@ -42,6 +45,8 @@ def test_isolation():
         "timeout": "import time\ndef test_sleep():\n    time.sleep(60)\n",
         "cancelled": "import time\ndef test_sleep():\n    time.sleep(60)\n",
         "tests_failed": "def test_failure():\n    assert False, 'acceptance-test-failure'\n",
+        "completed": "def test_success():\n    assert True\n",
+        "cleanup_failed": "import time\ndef test_sleep():\n    time.sleep(60)\n",
         "create_failed": "def test_success():\n    assert True\n",
     }
     source = tmp_path / "test_calculator.py"
@@ -54,12 +59,21 @@ def test_isolation():
         "cwd": str(tmp_path),
     })
     profile = CodeTaskCapabilityProfile(sandbox_backend="docker", allowed_paths=(str(tmp_path),),
-                                        timeout_seconds=2 if scenario == "timeout" else 20,
+                                        timeout_seconds=2 if scenario in {"timeout", "cleanup_failed"} else 20,
                                         max_output_chars=1000)
     if scenario == "create_failed":
         image = "tomato-agent-missing-acceptance@sha256:" + "0" * 64
-    task = asyncio.create_task(DockerSandboxExecutor(image).execute(request, profile))
-    if scenario == "cancelled":
+    executor = DockerSandboxExecutor(image)
+    if scenario == "cleanup_failed":
+        async def fail_cleanup(process, name, *, remove_container=True):
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            return False
+
+        monkeypatch.setattr(executor, "_terminate", fail_cleanup)
+    task = asyncio.create_task(executor.execute(request, profile))
+    if scenario in {"cancelled", "cleanup_failed"}:
         for _ in range(100):
             running = await asyncio.to_thread(subprocess.run, ["docker", "ps", "-q", "--filter",
                 f"label=tomato-agent.request_id={request_id}"], check=True, capture_output=True, timeout=5)
@@ -68,22 +82,40 @@ def test_isolation():
             await asyncio.sleep(0.05)
         else:
             await task
-            pytest.fail("container did not start before cancellation gate")
-        task.cancel()
-    result = await asyncio.wait_for(task, 40)
-    if scenario in ("timeout", "cancelled"):
-        assert result.status == ("timed_out" if scenario == "timeout" else "cancelled")
-        assert result.error_code == ("timeout" if scenario == "timeout" else "cancelled")
-    elif scenario == "create_failed":
-        assert result.status == "failed", result
-        assert result.error_code == "backend_unavailable", result
-    elif scenario == "tests_failed":
-        assert result.status == "completed", result
-        assert result.exit_code == 1, result
-        assert "acceptance-test-failure" in result.stdout, result
-    else:
-        assert result.status == "completed", result
-        assert result.exit_code == 0, result
+            pytest.fail("container did not start before cancellation/cleanup-failure gate")
+        if scenario == "cancelled":
+            task.cancel()
+    try:
+        result = await asyncio.wait_for(task, 10)
+        if scenario == "timeout":
+            assert result.status == "timed_out"
+            assert result.error_code == "timeout"
+        elif scenario == "cancelled":
+            assert result.status == "cancelled"
+            assert result.error_code == "cancelled"
+        elif scenario == "cleanup_failed":
+            assert result.status == "timed_out"
+            assert result.error_code == "cleanup_failed"
+            leftovers = subprocess.run(["docker", "ps", "-aq", "--filter",
+                f"label=tomato-agent.request_id={request_id}"], check=True, capture_output=True, timeout=10)
+            assert leftovers.stdout.strip(), "injected cleanup failure did not leave the owned container"
+        elif scenario == "create_failed":
+            assert result.status == "failed", result
+            assert result.error_code == "backend_unavailable", result
+        elif scenario == "tests_failed":
+            assert result.status == "completed", result
+            assert result.exit_code == 1, result
+            assert "acceptance-test-failure" in result.stdout, result
+        else:
+            assert result.status == "completed", result
+            assert result.exit_code == 0, result
+    finally:
+        leftovers_before_cleanup = subprocess.run(["docker", "ps", "-aq", "--filter",
+            f"label=tomato-agent.request_id={request_id}"], check=True, capture_output=True, timeout=10)
+        container_ids = leftovers_before_cleanup.stdout.decode().split()
+        if container_ids:
+            subprocess.run(["docker", "rm", "-f", *container_ids], check=True,
+                capture_output=True, timeout=10)
     leftovers = subprocess.run(["docker", "ps", "-aq", "--filter",
         f"label=tomato-agent.request_id={request_id}"], check=True, capture_output=True, timeout=10)
     assert not leftovers.stdout.strip(), "owned container remains after execution"
