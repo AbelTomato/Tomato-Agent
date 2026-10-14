@@ -52,7 +52,8 @@ async def test_docker_tracking_schema_persists_and_reopens(tmp_path):
         import aiosqlite
         async with aiosqlite.connect(app.state.execution_repository.path) as db:
             rows = await db.execute_fetchall("PRAGMA table_info(docker_tool_executions)")
-        assert {row[1] for row in rows} >= {"run_id", "invocation_id", "step_id", "container_name", "daemon_id", "launch_closed"}
+        assert {row[1] for row in rows} >= {"run_id", "invocation_id", "step_id", "container_name", "daemon_id", "launch_closed",
+            "lifecycle_state", "revocation_attempts", "last_error"}
 
 
 async def test_tracked_executor_refuses_missing_execution_identity(tmp_path):

@@ -3,11 +3,15 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 from uuid import uuid4
 
 import aiosqlite
 
 from app.agent.sandbox import SandboxResult
+
+
+_DAEMON_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,255}$")
 
 
 DOCKER_EXECUTION_SCHEMA = """
@@ -18,8 +22,13 @@ CREATE TABLE IF NOT EXISTS docker_tool_executions (
     container_name TEXT NOT NULL UNIQUE,
     daemon_id TEXT NOT NULL,
     launch_closed INTEGER NOT NULL DEFAULT 0,
-    termination_evidence TEXT
+    termination_evidence TEXT,
+    lifecycle_state TEXT NOT NULL DEFAULT 'reserved',
+    revocation_attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_docker_tool_executions_lifecycle
+    ON docker_tool_executions(lifecycle_state);
 """
 
 
@@ -58,10 +67,14 @@ class DockerTerminationVerifier:
                 (str(run_id), str(invocation_id)))
             steps = await db.execute_fetchall("SELECT s.id FROM execution_steps s JOIN execution_operations o "
                 "ON o.id=s.operation_id WHERE o.run_id=? AND o.id=?", (str(run_id), str(invocation_id)))
-        if not rows or {r[0] for r in rows} != {s[0] for s in steps} or any(not r[3] for r in rows):
+            operation = await (await db.execute(
+                "SELECT tool_name,recovery_class FROM execution_operations WHERE id=? AND run_id=?",
+                (str(invocation_id), str(run_id)))).fetchone()
+        if (operation is None or operation != ("run_tests", "sandbox") or not rows
+                or {r[0] for r in rows} != {s[0] for s in steps} or any(not r[3] for r in rows)):
             return None
         daemon = await docker_query(self.docker_binary, "info", "--format", "{{.ID}}")
-        if not daemon or any(row[2] != daemon for row in rows):
+        if not daemon or not _DAEMON_ID.fullmatch(daemon) or any(row[2] != daemon for row in rows):
             return None
         objects = []
         for step, name, _, _ in rows:
@@ -77,7 +90,14 @@ class DockerTerminationVerifier:
                     "invocation_id": str(invocation_id), "daemon_id": daemon, "objects": objects}
         if self.persist:
             async with aiosqlite.connect(self.repository.path) as db:
-                await db.execute("UPDATE docker_tool_executions SET termination_evidence=? "
+                existing = await (await db.execute(
+                    "SELECT termination_evidence FROM docker_tool_executions "
+                    "WHERE run_id=? AND invocation_id=? LIMIT 1",
+                    (str(run_id), str(invocation_id)))).fetchone()
+                if existing and existing[0]:
+                    return json.loads(existing[0])
+                await db.execute("UPDATE docker_tool_executions SET termination_evidence=?, "
+                    "lifecycle_state='terminated', last_error=NULL "
                     "WHERE run_id=? AND invocation_id=?", (json.dumps(evidence), str(run_id), str(invocation_id)))
                 await db.commit()
         return evidence
@@ -107,18 +127,43 @@ class TrackedDockerExecutor:
                 return SandboxResult(status="rejected", error_code="execution_identity_missing")
             # Unique Step prevents duplicate launches, including after repository restart.
             await db.execute("INSERT INTO docker_tool_executions "
-                "(step_id,run_id,invocation_id,container_name,daemon_id) VALUES (?,?,?,?,?)",
+                "(step_id,run_id,invocation_id,container_name,daemon_id,lifecycle_state) "
+                "VALUES (?,?,?,?,?,'running')",
                 (context.step_id, context.run_id, context.invocation_id, name, daemon))
             await db.commit()
-        result = await self.executor.execute(request, profile, container_name=name)
+        try:
+            result = await self.executor.execute(request, profile, container_name=name)
+        except BaseException as exc:
+            async with aiosqlite.connect(self.repository.path) as db:
+                await db.execute("UPDATE docker_tool_executions SET lifecycle_state='unknown', "
+                    "last_error=? WHERE step_id=? AND lifecycle_state='running'",
+                    (type(exc).__name__, context.step_id))
+                await db.commit()
+            raise
         # Only a fully returned docker run seals launch. Timeout/cancel/crash remain conservative.
         if result.status == "completed":
             async with aiosqlite.connect(self.repository.path) as db:
-                await db.execute("UPDATE docker_tool_executions SET launch_closed=1 WHERE step_id=?", (context.step_id,))
+                await db.execute("UPDATE docker_tool_executions SET launch_closed=1 "
+                    "WHERE step_id=? AND lifecycle_state='running'", (context.step_id,))
                 await db.commit()
             verifier = DockerTerminationVerifier(self.repository, self.executor.docker_binary)
             if await verifier(context.run_id, context.invocation_id) is None:
+                async with aiosqlite.connect(self.repository.path) as db:
+                    await db.execute("UPDATE docker_tool_executions SET lifecycle_state='unknown', "
+                        "last_error='termination_unknown' WHERE step_id=?", (context.step_id,))
+                    await db.commit()
                 return SandboxResult(status="failed", error_code="termination_unknown")
-        elif result.status not in {"timed_out", "cancelled"}:
+        elif result.status in {"timed_out", "cancelled"}:
+            async with aiosqlite.connect(self.repository.path) as db:
+                await db.execute("UPDATE docker_tool_executions SET lifecycle_state='unknown', "
+                    "last_error=? WHERE step_id=? AND lifecycle_state='running'",
+                    (result.status, context.step_id))
+                await db.commit()
+        else:
+            async with aiosqlite.connect(self.repository.path) as db:
+                await db.execute("UPDATE docker_tool_executions SET lifecycle_state='unknown', "
+                    "last_error=? WHERE step_id=? AND lifecycle_state='running'",
+                    (result.error_code or "executor_failed", context.step_id))
+                await db.commit()
             return result.model_copy(update={"error_code": "termination_unknown"})
         return result

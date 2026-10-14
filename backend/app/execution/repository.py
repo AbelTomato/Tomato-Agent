@@ -34,6 +34,17 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
             await db.executescript(_RECOVERY_SCHEMA)
             from app.execution.docker import DOCKER_EXECUTION_SCHEMA
             await db.executescript(DOCKER_EXECUTION_SCHEMA)
+            docker_columns = {row[1] for row in await (await db.execute(
+                "PRAGMA table_info(docker_tool_executions)")).fetchall()}
+            for column, definition in (
+                ("lifecycle_state", "TEXT NOT NULL DEFAULT 'reserved'"),
+                ("revocation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_error", "TEXT"),
+            ):
+                if column not in docker_columns:
+                    await db.execute(f"ALTER TABLE docker_tool_executions ADD COLUMN {column} {definition}")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_docker_tool_executions_lifecycle "
+                             "ON docker_tool_executions(lifecycle_state)")
             from app.runs.migrations import MODEL_CALL_SCHEMA
             await db.executescript(MODEL_CALL_SCHEMA)
             await db.execute("CREATE TABLE IF NOT EXISTS task_actions (run_id TEXT NOT NULL REFERENCES task_runs(id), "
