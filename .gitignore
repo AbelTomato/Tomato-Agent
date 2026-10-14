@@ -3,6 +3,7 @@ backend/__pycache__/
 backend/.pytest_cache/
 backend/data/
 backend/config.local.toml
+data/code-workspaces/
 frontend/node_modules/
 frontend/dist/
 .env
