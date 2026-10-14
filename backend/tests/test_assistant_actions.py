@@ -242,6 +242,72 @@ async def test_settlement_rejects_unstructured_termination_evidence(tmp_path, ev
     assert (await repo.list_effect_settlements(run.id))[0]["quarantined"] is True
 
 
+async def test_settlement_rejects_docker_evidence_with_incomplete_step_identity(tmp_path):
+    import aiosqlite
+    run, repo, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("UPDATE execution_operations SET tool_name='run_tests',recovery_class='sandbox' WHERE id=?",
+            (str(invocation),))
+        step = (await db.execute_fetchall("SELECT id FROM execution_steps WHERE operation_id=?", (str(invocation),)))[0][0]
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed,termination_evidence) "
+            "VALUES (?,?,?,?,?,1,?)", (step, str(run.id), str(invocation), "container", "daemon-1", "{}"))
+        await db.commit()
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "executed"}, expected_version=current.version, client_request_id="settle-step"))
+    evidence = {"schema_version": 1, "source": "docker_daemon", "run_id": str(run.id),
+        "invocation_id": str(invocation), "daemon_id": "daemon-1", "objects": []}
+
+    async def verifier(_run_id, _invocation_id):
+        return evidence
+
+    with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+        await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verifier)
+    assert (await repo.list_effect_settlements(run.id))[0]["quarantined"] is True
+
+
+async def test_settlement_atomically_persists_matching_docker_evidence(tmp_path):
+    import aiosqlite
+    import json
+    import pytest
+    run, repo, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("UPDATE execution_operations SET tool_name='run_tests',recovery_class='sandbox' WHERE id=?",
+            (str(invocation),))
+        step = (await db.execute_fetchall("SELECT id FROM execution_steps WHERE operation_id=?", (str(invocation),)))[0][0]
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+            (step, str(run.id), str(invocation), "container", "daemon-1"))
+        await db.commit()
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "executed"}, expected_version=current.version, client_request_id="settle-valid"))
+    evidence = {"schema_version": 1, "source": "docker_daemon", "run_id": str(run.id),
+        "invocation_id": str(invocation), "daemon_id": "daemon-1",
+        "objects": [{"step_id": step, "container_name": "container", "state": "absent"}]}
+
+    async def verifier(verified_run_id, verified_invocation_id):
+        assert str(verified_run_id) == str(run.id)
+        assert str(verified_invocation_id) == str(invocation)
+        return evidence
+
+    await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verifier)
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"] is False
+    assert json.loads(projection["termination_evidence"]) == evidence
+    async with aiosqlite.connect(repo.path) as db:
+        docker_rows = await db.execute_fetchall("SELECT lifecycle_state,termination_evidence "
+            "FROM docker_tool_executions WHERE invocation_id=?", (str(invocation),))
+    assert docker_rows == [("terminated", json.dumps(evidence, sort_keys=True, separators=(",", ":")))]
+    with pytest.raises(RunRepositoryConflict, match="effect_already_reconciled"):
+        await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verifier)
+
+
 async def test_docker_late_success_cannot_release_quarantine_or_rewrite_unknown_operation(tmp_path):
     import aiosqlite
     from app.execution.models import StepOutcome

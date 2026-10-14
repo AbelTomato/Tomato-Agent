@@ -46,10 +46,13 @@ class AssistantProtocolClient:
 
 
 class AssistantService:
-    def __init__(self, runs, execution, sessions, workspaces, artifacts, knowledge, llm, config):
+    def __init__(self, runs, execution, sessions, workspaces, artifacts, knowledge, llm, config,
+                 termination_verifier=None, settlement_termination_verifier=None):
         self.runs, self.execution, self.sessions = runs, execution, sessions
         self.workspaces, self.llm = workspaces, llm
         self.config = config
+        self.termination_verifier = termination_verifier
+        self.settlement_termination_verifier = settlement_termination_verifier
         self.registry = CapabilityRegistry()
         register_knowledge(self.registry, knowledge, mode=config.writing_retrieval_mode)
         register_project_reads(self.registry, workspaces, artifacts, runs)
@@ -135,19 +138,17 @@ class AssistantService:
         if (operation.tool_name != "run_tests"
                 or operation.recovery_class != "sandbox" or self.config.code_task_sandbox_backend != "docker"):
             return None
-        from app.execution.docker import DockerTerminationVerifier
-        return await DockerTerminationVerifier(self.execution, self.config.code_task_docker_binary)(run_id, invocation_id)
+        if self.termination_verifier is None:
+            return None
+        return await self.termination_verifier(run_id, invocation_id)
 
     async def reconcile_test_quarantine(self, run_id, invocation_id):
         """Reconcile only the registered read-only test operation after user resolution."""
-        import json
         async def verifier(run, invocation):
             operation = await self.execution.get_operation(invocation)
             if (operation.tool_name != "run_tests" or operation.recovery_class != "sandbox"
-                    or self.config.code_task_sandbox_backend != "docker"):
+                    or self.config.code_task_sandbox_backend != "docker"
+                    or self.settlement_termination_verifier is None):
                 return None
-            from app.execution.docker import DockerTerminationVerifier
-            evidence = await DockerTerminationVerifier(self.execution, self.config.code_task_docker_binary,
-                persist=False)(run, invocation)
-            return json.dumps(evidence) if evidence else None
+            return await self.settlement_termination_verifier(run, invocation)
         return await self.execution.reconcile_effect_quarantine(run_id, invocation_id, termination_verifier=verifier)

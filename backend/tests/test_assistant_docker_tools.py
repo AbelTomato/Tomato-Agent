@@ -406,6 +406,30 @@ async def test_server_verifier_refuses_unsupported_operation(tmp_path, monkeypat
     assert (await repo.list_effect_settlements(run.id))[0]["quarantined"]
 
 
+async def test_app_dependencies_inject_docker_verifier_only_for_docker_backend(tmp_path):
+    from app.dependencies import build_app_dependencies
+    from app.settings import Settings
+    from app.runs.models import RunRepositoryConflict
+
+    image = "pytest@sha256:" + "a" * 64
+    docker_config = Settings(database_path=str(tmp_path / "docker.db"),
+        code_task_sandbox_backend="docker", code_task_docker_image=image)
+    docker_dependencies = build_app_dependencies(docker_config)
+    verifier = docker_dependencies.task_service.assistant.termination_verifier
+    settlement_verifier = docker_dependencies.task_service.assistant.settlement_termination_verifier
+    assert verifier is not None
+    assert settlement_verifier is not None
+    assert verifier.repository is docker_dependencies.code_task_service.execution_repository
+    assert settlement_verifier.repository is docker_dependencies.code_task_service.execution_repository
+    assert verifier.docker_binary == docker_config.code_task_docker_binary
+    assert verifier.persist is True and settlement_verifier.persist is False
+
+    openshell_dependencies = build_app_dependencies(Settings(database_path=str(tmp_path / "openshell.db"),
+        code_task_sandbox_backend="openshell"))
+    assert openshell_dependencies.task_service.assistant.termination_verifier is None
+    assert openshell_dependencies.task_service.assistant.settlement_termination_verifier is None
+
+
 def test_completion_accepts_only_observed_test_reports():
     from types import SimpleNamespace
     from app.assistant.completion import validate_completion

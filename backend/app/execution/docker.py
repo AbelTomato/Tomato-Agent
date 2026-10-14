@@ -63,6 +63,8 @@ class DockerTerminationVerifier:
         self.revoke_unclosed = revoke_unclosed
 
     async def _unknown(self, run_id, invocation_id, error):
+        if not self.persist:
+            return None
         async with aiosqlite.connect(self.repository.path) as db:
             await db.execute("UPDATE docker_tool_executions SET lifecycle_state='unknown', "
                 "last_error=CASE WHEN last_error='revocation_failed' THEN last_error ELSE ? END "

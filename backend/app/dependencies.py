@@ -205,6 +205,14 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
 
     runtime = AgentRuntime(llm_client, ContextManager(), tool_registry, session_repository,
                            "You are a concise assistant.", config.runtime_config)
+    from app.execution.docker import DockerTerminationVerifier
+    docker_termination_verifier = None
+    settlement_termination_verifier = None
+    if config.code_task_sandbox_backend == "docker":
+        docker_termination_verifier = DockerTerminationVerifier(
+            code_task_service.execution_repository, config.code_task_docker_binary)
+        settlement_termination_verifier = DockerTerminationVerifier(
+            code_task_service.execution_repository, config.code_task_docker_binary, persist=False)
     task_service = TaskService(run_repository, code_task_service.execution_repository,
         session_repository, {
             "code": CodeAdapter(code_task_service),
@@ -213,7 +221,9 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
             "writing": WritingAdapter(writing_service, writing_executor, code_task_service.execution_repository),
         }, enabled=config.effective_task_worker_enabled, model_available=bool(config.llm_api_key.strip()),
         assistant=AssistantService(run_repository, code_task_service.execution_repository, session_repository,
-            workspace_service, artifact_service, knowledge_service, llm_client, config),
+            workspace_service, artifact_service, knowledge_service, llm_client, config,
+            termination_verifier=docker_termination_verifier,
+            settlement_termination_verifier=settlement_termination_verifier),
         config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
             "runtime": config.runtime_config.model_dump(mode="json"),
             "writing": {"retrieval_mode": config.writing_retrieval_mode,
