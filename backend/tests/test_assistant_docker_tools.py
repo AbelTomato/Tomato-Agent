@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.tools.base import ToolContext
@@ -169,6 +171,238 @@ async def test_verifier_reopens_database_and_requires_closed_launch(tmp_path, mo
     assert bool(evidence) == expected
     if not closed:
         assert not calls
+
+
+async def test_verifier_returns_structured_step_evidence_for_exact_docker_operation(tmp_path, monkeypatch):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.repository import ExecutionRepository
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={"target": "unit"}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+            (str(step.id), str(run.id), str(op.id), "container", "trusted",))
+        await db.commit()
+
+    async def query(binary, *args):
+        return "trusted" if "info" in args else ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    evidence = await DockerTerminationVerifier(ExecutionRepository(repo.path))(run.id, op.id)
+    assert set(evidence) >= {"schema_version", "source", "run_id", "invocation_id", "daemon_id", "objects"}
+    assert evidence["source"] == "docker_daemon"
+    assert evidence["objects"] == [{"step_id": str(step.id), "container_name": "container", "state": "absent"}]
+    assert json.loads(json.dumps(evidence)) == evidence
+    async with aiosqlite.connect(repo.path) as db:
+        rows = await db.execute_fetchall(
+            "SELECT termination_evidence FROM docker_tool_executions WHERE step_id=?", (str(step.id),))
+    assert json.loads(rows[0][0]) == evidence
+
+
+@pytest.mark.parametrize("tool_name,recovery_class", [("write_file", "file_write"), ("run_tests", "read_only")])
+async def test_verifier_rejects_non_run_tests_operation_even_with_matching_docker_row(
+    tmp_path, monkeypatch, tool_name, recovery_class
+):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.repository import ExecutionRepository
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name=tool_name,
+        input_payload={}, recovery_class=recovery_class)
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+            (str(step.id), str(run.id), str(op.id), "container", "trusted"))
+        await db.commit()
+
+    async def query(binary, *args):
+        return "trusted" if "info" in args else ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    assert await DockerTerminationVerifier(ExecutionRepository(repo.path))(run.id, op.id) is None
+
+
+async def test_verifier_rejects_unparseable_daemon_identity(tmp_path, monkeypatch):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.repository import ExecutionRepository
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+            (str(step.id), str(run.id), str(op.id), "container", "{bad-json}"))
+        await db.commit()
+
+    async def query(binary, *args):
+        return "{bad-json}" if "info" in args else ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    assert await DockerTerminationVerifier(ExecutionRepository(repo.path))(run.id, op.id) is None
+
+
+@pytest.mark.parametrize("failure", ["daemon_changed", "partial", "foreign_step", "missing_step", "query_failed"])
+async def test_verifier_fault_matrix_keeps_all_steps_quarantined(tmp_path, monkeypatch, failure):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    other_id = str(uuid4())
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO execution_steps "
+            "(id,operation_id,attempt_id,execution_no,status,started_at) VALUES (?,?,?,?,?,?)",
+            (other_id, str(op.id), str(lease.attempt_id), 2, "running", "2026-10-10T00:00:00+00:00"))
+        for identity, name in [(str(step.id), "first"), (other_id, "second")]:
+            if failure == "missing_step" and name == "second":
+                continue
+            if failure == "foreign_step" and name == "second":
+                identity = str(uuid4())
+            await db.execute("INSERT INTO docker_tool_executions "
+                "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+                (identity, str(run.id), str(op.id), name, "trusted"))
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?)",
+            (str(op.id), "executed"))
+        await db.commit()
+    info_calls = 0
+
+    async def query(binary, *args):
+        nonlocal info_calls
+        if "info" in args:
+            info_calls += 1
+            return "other" if failure == "daemon_changed" and info_calls > 1 else "trusted"
+        if failure == "query_failed":
+            return None
+        return "second" if failure == "partial" and "name=^/second$" in args else ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    assert await DockerTerminationVerifier(repo)(run.id, op.id) is None
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"] and projection["termination_evidence"] is None
+    async with aiosqlite.connect(repo.path) as db:
+        rows = await db.execute_fetchall("SELECT termination_evidence FROM docker_tool_executions")
+    assert all(row[0] is None for row in rows)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "nonzero", "invalid_utf8", "oversize", "permission"])
+async def test_docker_query_failure_never_returns_absence(tmp_path, monkeypatch, failure):
+    from app.execution.docker import docker_query
+    class Process:
+        returncode = None
+        killed = False
+
+        @property
+        def stdout(self):
+            return self
+
+        async def read(self, limit):
+            if failure == "timeout":
+                raise TimeoutError
+            if failure == "invalid_utf8":
+                return b"\xff"
+            if failure == "oversize":
+                return b"x" * limit
+            return b""
+
+        async def wait(self):
+            self.returncode = -9 if self.killed else 1 if failure == "nonzero" else 0
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+    async def create(*args, **kwargs):
+        if failure == "permission":
+            raise PermissionError("fake Docker socket denied")
+        return process
+
+    monkeypatch.setattr("app.execution.docker.asyncio.create_subprocess_exec", create)
+    assert await docker_query("fake-docker", "ps", "-a") is None
+    if failure == "timeout":
+        assert process.killed and process.returncode is not None
+
+
+async def test_repeated_verification_never_overwrites_saved_termination_evidence(tmp_path, monkeypatch):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    saved = {"schema_version": 1, "source": "docker_daemon", "run_id": str(run.id),
+        "invocation_id": str(op.id), "daemon_id": "trusted", "objects": [
+            {"step_id": str(step.id), "container_name": "container", "state": "absent"}],
+        "observation_id": "first-observation"}
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed,termination_evidence) "
+            "VALUES (?,?,?,?,?,1,?)", (str(step.id), str(run.id), str(op.id), "container", "trusted", json.dumps(saved)))
+        await db.commit()
+    async def query(binary, *args):
+        return "trusted" if "info" in args else ""
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    await DockerTerminationVerifier(repo)(run.id, op.id)
+    async with aiosqlite.connect(repo.path) as db:
+        rows = await db.execute_fetchall("SELECT termination_evidence FROM docker_tool_executions")
+    assert json.loads(rows[0][0]) == saved
+
+
+@pytest.mark.parametrize("backend,tool_name,recovery_class", [
+    ("openshell", "run_tests", "sandbox"), ("docker", "write_file", "file_write"),
+    ("docker", "run_tests", "read_only"),
+])
+async def test_server_verifier_refuses_unsupported_operation(tmp_path, monkeypatch, backend, tool_name, recovery_class):
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from test_execution_recovery import setup_repository, snapshot
+    from app.runs.models import RunRepositoryConflict
+    import aiosqlite
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name=tool_name,
+        input_payload={}, recovery_class=recovery_class)
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?)",
+            (str(op.id), "executed"))
+        await db.commit()
+    app = make_app(tmp_path, assistant_enabled=True, code_task_sandbox_backend=backend,
+        code_task_docker_image="pytest@sha256:" + "a" * 64)
+    assistant = app.state.task_service.assistant
+    assistant.execution = repo
+    async def forbidden(*args, **kwargs):
+        pytest.fail("unsupported operation reached Docker daemon")
+    monkeypatch.setattr("app.execution.docker.docker_query", forbidden)
+    assert await assistant.verify_test_termination(run.id, op.id) is None
+    with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+        await assistant.reconcile_test_quarantine(run.id, op.id)
+    assert (await repo.list_effect_settlements(run.id))[0]["quarantined"]
 
 
 def test_completion_accepts_only_observed_test_reports():

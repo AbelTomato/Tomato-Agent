@@ -66,6 +66,8 @@ pnpm dev
 
 ## 文档导航
 
+2026-10-14 Docker `run_tests` 生产级终止验证计划任务 1 已完成契约与失败测试：目标组合 100 passed、8 FAILED、0 skipped，失败明确暴露 operation 门禁、非法 daemon 身份、证据覆盖与非结构化结算证据缺口。本轮未修改生产实现，真实 Docker 未验收，生产闭环仍待任务 2～7；OpenShell 与通用副作用仍没有可信终止证明。范围与 RED 证据见[Docker 终止验证实施计划](docs/实施计划/2026.10.14-Docker%20run_tests生产级终止验证实施计划.md)。
+
 Runtime 协议任务 5 部分实现，整体仍未完成：澄清动作冻结候选项，`provide_input` 接受单个 `message` 或 `choice`；助手等待动作重复提交返回 409。未知副作用通过显式 `resolve_side_effect` 提交用户核查报告，原未知 Step 保留；用户可对明确的 `executed/not_executed` 报告显式接受风险，使当前 Run 继续并允许后续 workspace Run admission。风险接受记录独立于结算：仍保持 quarantined、无 termination evidence，不能证明旧操作已终止；`unknown` 和迟到冲突仍阻止继续/解锁。SQLite settlement projection 另存核查结论、风险接受、隔离状态、终止证据与迟到冲突。结算仓储已实现服务端注入 verifier 的证据门禁和隔离释放路径，并有注入回调测试；当前没有生产级可信 verifier 接入，因此实际运行仍不能据此解除隔离。完整迟到冲突最终处置仍未交付，任务 5 整体未验收。持久化后续队列、活动期间前端排队入口、安全点 steer 已实现并通过本轮重启、并发唯一启动、暂停/继续/清空验收，详见实施计划检查点。
 
 2026-10-13 后续语义已确认。普通消息持久化排队，仅用于后续 Run；恢复当前 Run 不消费队列，正常完成后按序消费，失败/取消后暂停，需显式继续。Steer 明确提交并保留同一 Run，在安全点应用输入修订，未知结果先核查且预算累计；前端提供排队、调整、继续和清空入口。人工报告、风险接受、结算投影与隔离解锁分离；明确报告并由用户接受风险后可以恢复当前 Run，并在其终态后允许后续 workspace Run 不再受该未知操作锁阻止，但 operation 事实仍为 unknown、quarantine 保留、无 termination evidence。迟到冲突会重新阻断 admission，新增冲突风险接受 API 必须针对已有冲突并以 `client_request_id` 幂等记录；接受只解除 admission 阻断，不清除冲突、隔离或伪造 termination evidence。该 API 尚未接入前端操作面板。结算仓储具备服务端 verifier 注入接口及证据门禁测试，但未接入生产级可信 verifier；完整迟到冲突最终处置和前端冲突处置验收未完成，任务 5 整体未验收。

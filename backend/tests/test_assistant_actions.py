@@ -222,13 +222,53 @@ async def test_settlement_without_termination_evidence_keeps_quarantine(tmp_path
     assert (await repo.get_operation(invocation)).status == "unknown"
     with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
         await repo.reconcile_effect_quarantine(run.id, invocation)
-    async def verified(run_id, invocation_id):
-        assert run_id == run.id and invocation_id == invocation
-        return "test-adapter:writer-stopped"
-    await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verified)
-    assert (await repo.list_effect_settlements(run.id))[0]["quarantined"] is False
-    with pytest.raises(RunRepositoryConflict, match="effect_already_reconciled"):
-        await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=verified)
+    assert (await repo.list_effect_settlements(run.id))[0]["quarantined"] is True
+
+
+@pytest.mark.parametrize("evidence", ["writer-stopped", "risk_accepted", "", None,
+    '{"schema_version":1,"source":"user_report"}',
+    '{"schema_version":1,"source":"docker_daemon","run_id":"other","objects":[]}'])
+async def test_settlement_rejects_unstructured_termination_evidence(tmp_path, evidence):
+    run, repo, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "executed"}, expected_version=current.version, client_request_id="settle"))
+    async def unstructured(_run_id, _invocation_id):
+        return evidence
+    with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+        await repo.reconcile_effect_quarantine(run.id, invocation, termination_verifier=unstructured)
+    assert (await repo.list_effect_settlements(run.id))[0]["quarantined"] is True
+
+
+async def test_docker_late_success_cannot_release_quarantine_or_rewrite_unknown_operation(tmp_path):
+    import aiosqlite
+    from app.execution.models import StepOutcome
+    run, repo, port, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("UPDATE execution_operations SET tool_name='run_tests',recovery_class='sandbox' WHERE id=?",
+            (str(invocation),))
+        step = (await db.execute_fetchall("SELECT id FROM execution_steps WHERE operation_id=?",
+            (str(invocation),)))[0][0]
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,0)",
+            (step, str(run.id), str(invocation), "late-container", "trusted"))
+        await db.commit()
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "executed"}, expected_version=current.version, client_request_id="docker-settle"))
+    await repo.request_cancel(run.id)
+    original = await repo.get_operation(invocation)
+    await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={"exit_code": 0}))
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"] and projection["termination_evidence"] is None
+    assert await repo.get_operation(invocation) == original
+    async with aiosqlite.connect(repo.path) as db:
+        rows = await db.execute_fetchall("SELECT launch_closed,termination_evidence FROM docker_tool_executions")
+    assert rows == [(0, None)]
 
 
 async def test_user_risk_acceptance_allows_new_run_without_claiming_termination(tmp_path):

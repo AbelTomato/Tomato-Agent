@@ -63,6 +63,8 @@ def operation(kind="file_write", status="unknown"):
     ("sandbox", "unknown", {}, "manual_review"),
     ("sandbox", "unknown", {"executor_exited": True,
         "sandbox_reconciled": True, "sandbox_retry_approved": True}, "retry"),
+    ("sandbox", "unknown", {"executor_exited": True}, "manual_review"),
+    ("sandbox", "unknown", {"sandbox_reconciled": True}, "manual_review"),
 ])
 def test_recovery_rules(kind, status, observation, action):
     snap = snapshot(uuid4())
@@ -328,3 +330,52 @@ def test_artifact_duplicate_reference_and_wrong_digest_do_not_confirm():
 def test_pending_tool_without_persisted_response_is_rejected():
     snap = snapshot(uuid4()).model_copy(update={"phase": "pending_tool"})
     assert classify_recovery(snap, None, RecoveryObservation(policy_digest="policy")).action == "reject"
+
+
+@pytest.mark.parametrize("cause", ["timeout", "cancelled", "worker_restart", "revocation_failed"])
+async def test_docker_lost_executor_and_repeated_reconciliation_keep_quarantine(tmp_path, monkeypatch, cause):
+    from app.execution.docker import DockerTerminationVerifier
+    from app.execution.models import OperationInput
+    from app.runs.models import RunRepositoryConflict
+    repository, run, lease, clock = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repository.prepare_operation(lease, op, snapshot(run.id))
+    step = await repository.start_step(lease, op.id, snapshot(run.id))
+    await repository.commit_checkpoint(lease, snapshot(run.id).model_copy(
+        update={"pending_operation_id": op.id}).model_dump(mode="json"))
+    async with aiosqlite.connect(repository.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,0)",
+            (str(step.id), str(run.id), str(op.id), "lost-container", "trusted"))
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?)",
+            (str(op.id), "executed"))
+        await db.commit()
+    if cause == "cancelled":
+        await repository.request_cancel(run.id)
+    else:
+        clock.value += timedelta(seconds=31)
+        repository = ExecutionRepository(repository.path, clock=clock)
+        candidate = await repository.expire_and_classify(lease.attempt_id)
+        decision = classify_recovery(candidate.snapshot, candidate.operation,
+            RecoveryObservation(policy_digest="policy"))
+        assert decision.action == "manual_review"
+    original = await repository.get_operation(op.id)
+
+    async def query(binary, *args):
+        if "info" in args:
+            return "trusted"
+        if "rm" in args or "stop" in args or "kill" in args:
+            return None
+        return "lost-container" if cause == "revocation_failed" else None
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    verifier = DockerTerminationVerifier(repository, persist=False)
+    for _ in range(2):
+        with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+            await repository.reconcile_effect_quarantine(run.id, op.id, termination_verifier=verifier)
+        projection = (await repository.list_effect_settlements(run.id))[0]
+        assert projection["quarantined"] and projection["termination_evidence"] is None
+    assert await repository.get_operation(op.id) == original
+    projection = (await repository.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"] and projection["termination_evidence"] is None
