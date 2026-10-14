@@ -30,7 +30,7 @@ class DockerSandboxExecutor:
             raise ValueError("image must be pinned with a sha256 digest")
         self.image = image
         self.docker_binary = docker_binary
-        self.docker_host = docker_host
+        self.docker_host = docker_host or "unix:///var/run/docker.sock"
         self.registered_targets = {
             str(Path(root).resolve()): {name: tuple(argv) for name, argv in targets.items()}
             for root, targets in (registered_targets or {}).items()
@@ -124,6 +124,7 @@ class DockerSandboxExecutor:
     async def execute(
         self, request: SandboxRequest, profile: CapabilityProfile, *, container_name: str | None = None
     ) -> SandboxResult:
+        tracked = container_name is not None
         try:
             validate_capability_profile(profile)
             container_name = container_name or f"tomato-agent-{uuid4().hex}"
@@ -158,17 +159,17 @@ class DockerSandboxExecutor:
                 output_truncated=output_truncated or stdout[1] or stderr[1],
             )
         except asyncio.TimeoutError:
-            clean = await self._terminate(process, container_name)
+            clean = await self._terminate(process, container_name, remove_container=not tracked)
             return SandboxResult(status="timed_out", error_code="timeout" if clean else "cleanup_failed")
         except asyncio.CancelledError:
-            clean = await self._terminate(process, container_name)
+            clean = await self._terminate(process, container_name, remove_container=not tracked)
             return SandboxResult(status="cancelled", error_code="cancelled" if clean else "cleanup_failed")
         except (OSError, FileNotFoundError):
-            if process is not None and not await self._terminate(process, container_name):
+            if process is not None and not await self._terminate(process, container_name, remove_container=not tracked):
                 return SandboxResult(status="failed", error_code="cleanup_failed")
             return SandboxResult(status="failed", error_code="backend_unavailable")
         except Exception:
-            if process is not None and not await self._terminate(process, container_name):
+            if process is not None and not await self._terminate(process, container_name, remove_container=not tracked):
                 return SandboxResult(status="failed", error_code="cleanup_failed")
             return SandboxResult(status="failed", error_code="execution_failed")
 
@@ -195,7 +196,7 @@ class DockerSandboxExecutor:
             return (stdout, stderr), False
         return (stdout[:limit], ""), True
 
-    async def _terminate(self, process: asyncio.subprocess.Process | None, name: str) -> bool:
+    async def _terminate(self, process: asyncio.subprocess.Process | None, name: str, *, remove_container=True) -> bool:
         clean = True
         if process is not None and process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
@@ -204,6 +205,8 @@ class DockerSandboxExecutor:
                 await asyncio.wait_for(process.wait(), 5)
             except (OSError, asyncio.TimeoutError):
                 clean = False
+        if not remove_container:
+            return clean
         cleanup = None
         try:
             cleanup = await asyncio.wait_for(asyncio.create_subprocess_exec(

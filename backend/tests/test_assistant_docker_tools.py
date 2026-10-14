@@ -460,3 +460,195 @@ def test_execution_authorization_is_strict_boolean(value):
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         UnifiedTaskRequest(kind="assistant", message="test", client_request_id="r", options={"allow_test_execution": value})
+
+
+@pytest.mark.parametrize("failure", [None, "revocation", "reappears", "daemon_changed", "malformed"])
+async def test_bounded_revocation_requires_two_observations_and_latches_failure(tmp_path, monkeypatch, failure):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed,lifecycle_state) "
+            "VALUES (?,?,?,?,?,1,'unknown')", (str(step.id), str(run.id), str(op.id), "container", "trusted"))
+        await db.commit()
+    calls = []
+    removed = False
+    observations = 0
+
+    async def query(binary, *args):
+        nonlocal removed, observations
+        calls.append(args)
+        if args[0] == "info":
+            return "other" if removed and failure == "daemon_changed" else "trusted"
+        if args[0] == "rm":
+            removed = True
+            return None if failure == "revocation" else "container"
+        observations += 1
+        if failure == "malformed":
+            return "foreign-container"
+        if not removed or (failure == "reappears" and observations >= 3):
+            return "container"
+        return ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    verifier = DockerTerminationVerifier(repo)
+    evidence = await verifier(run.id, op.id)
+    assert bool(evidence) is (failure is None)
+    async with aiosqlite.connect(repo.path) as db:
+        state = await (await db.execute("SELECT lifecycle_state,revocation_attempts,termination_evidence "
+            "FROM docker_tool_executions")).fetchone()
+    if failure is None:
+        assert state[0:2] == ("terminated", 1)
+        assert observations >= 3
+        assert json.loads(state[2]) == evidence
+    else:
+        assert state[0] == "unknown" and state[2] is None
+    if failure == "revocation":
+        assert await verifier(run.id, op.id) is None
+        assert sum(args[0] == "rm" for args in calls) == 1
+
+
+async def test_query_cancellation_reaps_management_process(monkeypatch):
+    import asyncio
+    from app.execution.docker import docker_query
+
+    class Process:
+        returncode = None
+        killed = False
+
+        @property
+        def stdout(self):
+            return self
+
+        async def read(self, limit):
+            raise asyncio.CancelledError
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            self.returncode = -9
+
+    process = Process()
+
+    async def spawn(*args, **kwargs):
+        assert args[:3] == ("docker", "--host", "unix:///var/run/docker.sock")
+        assert "DOCKER_HOST" not in kwargs["env"]
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    with pytest.raises(asyncio.CancelledError):
+        await docker_query("docker", "rm", "-f", "container")
+    assert process.killed and process.returncode == -9
+
+
+@pytest.mark.parametrize("outcome", ["timed_out", "cancelled", "exception", "cancellation"])
+async def test_tracked_interruption_revokes_but_never_seals_unknown_launch(tmp_path, monkeypatch, outcome):
+    import asyncio
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import TrackedDockerExecutor, DockerTerminationVerifier
+    from app.agent.sandbox import SandboxRequest
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    context = ToolContext(session_id="s", run_id=str(run.id), invocation_id=str(op.id),
+        step_id=str(step.id), lease=lease)
+    container = None
+    removed = False
+    commands = []
+
+    class Executor:
+        docker_binary = "docker"
+
+        async def execute(self, request, profile, *, container_name):
+            nonlocal container
+            container = container_name
+            if outcome == "exception":
+                raise RuntimeError("executor lost")
+            if outcome == "cancellation":
+                raise asyncio.CancelledError
+            return SandboxResult(status=outcome, error_code=outcome)
+
+    async def query(binary, *args):
+        nonlocal removed
+        commands.append(args)
+        if args[0] == "info":
+            return "trusted"
+        if args[0] == "rm":
+            assert args == ("rm", "-f", container)
+            removed = True
+            return container
+        return "" if removed else container
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    executor = TrackedDockerExecutor(Executor(), repo, context)
+    request = SandboxRequest(tool_name="run_tests", request_id="req", arguments={})
+    if outcome in {"exception", "cancellation"}:
+        with pytest.raises(RuntimeError if outcome == "exception" else asyncio.CancelledError):
+            await executor.execute(request, CodeTaskCapabilityProfile())
+    else:
+        assert (await executor.execute(request, CodeTaskCapabilityProfile())).status == outcome
+    assert removed
+    assert await DockerTerminationVerifier(repo)(run.id, op.id) is None
+    async with aiosqlite.connect(repo.path) as db:
+        row = await (await db.execute("SELECT launch_closed,lifecycle_state,revocation_attempts,termination_evidence "
+            "FROM docker_tool_executions")).fetchone()
+    assert row == (0, "unknown", 1, None)
+    assert sum(args[0] == "rm" for args in commands) == 1
+
+
+async def test_concurrent_verifiers_reserve_only_one_revocation(tmp_path, monkeypatch):
+    import asyncio
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import DockerTerminationVerifier
+    from test_execution_recovery import setup_repository, snapshot
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) VALUES (?,?,?,?,?,1)",
+            (str(step.id), str(run.id), str(op.id), "container", "trusted"))
+        await db.commit()
+    started, release = asyncio.Event(), asyncio.Event()
+    removed = False
+    revocations = 0
+
+    async def query(binary, *args):
+        nonlocal removed, revocations
+        if args[0] == "info":
+            return "trusted"
+        if args[0] == "rm":
+            revocations += 1
+            started.set()
+            await release.wait()
+            removed = True
+            return "container"
+        return "" if removed else "container"
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    first = asyncio.create_task(DockerTerminationVerifier(repo)(run.id, op.id))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert await DockerTerminationVerifier(repo)(run.id, op.id) is None
+    finally:
+        release.set()
+    assert await first
+    assert revocations == 1

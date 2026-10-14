@@ -23,7 +23,7 @@ def test_docker_command_is_restricted_and_uses_registered_argv(tmp_path: Path):
 
     command = executor.build_run_argv(request, profile, "tomato-agent-request-1")
 
-    assert command[:3] == ["docker", "run", "--rm"]
+    assert command[:5] == ["docker", "--host", "unix:///var/run/docker.sock", "run", "--rm"]
     assert "--network" in command and command[command.index("--network") + 1] == "none"
     assert "--read-only" in command
     assert command[command.index("--cap-drop") + 1] == "ALL"
@@ -116,7 +116,7 @@ async def test_cleanup_reports_management_exit_code(monkeypatch, exit_code):
     monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
     clean = await DockerSandboxExecutor(IMAGE)._terminate(None, "tomato-agent-owned")
     assert clean is (exit_code == 0)
-    assert calls == [("docker", "rm", "-f", "tomato-agent-owned")]
+    assert calls == [("docker", "--host", "unix:///var/run/docker.sock", "rm", "-f", "tomato-agent-owned")]
 
 
 @pytest.mark.asyncio
@@ -126,3 +126,23 @@ async def test_cleanup_reports_missing_management_binary(monkeypatch):
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
     assert not await DockerSandboxExecutor(IMAGE)._terminate(None, "tomato-agent-owned")
+
+
+async def test_tracked_cleanup_only_reaps_local_process(monkeypatch):
+    class Process:
+        returncode = None
+        killed = False
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            self.returncode = -9
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("tracked cleanup bypassed daemon identity verifier")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", forbidden)
+    process = Process()
+    assert await DockerSandboxExecutor(IMAGE)._terminate(process, "container", remove_container=False)
+    assert process.killed and process.returncode == -9
