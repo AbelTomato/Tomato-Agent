@@ -25,6 +25,8 @@ const hooks = {
 globalThis.__conversationHooks = hooks;
 const calls = [];
 let settlementReader = async () => ({ settlements: [] });
+let cardSettlementReader = async () => ({ settlements: [] });
+let cardRiskAcceptor = async () => ({ settlements: [] });
 let historyReader;
 let eventReader;
 let submitReader;
@@ -66,8 +68,8 @@ const { ConversationShell } = await compile('../src/components/ConversationShell
 ]);
 globalThis.__cardApi = {
   async loadCodeTaskArtifact() { return { content: 'diff-content' }; },
-  async listEffectSettlements() { return settlementReader(); },
-  async acceptEffectConflictRisk() { return { settlements: [] }; },
+  async listEffectSettlements(...args) { return cardSettlementReader(...args); },
+  async acceptEffectConflictRisk(...args) { return cardRiskAcceptor(...args); },
 };
 const { TaskCard, CodeTestResults } = await compile('../src/components/TaskCard.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
@@ -269,13 +271,53 @@ test('材料不足、来源、legacy、无动作与未知测试事实明确展�
   assert.equal(elements().some((node) => node.type === 'button' && text(node) === '取消任务'), false);
 }));
 
-test('冲突结算 UI 使用独立 admission 接受操作且明确保留隔离', () => {
-  const source = readFileSync(new URL('../src/components/TaskCard.tsx', import.meta.url), 'utf8');
-  assert.match(source, /settlements\.filter\(\(item\) => item\.conflict\)/);
-  assert.match(source, /acceptEffectConflictRisk\(task\.run_id, invocationId/);
-  assert.match(source, /风险接受不会证明操作已终止，也不会解除隔离/);
-  assert.match(source, /item\.admission_blocked/);
-});
+test('冲突处置可接受 admission 风险、保留隔离事实并展示迟到冲突重新阻断', async () => scenario(async () => {
+  let settlements = [{ invocation_id: 'inv-1', resolution: 'executed', quarantined: true,
+    termination_evidence: null, conflict: true, risk_accepted: false, admission_blocked: true }];
+  let releaseAcceptance;
+  cardSettlementReader = async () => ({ settlements });
+  cardRiskAcceptor = async () => new Promise((resolve) => {
+    releaseAcceptance = () => {
+      settlements = [{ ...settlements[0], risk_accepted: true, admission_blocked: false }];
+      resolve({ settlements });
+    };
+  });
+  const currentTask = { ...task('assistant-conflict', 'waiting', 'assistant') };
+  mount(() => TaskCard({ task: currentTask, busy: false, onAction: async () => {}, onOpenDocument() {} }));
+  await flush();
+  assert.match(text(), /检测到迟到结果与核查报告冲突/);
+  assert.match(text(), /不会证明操作已终止，也不会解除隔离/);
+  assert.equal(button('我接受冲突风险并允许后续任务继续').props.disabled, false);
+
+  button('我接受冲突风险并允许后续任务继续').props.onClick();
+  await flush();
+  assert.equal(button('正在记录…').props.disabled, true);
+  releaseAcceptance();
+  await flush();
+  assert.match(text(), /已接受 admission 风险；冲突和隔离状态仍保留/);
+  assert.doesNotMatch(text(), /正在记录…/);
+
+  settlements = [{ ...settlements[0], admission_blocked: true }];
+  currentTask.version += 1;
+  harness.dirty = true;
+  await flush();
+  assert.equal(button('我接受冲突风险并允许后续任务继续').props.disabled, false);
+  unmount();
+}));
+
+test('冲突风险接受失败时显示服务端错误并允许重试', async () => scenario(async () => {
+  cardSettlementReader = async () => ({ settlements: [{ invocation_id: 'inv-2',
+    resolution: 'not_executed', quarantined: true, termination_evidence: null, conflict: true,
+    risk_accepted: false, admission_blocked: true }] });
+  cardRiskAcceptor = async () => { throw new Error('action_request_conflict'); };
+  mount(() => TaskCard({ task: { ...task('assistant-conflict', 'waiting', 'assistant') }, busy: false,
+    onAction: async () => {}, onOpenDocument() {} }));
+  await flush();
+  button('我接受冲突风险并允许后续任务继续').props.onClick();
+  await flush();
+  assert.match(text(), /action_request_conflict/);
+  assert.equal(button('我接受冲突风险并允许后续任务继续').props.disabled, false);
+}));
 
 test('原目录注册保留目标，选择 unavailable 禁用，不自动执行命令', async () => scenario(async () => {
   const registrations = [];
