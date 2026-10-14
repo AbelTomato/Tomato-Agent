@@ -540,6 +540,47 @@ async def test_bounded_revocation_requires_two_observations_and_latches_failure(
         assert sum(args[0] == "rm" for args in calls) == 1
 
 
+async def test_daemon_identity_change_rejects_settlement_independently(tmp_path, monkeypatch):
+    import aiosqlite
+    from uuid import uuid4
+    from app.execution.models import OperationInput
+    from app.execution.docker import DockerTerminationVerifier
+    from app.runs.models import RunRepositoryConflict
+    from test_execution_recovery import setup_repository, snapshot
+
+    repo, run, lease, _ = await setup_repository(tmp_path)
+    op = OperationInput(id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={}, recovery_class="sandbox")
+    await repo.prepare_operation(lease, op, snapshot(run.id))
+    step = await repo.start_step(lease, op.id, snapshot(run.id))
+    async with aiosqlite.connect(repo.path) as db:
+        await db.execute("INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) "
+            "VALUES (?,?,?,?,?,1)",
+            (str(step.id), str(run.id), str(op.id), "tracked-container", "persisted-daemon"))
+        await db.execute("INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?)",
+            (str(op.id), "executed"))
+        await db.commit()
+
+    async def query(binary, *args):
+        if args[0] == "info":
+            return "replacement-daemon"
+        return ""
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    verifier = DockerTerminationVerifier(repo)
+    assert await verifier(run.id, op.id) is None
+    with pytest.raises(RunRepositoryConflict, match="termination_evidence_missing"):
+        await repo.reconcile_effect_quarantine(run.id, op.id, termination_verifier=verifier)
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"] and projection["termination_evidence"] is None
+    async with aiosqlite.connect(repo.path) as db:
+        evidence = await (await db.execute(
+            "SELECT termination_evidence FROM docker_tool_executions WHERE step_id=?", (str(step.id),)
+        )).fetchone()
+    assert evidence == (None,)
+
+
 async def test_query_cancellation_reaps_management_process(monkeypatch):
     import asyncio
     from app.execution.docker import docker_query
