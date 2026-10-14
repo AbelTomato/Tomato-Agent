@@ -376,6 +376,28 @@ async def test_user_risk_acceptance_allows_new_run_without_claiming_termination(
     assert new_run.status == "queued"
 
 
+async def test_user_can_accept_risk_without_claiming_unknown_operation_did_or_did_not_run(tmp_path):
+    import aiosqlite
+    run, repo, *_ = await unknown_fixture(tmp_path)
+    current = await repo.get_run(run.id)
+    invocation = (await repo.get_snapshot(run.id)).pending_operation_id
+    await repo.queue_assistant_action(run.id, TaskActionRequest(
+        action_id=current.pending_action.action_id, action="resolve_side_effect",
+        payload={"resolution": "unknown", "accept_risk": True},
+        expected_version=current.version, client_request_id="accept-unknown-risk"))
+
+    projection = (await repo.list_effect_settlements(run.id))[0]
+    assert projection["resolution"] == "unknown"
+    assert projection["risk_accepted"] and projection["quarantined"]
+    assert projection["termination_evidence"] is None
+    await repo.assert_assistant_effect_allowed(run.id)
+    with pytest.raises(RunRepositoryConflict, match="effect_unresolved"):
+        await repo.reconcile_effect_quarantine(run.id, invocation)
+    async with aiosqlite.connect(repo.path) as db:
+        operation = await db.execute_fetchall("SELECT status FROM execution_operations WHERE id=?", (str(invocation),))
+    assert operation == [("unknown",)]
+
+
 async def test_late_success_conflicts_with_not_executed_report_and_retains_lock(tmp_path):
     import aiosqlite
     from app.execution.models import StepOutcome
@@ -422,7 +444,7 @@ async def test_risk_acceptance_is_rejected_after_late_conflict(tmp_path):
         await repo.reconcile_effect_quarantine(run.id, invocation)
 
 
-async def test_late_success_revokes_previously_accepted_conflict_risk(tmp_path):
+async def test_late_success_preserves_user_accepted_conflict_risk_but_keeps_quarantine(tmp_path):
     import aiosqlite
     from app.execution.models import StepOutcome
     from app.execution.recovery import RecoveryConflict
@@ -440,9 +462,8 @@ async def test_late_success_revokes_previously_accepted_conflict_risk(tmp_path):
     await repo.record_assistant_late_result(port.lease, step, StepOutcome(success=True, result_payload={"late": True}))
     settlement = (await repo.list_effect_settlements(run.id))[0]
     assert settlement["conflict"] and settlement["quarantined"]
-    assert not settlement["risk_accepted"] and settlement["admission_blocked"]
-    with pytest.raises(RecoveryConflict, match="unknown_side_effect"):
-        await repo.assert_assistant_effect_allowed(run.id)
+    assert settlement["risk_accepted"] and not settlement["admission_blocked"]
+    await repo.assert_assistant_effect_allowed(run.id)
 
 
 async def test_effect_conflict_risk_acceptance_requires_conflict_and_unblocks_admission(tmp_path):

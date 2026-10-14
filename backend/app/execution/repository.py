@@ -733,7 +733,7 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
         existing_settlement = await (await db.execute(
             "SELECT conflict FROM assistant_effect_settlements WHERE invocation_id=?", (invocation_id,))).fetchone()
         if (pending.action_type != "recovery" or invocation_id != str(snapshot.pending_operation_id)
-                or not op or op[0] != "unknown" or (accept_risk and resolution == "unknown")
+                or not op or op[0] != "unknown"
                 or (accept_risk and existing_settlement and existing_settlement[0])):
             raise RunRepositoryConflict("action_not_allowed")
         await self._assistant_recovery_event(db, snapshot.run_id, "tool.reconciled", now,
@@ -791,9 +791,13 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
         resolved = state.get("harness_state", {}).get("structured_state", {}).get("side_effect_resolutions", {})
         operations = await (await db.execute("SELECT id FROM execution_operations WHERE run_id=? "
             "AND recovery_class != 'read_only' AND status='unknown'", (str(run_id),))).fetchall()
-        if any(resolved.get(op[0]) not in {"executed", "not_executed"} for op in operations):
+        risk_accepted = state.get("harness_state", {}).get("structured_state", {}).get("side_effect_risk_accepted", {})
+        if any(resolved.get(op[0]) not in {"executed", "not_executed"} and not risk_accepted.get(op[0])
+                for op in operations):
             raise RecoveryConflict("unknown_side_effect")
         for op in operations:
+            if risk_accepted.get(op[0]):
+                continue
             settlement = await (await db.execute(
                 "SELECT conflict FROM assistant_effect_settlements WHERE invocation_id=?", (op[0],))).fetchone()
             if settlement and settlement[0]:
@@ -830,7 +834,7 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     "result_digest": canonical_digest(outcome.result_payload), "observation_scope": "runtime_local"}, step[0])
             # A returned local call is not proof that a remote/background writer has stopped.
             # Preserve quarantine and flag contradictions independently of the user's report.
-            await db.execute("UPDATE assistant_effect_settlements SET conflict=1,quarantined=1,risk_accepted=0 "
+            await db.execute("UPDATE assistant_effect_settlements SET conflict=1,quarantined=1 "
                 "WHERE invocation_id=? AND resolution='not_executed' AND ?=1", (step[0], int(outcome.success)))
             await self._commit(db)
 

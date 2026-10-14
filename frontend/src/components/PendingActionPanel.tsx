@@ -8,6 +8,7 @@ export function PendingActionPanel({ task, busy, workspaces, onAction }: {
   const [input, setInput] = useState('');
   const [workspace, setWorkspace] = useState('');
   const [acceptRisk, setAcceptRisk] = useState(false);
+  const [confirmRisk, setConfirmRisk] = useState(false);
   const pending = task.pending_action;
   if (!pending || task.status !== 'waiting' || task.legacy) return null;
   const allowed = (action: TaskAction) => task.capabilities.includes(action) && pending.allowed_actions.includes(action);
@@ -19,13 +20,21 @@ export function PendingActionPanel({ task, busy, workspaces, onAction }: {
     {pending.target_capability && <p>请求能力：{pending.target_capability}</p>}
     {allowed('resolve_side_effect') && <fieldset disabled={busy}>
       <legend>核对未知操作</legend>
-      <p>风险接受只允许后续任务继续，不代表旧操作已终止；迟到冲突仍会阻止继续。</p>
+      <p>系统无法确认旧操作是否已经启动或结束。你可以核查并提交报告，也可以承担风险继续工作。</p>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'executed' })}>确认已执行</button>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'not_executed' })}>确认未执行</button>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'unknown' })}>仍无法确认</button>
-      <label><input type="checkbox" checked={acceptRisk} onChange={(event) => setAcceptRisk(event.target.checked)} />我接受旧操作仍可能产生影响，并允许后续任务继续</label>
-      <button type="button" disabled={!acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'executed', accept_risk: true })}>确认已执行并继续</button>
-      <button type="button" disabled={!acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'not_executed', accept_risk: true })}>确认未执行并继续</button>
+      <label><input type="checkbox" checked={acceptRisk} onChange={(event) => setAcceptRisk(event.target.checked)} />我已了解旧操作可能仍会产生影响</label>
+      <button type="button" disabled={!acceptRisk || busy} onClick={() => setConfirmRisk(true)}>接受风险并继续</button>
+      {confirmRisk && <section className="risk-confirm-dialog" role="alertdialog" aria-labelledby="risk-confirm-title" aria-describedby="risk-confirm-description">
+        <h4 id="risk-confirm-title">确认承担未完成操作的风险</h4>
+        <p id="risk-confirm-description">旧 Worker 或 Docker 请求仍可能迟到执行，并与后续操作同时影响工作区。继续不会终止旧操作，也不会解除隔离或生成终止证明；请确认你仍要继续。</p>
+        <button type="button" disabled={busy} onClick={() => {
+          setConfirmRisk(false);
+          void onAction(task, 'resolve_side_effect', { resolution: 'unknown', accept_risk: true });
+        }}>我接受风险，继续</button>
+        <button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmRisk(false)}>返回</button>
+      </section>}
     </fieldset>}
     {allowed('provide_input') && <>
       <label>补充说明<textarea value={input} disabled={busy} onChange={(event) => setInput(event.target.value)} rows={3} /></label>

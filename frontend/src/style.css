@@ -49,5 +49,7 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .assistant-result, .pending-action-panel { display: grid; gap: 12px; min-width: 0; }
 .pending-action-panel { border: 1px solid #fcd34d; background: #fffbeb; border-radius: 8px; padding: 12px; }
 .pending-action-panel button { justify-self: start; }
+.risk-confirm-dialog { position: fixed; inset: 50% auto auto 50%; transform: translate(-50%, -50%); z-index: 1000; width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; display: grid; gap: 12px; padding: 20px; border: 1px solid #b45309; border-radius: 8px; background: white; box-shadow: 0 16px 48px rgb(15 23 42 / 24%); }
+.risk-confirm-dialog h4, .risk-confirm-dialog p { margin: 0; }
 .assistant-result ul { padding-left: 22px; overflow-wrap: anywhere; }
 @media (max-width: 800px) { .conversation-layout { grid-template-columns: minmax(0, 1fr); }.session-sidebar { position: static; }.session-sidebar nav { max-height: 160px; }.conversation-layout > .document-panel { grid-column: 1; } }
