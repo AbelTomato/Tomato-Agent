@@ -119,7 +119,7 @@ def classify_recovery(snapshot, operation, observation: RecoveryObservation) -> 
                    and ref.get("content_digest") == operation.output_digest]
         if len(matches) == 1:
             return decision("reconcile", "unique_artifact_confirmed", matches[0])
-    if (operation.recovery_class == "sandbox" and observation.executor_exited
+    if (operation.tool_name != "run_tests" and operation.recovery_class == "sandbox" and observation.executor_exited
             and observation.sandbox_reconciled and observation.sandbox_retry_approved):
         return decision("retry", "sandbox_retry_confirmed")
     return decision("manual_review", "unknown_side_effect")

@@ -74,6 +74,17 @@ def test_recovery_rules(kind, status, observation, action):
     assert decision.action == action
 
 
+def test_run_tests_sandbox_never_uses_generic_retry_approval():
+    snap = snapshot(uuid4())
+    op = operation("sandbox", "unknown").model_copy(update={"tool_name": "run_tests"})
+    decision = classify_recovery(snap, op, RecoveryObservation(
+        policy_digest="policy", executor_exited=True,
+        sandbox_reconciled=True, sandbox_retry_approved=True,
+    ))
+    assert decision.action == "manual_review"
+    assert decision.reason_code == "unknown_side_effect"
+
+
 @pytest.mark.parametrize("count,action", [(0, "manual_review"), (1, "reconcile"), (2, "manual_review")])
 def test_artifact_requires_unique_operation_and_content_match(count, action):
     op = operation("artifact")
@@ -379,3 +390,71 @@ async def test_docker_lost_executor_and_repeated_reconciliation_keep_quarantine(
     assert await repository.get_operation(op.id) == original
     projection = (await repository.list_effect_settlements(run.id))[0]
     assert projection["quarantined"] and projection["termination_evidence"] is None
+
+
+async def test_expired_docker_operation_uses_recovery_verifier_once_and_stays_quarantined(
+    tmp_path, monkeypatch,
+):
+    from app.execution.docker import DockerTerminationVerifier
+    from app.execution.models import OperationInput
+    from app.execution.worker import ExecutionWorker
+
+    repository, run, lease, clock = await setup_repository(tmp_path)
+    operation_input = OperationInput(
+        id=uuid4(), logical_index=0, kind="tool", tool_name="run_tests",
+        input_payload={"target": "unit"}, recovery_class="sandbox",
+    )
+    saved = snapshot(run.id).model_copy(update={"pending_operation_id": operation_input.id})
+    await repository.prepare_operation(lease, operation_input, saved)
+    step = await repository.start_step(lease, operation_input.id, saved)
+    await repository.commit_checkpoint(lease, saved.model_dump(mode="json"))
+    async with aiosqlite.connect(repository.path) as db:
+        await db.execute(
+            "INSERT INTO docker_tool_executions "
+            "(step_id,run_id,invocation_id,container_name,daemon_id,launch_closed) "
+            "VALUES (?,?,?,?,?,0)",
+            (str(step.id), str(run.id), str(operation_input.id), "orphaned-container", "trusted"),
+        )
+        await db.execute(
+            "INSERT INTO assistant_effect_settlements(invocation_id,resolution) VALUES (?,?)",
+            (str(operation_input.id), "executed"),
+        )
+        await db.commit()
+
+    clock.value += timedelta(seconds=31)
+    docker_commands = []
+    removed = False
+
+    async def query(binary, *arguments):
+        nonlocal removed
+        docker_commands.append(arguments)
+        if arguments[0] == "info":
+            return "trusted"
+        if arguments[0] == "rm":
+            removed = True
+            return "orphaned-container"
+        return "" if removed else "orphaned-container"
+
+    monkeypatch.setattr("app.execution.docker.docker_query", query)
+    worker = ExecutionWorker(
+        repository, None,
+        recovery_observation_factory=lambda _: RecoveryObservation(policy_digest="policy"),
+    )
+    worker.docker_recovery_verifier = DockerTerminationVerifier(repository, revoke_unclosed=True)
+    first = await worker.recover_on_startup()
+    second = await worker.recover_on_startup()
+
+    assert sum(command[0] == "rm" for command in docker_commands) == 1
+    assert first[0].status == "waiting"
+    assert first[0].action == "manual_review"
+    assert second == []
+    assert (await repository.get_operation(operation_input.id)).status == "unknown"
+    async with aiosqlite.connect(repository.path) as db:
+        lifecycle = await (await db.execute(
+            "SELECT launch_closed,lifecycle_state,revocation_attempts,termination_evidence "
+            "FROM docker_tool_executions WHERE step_id=?", (str(step.id),)
+        )).fetchone()
+    assert lifecycle == (0, "unknown", 1, None)
+    projection = (await repository.list_effect_settlements(run.id))[0]
+    assert projection["quarantined"]
+    assert projection["termination_evidence"] is None

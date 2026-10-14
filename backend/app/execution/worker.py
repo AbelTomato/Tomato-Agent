@@ -43,6 +43,7 @@ class ExecutionWorker:
         self.recovery_scan_limit = recovery_scan_limit
         self.stage_recovery_factory = None
         self.queue_dispatcher = None
+        self.docker_recovery_verifier = None
         self._owner_id = f"worker-{uuid4()}"
         self._active: dict[asyncio.Task, object] = {}
         self._loop_task: asyncio.Task | None = None
@@ -197,6 +198,11 @@ class ExecutionWorker:
                 observation = await observation
             if not isinstance(observation, RecoveryObservation):
                 observation = RecoveryObservation.model_validate(observation)
+            docker_operation = candidate.operation
+            if (docker_operation is not None and docker_operation.tool_name == "run_tests"
+                    and docker_operation.recovery_class == "sandbox"
+                    and self.docker_recovery_verifier is not None):
+                await self.docker_recovery_verifier(candidate.run_id, docker_operation.id)
             candidate = await self.repository.expire_and_classify(attempt.id)
             decision = classify_recovery(candidate.snapshot, candidate.operation, observation)
             run = await self.repository.apply_recovery(candidate, decision)

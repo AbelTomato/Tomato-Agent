@@ -243,6 +243,12 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         max_concurrency=config.code_task_worker_max_concurrency,
         recovery_observation_factory=observe_recovery,
     )
+    from app.execution.docker import DockerTerminationVerifier
+    execution_worker.docker_recovery_verifier = DockerTerminationVerifier(
+        code_task_service.execution_repository,
+        config.code_task_docker_binary,
+        revoke_unclosed=True,
+    )
     execution_worker.stage_recovery_factory = task_service.recover_stage
     execution_worker.queue_dispatcher = task_service.dispatch_queue
     return AppDependencies(
