@@ -114,11 +114,11 @@ async def test_steer_is_recorded_then_applied_at_safe_point_without_resetting_bu
         run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
         started, release = asyncio.Event(), asyncio.Event()
         original = provider.complete
-        async def hold(messages, tools):
+        async def hold(messages, tools, *, response_format=None):
             if provider.calls == 0:
                 started.set()
                 await release.wait()
-            return await original(messages, tools)
+            return await original(messages, tools, response_format=response_format)
         provider.complete = hold
         execution = asyncio.create_task(app.state.execution_worker.run_once())
         await started.wait()

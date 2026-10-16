@@ -1,6 +1,7 @@
 """Run-local model calls with durable reservations and lease fencing."""
 
 import asyncio
+import inspect
 import math
 
 from app.agent.models import LLMResponse
@@ -40,15 +41,26 @@ class RunModelGateway:
         provider_timeout = getattr(self.client, "timeout", None)
         if provider_timeout is not None and getattr(provider_timeout, "read", None) is not None:
             timeout = min(timeout, provider_timeout.read)
+        request_identity = (getattr(self.client, "response_format_identity", None)
+                            if scope == "top" else None)
         digest = canonical_digest({"messages": [item.model_dump(mode="json") for item in messages],
-                                   "tools": [item.model_dump(mode="json") for item in tools]})
+                                   "tools": [item.model_dump(mode="json") for item in tools],
+                                   "response_format": request_identity})
         row = await self.port.reserve_model_call(
             scope=scope, step_id=step_id, operation_id=operation_id, phase=phase,
             attempt_id=attempt_id, input_digest=digest, config_digest=self.config_digest,
             timeout_seconds=timeout)
         if row["status"] == "committed":
             return LLMResponse.model_validate_json(row["response"])
-        request = asyncio.create_task(self.client.complete(messages, tools))
+        request_parameters = inspect.signature(self.client.complete).parameters
+        if request_identity is not None and ("response_format" in request_parameters or any(
+            item.kind == inspect.Parameter.VAR_KEYWORD for item in request_parameters.values()
+        )):
+            request = asyncio.create_task(self.client.complete(
+                messages, tools, response_format=request_identity
+            ))
+        else:
+            request = asyncio.create_task(self.client.complete(messages, tools))
         cancellation = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
         try:
             async with asyncio.timeout(row["timeout_seconds"]):

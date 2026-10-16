@@ -64,6 +64,99 @@ async def test_complete_sends_openai_compatible_request_and_parses_final_respons
 
 
 @pytest.mark.asyncio
+async def test_complete_passes_response_format_without_changing_default_requests():
+    captured = {}
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "decision", "strict": True, "schema": {"type": "object"}},
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    client = OpenAICompatibleClient(api_key="test-key", model="test-model",
+        transport=httpx.MockTransport(handler))
+    await client.complete([], [], response_format=response_format)
+    assert captured["payload"]["response_format"] == response_format
+
+    await client.complete([], [])
+    assert "response_format" not in captured["payload"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_completion_sends_stream_flag_and_assembles_content():
+    captured = {}
+    observed = []
+    events = [
+        'data: {"choices":[{"delta":{"role":"assistant","content":"{\\"decision\\":"}}]}',
+        'data: {"choices":[{"delta":{"content":"{\\"protocol_version\\":1}}"}}]}',
+        "data: [DONE]",
+    ]
+    body = "\n\n".join(events) + "\n\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    client = OpenAICompatibleClient(
+        api_key="test-key",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        stream=True,
+        request_observer=lambda payload, response: observed.append((payload, response)),
+    )
+    result = await client.complete([], [])
+
+    assert captured["payload"]["stream"] is True
+    assert result.kind == "final"
+    assert result.content == '{"decision":{"protocol_version":1}}'
+    assert observed[0][1].headers["content-type"] == "text/event-stream"
+
+
+@pytest.mark.asyncio
+async def test_streaming_completion_assembles_fragmented_tool_calls():
+    body = "\n\n".join([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"search_knowledge","arguments":"{\\"query\\":"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"Redis\\"}"}}]}}]}',
+        "data: [DONE]",
+    ]) + "\n\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    client = OpenAICompatibleClient(
+        api_key="test-key", model="test-model", transport=httpx.MockTransport(handler), stream=True
+    )
+    result = await client.complete([], [])
+
+    assert result.kind == "tool_call"
+    assert result.tool_call.name == "search_knowledge"
+    assert result.tool_call.arguments == {"query": "Redis"}
+
+
+@pytest.mark.asyncio
+async def test_request_observer_receives_wire_payload_and_raw_response_without_headers():
+    observed = []
+    raw_body = b'{"choices":[{"message":{"content":"done"}}],"id":"raw-1"}'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=raw_body, headers={"content-type": "application/json"})
+
+    client = OpenAICompatibleClient(api_key="secret-test-key", model="test-model",
+        transport=httpx.MockTransport(handler),
+        request_observer=lambda payload, response: observed.append((payload, response)))
+    await client.complete([Message(role="user", content="hello")], [])
+
+    payload, response = observed[0]
+    assert payload == {"model": "test-model", "messages": [{"role": "user", "content": "hello"}]}
+    assert response.status_code == 200
+    assert response.content == raw_body
+    assert "headers" not in payload
+    assert "secret-test-key" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
 async def test_complete_converts_tool_call_arguments_to_dict():
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)

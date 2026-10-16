@@ -99,12 +99,11 @@ async def test_assistant_http_worker_records_docker_tests(tmp_path, monkeypatch,
         workspace = await app.state.workspace_service.register_original(project, ["test_demo.py"])
         import json
         class TestProvider(Provider):
-            async def complete(self, messages, tools):
+            async def complete(self, messages, tools, *, response_format=None):
                 if self.calls == 1 and not isinstance(exit_code, str):
-                    self.calls += 1
                     observed = json.loads(messages[-1].content)["assistant_tool_result"]["result"]
-                    return decision("finish", {"result": observed})
-                return await super().complete(messages, tools)
+                    self.responses = iter([decision("finish", {"result": observed})])
+                return await super().complete(messages, tools, response_format=response_format)
         provider = TestProvider([decision("call_tool", {"name": "run_tests", "contract_version": "1",
             "arguments": {"target": "unit"}}), decision("finish", {"result": {"answer": "Tests executed"}})])
         app.state.task_service.assistant.llm = provider

@@ -13,12 +13,27 @@ class Provider:
         self.responses = iter(responses)
         self.calls = 0
         self.messages = []
+        self.response_formats = []
 
-    async def complete(self, messages, tools):
+    async def complete(self, messages, tools, *, response_format=None):
         self.calls += 1
         self.messages.append(messages)
+        self.response_formats.append(response_format)
         assert tools == []
-        return next(self.responses)
+        response = next(self.responses)
+        if response_format is None:
+            return response
+        decision_payload = json.loads(response.content)
+        decision_payload = {"decision": decision_payload}
+        if decision_payload["decision"]["type"] == "call_tool":
+            decision_payload["decision"]["payload"]["arguments"] = json.dumps(
+                decision_payload["decision"]["payload"]["arguments"]
+            )
+        if decision_payload["decision"]["type"] == "finish":
+            result = decision_payload["decision"]["payload"]["result"]
+            if "test_results" in result:
+                result["test_results"] = [json.dumps(item) for item in result["test_results"]]
+        return response.model_copy(update={"content": json.dumps(decision_payload)})
 
 
 @asynccontextmanager
@@ -43,6 +58,22 @@ def decision(kind, payload):
         {"protocol_version": 1, "type": kind, "payload": payload}))
 
 
+async def test_non_runtime_llm_consumers_keep_default_request_format(tmp_path):
+    from app.llm.compatible_client import OpenAICompatibleClient
+    from app.agent.models import Message
+
+    captured = {}
+
+    async def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "legacy"}}]})
+
+    client = OpenAICompatibleClient(api_key="test-key", model="test-model",
+        transport=httpx.MockTransport(handler))
+    await client.complete([Message(role="user", content="hello")], [])
+    assert "response_format" not in captured
+
+
 async def test_assistant_http_worker_replay_and_history(tmp_path):
     async with assistant_api(tmp_path, [decision("finish", {"result": {"answer": "hello"}})]) as (app, client, session, provider):
         route = f"/api/sessions/{session}/tasks"
@@ -57,6 +88,8 @@ async def test_assistant_http_worker_replay_and_history(tmp_path):
         assert current["result"]["answer"] == "hello"
         assert current["result"]["validation_status"] == "not_required"
         assert provider.calls == 1
+        assert provider.response_formats[0]["type"] == "json_schema"
+        assert provider.response_formats[0]["json_schema"]["strict"] is True
         snapshot = await app.state.execution_repository.get_snapshot(run_id)
         assert snapshot.snapshot_type == "assistant" and snapshot.reserved_model_calls == 1
         assert len((await client.get(route)).json()["tasks"]) == 1
