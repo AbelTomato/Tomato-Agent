@@ -36,7 +36,7 @@ python3 scripts/verify.py external openshell --confirm-real-dependencies
 python3 scripts/verify.py external provider --confirm-real-dependencies --provider-max-runs 4 --provider-max-requests 16 --external-timeout 600
 ```
 
-Provider 当前验收预算上限为 4 个 Run、16 次请求，可通过参数降低，并要求配置真实 Provider 及 Chrome CDP；Docker/OpenShell 要求本机对应运行环境与镜像配置。外部验收可能产生费用或启动容器，不属于 CI 常规门禁。各层结果互相独立，低层通过不代表更高层通过。
+Provider 当前验收预算上限为 4 个 Run、16 次请求（单 Run 最长 600 秒），可通过参数降低，并要求配置真实 Provider 及 Chrome CDP；真实请求可能产生费用，必须显式 opt-in，保持为 CI 外部步骤。离线 replay 使用录制响应且不调用真实 Provider，只验证离线解析和 UI/Runtime 流程，不产生真实兼容性资格结论。真实 Provider 结论仅对报告记录的验收日期、Provider、模型、端点主机及有效请求配置和实际通过场景成立，不外推到其他配置。Docker/OpenShell 要求本机对应运行环境与镜像配置。各层结果互相独立，低层通过不代表更高层通过。操作、预算、隔离和报告字段见[真实 Provider 本地 UI 验收说明](docs/真实Provider本地UI验收.md)。
 
 ## 快速开始
 
