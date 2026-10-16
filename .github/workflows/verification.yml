@@ -1,0 +1,45 @@
+name: Verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[test]'
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Verify entry point
+        run: python3 -m unittest scripts/test_verify.py
+      - name: Module regressions
+        run: python3 scripts/verify.py module assistant execution rag writing frontend --artifact-root verification-artifacts
+      - name: Integration gate
+        run: python3 scripts/verify.py integration --timeout 600 --artifact-root verification-artifacts
+      - name: Upload verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.run_id }}
+          path: verification-artifacts/
+          if-no-files-found: warn

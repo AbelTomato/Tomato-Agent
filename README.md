@@ -16,7 +16,31 @@ Tomato Agent 是一个面向个人知识库与技术写作的 Agent 项目，提
 - 前端：React、TypeScript、Vite、Tailwind CSS。
 - 包管理：Python `venv` / `pip`、pnpm 10.34.5。
 
+## 验证入口
+
+统一验证入口为 `python3 scripts/verify.py`，每次执行会在 `verification-artifacts/<run-id>/` 写入 `result.json` 和各步骤日志。常用命令：
+
+```bash
+python3 scripts/verify.py quick --static --backend-test tests/test_assistant_api.py --frontend-test tests/assistant-result.test.mjs
+python3 scripts/verify.py module assistant execution rag writing frontend
+python3 scripts/verify.py integration
+```
+
+`quick` 接受重复的 `--backend-test` / `--frontend-test` 指定目标；`--static` 执行 Python compileall 和前端 TypeScript/Vite 构建。模块名为 `assistant`、`execution`、`rag`、`writing`、`frontend`。集成门禁使用独立 pytest 临时目录，覆盖 SQLite/Worker 生命周期、API 流程和前端测试。CI 常规门禁执行模块回归及集成验证。
+
+真实依赖验收不会被普通门禁调用，必须显式确认：
+
+```bash
+python3 scripts/verify.py external docker --confirm-real-dependencies
+python3 scripts/verify.py external openshell --confirm-real-dependencies
+python3 scripts/verify.py external provider --confirm-real-dependencies --provider-max-runs 4 --provider-max-requests 16 --external-timeout 600
+```
+
+Provider 当前验收预算上限为 4 个 Run、16 次请求，可通过参数降低，并要求配置真实 Provider 及 Chrome CDP；Docker/OpenShell 要求本机对应运行环境与镜像配置。外部验收可能产生费用或启动容器，不属于 CI 常规门禁。各层结果互相独立，低层通过不代表更高层通过。
+
 ## 快速开始
+
+验证环境、CI 触发方式及当前覆盖边界见[分层验证与 CI 说明](docs/分层验证与CI说明.md)。
 
 以下命令适用于 Linux / macOS。准备 Python ≥ 3.11、与 Vite 兼容的 Node.js 和 pnpm；Windows 步骤与环境排障见[本地开发指南](docs/本地开发指南.md)。
 
@@ -61,16 +85,16 @@ pnpm dev
 - 写作研究自动运行，提纲与草稿保存由用户确认；聊天、知识问答和写作仅支持阶段恢复。
 - 代码任务限定已注册的原目录 Python 项目、预置依赖与固定 Docker 镜像中的只读 pytest；取消任务不会回滚已经写入的内容。
 - 无法确认是否完成的写入或执行操作会保持等待，需要人工核对后恢复。具体配置与限制见[受控代码任务说明](docs/受控代码任务说明.md)。
-- 统一助手 Runtime 使用严格的协议版本 1 决策：`message` 是可连续出现的阶段消息，只有 `finish` 能完成 Run；`ask_user` 会进入持久化等待，工具发现/描述由服务端目录提供，`call_tool` 仍经服务端权限和契约校验。助手不再把旧式 Provider 裸文本或工具调用自动当成协议决策；共享 Harness、代码任务、知识与写作消费者暂时仍使用旧 `LLMResponse`，其全局迁移和 Provider 原生结构化输出验收另行进行。当前不提供 SSE/WebSocket 或实时事件 UI。
-- 统一助手内核已完成任务 1～4：公共契约、快照/共享模型预算、Harness 等待/失败反馈，以及知识与项目只读 HTTP/Worker 闭环。实验性开关 `[assistant].enabled=true` 与 `[worker].enabled=true` 配合有效模型后，可向统一任务 API 提交 `kind=assistant`；默认关闭并返回 `503 assistant_disabled`。同一 Run 支持检索、知识原文/有证据回答、项目列表/搜索/读取与澄清；缺工作区通过版本化服务端动作绑定已注册且获准目录一次，拒绝后不能换工具绕过。顶层和领域模型调用共用持久化 ledger，引用按已观察证据校验，只读结果不宣称测试通过。现有四类模式兼容；前端默认助手入口已实现，其他四类入口可通过高级模式选择；工作区可选，等待卡片可补充说明、绑定已注册项目或拒绝请求。禁用时保留输入并提示开启配置，不自动降级。任务 5 前端 21 项测试与 TypeScript 检查通过、后端相关 27 项通过；真实模型/浏览器已在授权的 3 Run 范围执行（累计 8 次调用）：跨能力最终回答超时，澄清/绑定请求仅返回最终文本，任务 5 真实验收未通过，待修复和重新授权验收。项目写入/验证与写作留任务 6～7。任务 4 直接影响回归 342 passed、0 failed/skipped，仅 fake Provider/独立测试库，未验收真实模型行为。配置见[环境配置说明](docs/环境配置说明.md)，范围和证据见[第一期实施计划](docs/实施计划/2026.10.11-统一助手内核第一期实施计划.md)。
+- 统一助手 Runtime 初版采用严格的协议版本 1 决策，并仅对 Runtime 决策请求启用 Provider strict `json_schema` Structured Outputs；本地 Pydantic 校验及权限/完成门禁仍保留。当前已完成离线 schema 与 fake Provider 工程验证，真实应用级 Provider 兼容验收仍待单独执行。`message` 是可连续出现的阶段消息，只有 `finish` 能完成 Run；`ask_user` 会进入持久化等待，工具发现/描述由服务端目录提供，`call_tool` 仍经服务端权限和契约校验。助手不把旧式 Provider 裸文本或工具调用自动当成协议决策；共享 Harness、代码任务、知识与写作消费者仍使用旧 `LLMResponse`。不提供 SSE/WebSocket 或实时事件 UI。
+- 统一助手内核已完成任务 1～4：公共契约、快照/共享模型预算、Harness 等待/失败反馈，以及知识与项目只读 HTTP/Worker 闭环。实验性开关 `[assistant].enabled=true` 与 `[worker].enabled=true` 配合有效模型后，可向统一任务 API 提交 `kind=assistant`；默认关闭并返回 `503 assistant_disabled`。同一 Run 支持检索、知识原文/有证据回答、项目列表/搜索/读取与澄清；缺工作区通过版本化服务端动作绑定已注册且获准目录一次，拒绝后不能换工具绕过。顶层和领域模型调用共用持久化 ledger，引用按已观察证据校验，只读结果不宣称测试通过。现有四类模式兼容；前端默认助手入口已实现，其他四类入口可通过高级模式选择；工作区可选，等待卡片可补充说明、绑定已注册项目或拒绝请求。禁用时保留输入并提示开启配置，不自动降级。首期真实模型/浏览器验收曾在授权的 3 Run（累计 8 次调用）中发现跨能力回答超时以及澄清/绑定未产生等待动作；这是早期助手内核验收记录，之后已完成独立的 Runtime 决策与事件协议工程实现及目标测试，不应与本页 Runtime 初版状态混为一谈。任务 4 的 342 项回归使用 fake Provider/独立测试库，不代表真实模型验收。配置见[环境配置说明](docs/环境配置说明.md)，范围和证据见[第一期实施计划](docs/实施计划/2026.10.11-统一助手内核第一期实施计划.md)。
 
 ## 文档导航
 
-2026-10-14 Docker `run_tests` 生产级终止验证计划任务 1～5 已完成工程阶段：任务 1 冻结失败契约，任务 2 持久化执行身份和幂等生命周期；任务 3 统一固定 socket 撤销与有界查询，增加两轮同 daemon 精确容器缺失确认、并发唯一撤销和首次失败锁定；任务 4 将失效 lease/Worker 恢复接入 verifier，Docker `run_tests` 不重放，仅进行有界撤销/查询；任务 5 将服务端 Docker verifier 注入 AssistantService，并要求 settlement 校验 schema v1 Docker daemon evidence 与完整 Step/容器身份，在单一 SQLite 事务写入 evidence 并释放 quarantine。任务 5 目标组合 **81 passed**，使用 fake Docker/独立临时 SQLite，不等于真实 Docker 验收。任务 6 的直接影响组合 **151 passed、6 skipped**，`compileall` 通过；真实 Docker 验收测试 `tests/test_sandbox_docker_acceptance.py` 在本机 Docker daemon 和 digest 固定镜像上 **5 passed**（隔离、测试失败、创建失败、超时、主动取消）。原记录的真实 opt-in 组合另有 **6 passed**。新增真实 Docker Desktop 重启验收 **1 passed in 51.17s**：恢复后 operation 进入 `waiting` / `manual_review`（`unknown_side_effect`），quarantine 保持且未生成 termination evidence，登记容器清理成功，Engine 恢复可访问。应用进程重启后的残留查询真实验收 **1 passed in 5.14s**：恢复 worker 使用持久化 daemon/container 身份执行真实 Docker 查询，execution row 生成身份匹配的 termination evidence；settlement projection 仍 quarantined 且无 settlement evidence。上述结果不代表自动结算完成。新增受控代理拦截的真实清理失败验收用例，代理仅拦截目标容器的精确 `rm -f`；失败阶段要求容器仍存在、无 termination evidence 且 quarantine 保持，解除拦截并人工清理后才允许恢复 verifier 生成 evidence 和解除 quarantine。该用例待本机 Docker daemon 与 digest 固定镜像运行，当前不将其标记为通过；未关闭启动窗口时继续保持 unknown/quarantined 且不生成 evidence。daemon 重启报告见 `/tmp/pytest-of-abeltomato/pytest-54/test_desktop_restart_during_tr0/docker-daemon-restart-report.json`。验收边界见[Docker 终止验证实施计划](docs/实施计划/2026.10.14-Docker%20run_tests生产级终止验证实施计划.md)检查点。启动闸门与请求排空代理方案记录于[RISK-009](docs/设计权衡与潜在问题台账.md)；OpenShell 与通用副作用仍没有可信终止证明，人工风险接受只影响 admission，不构成 termination evidence。
+2026-10-14 Docker `run_tests` 终止验证计划任务 1～5 已完成工程阶段，包含服务端 Docker verifier 接线与 settlement 证据门禁；真实 Docker 已覆盖隔离、失败、创建失败、超时、取消、daemon 重启和应用重启查询等记录在[Docker 终止验证实施计划](docs/实施计划/2026.10.14-Docker%20run_tests生产级终止验证实施计划.md)中。此处保留为独立子系统的历史验收范围，不扩展为统一助手 Runtime 初版的发布条件或继续开发任务。
 
-Runtime 协议计划任务 5 的工程实现已覆盖澄清动作冻结候选项、`provide_input` 单个 `message` 或 `choice`、持久化队列与安全点 steer、人工核查、风险继续及迟到冲突 admission 处置 UI。助手等待动作重复提交返回 409；未知副作用通过显式 `resolve_side_effect` 提交用户核查报告，原未知 Step 保留。风险接受采用独立、幂等记录，仅影响 admission：不会清除冲突、解除 quarantine 或生成 termination evidence；迟到结果与既有报告冲突时可重新阻断 admission。Runtime 实施计划任务 1～7 的工程验收已完成，目标测试记录见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。这不等于通用副作用生产级终止验证：Docker `run_tests` 已接入服务端 verifier；OpenShell 与其他通用外部副作用仍无生产级可信 verifier，人工报告或风险接受不能证明操作已终止，也不能解除隔离。真实 Provider 兼容验收仍暂缓。持久化队列、前端排队入口、安全点 steer 的重启、并发唯一启动、暂停/继续/清空验收记录见相关实施计划检查点。
+统一助手 Runtime 初版范围和发布决策：Runtime 决策协议与事件协议计划任务 1～7 已完成工程验收，范围、目标测试及历史记录见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。本初版冻结当前实现，不再开展副作用相关实现或专项验证；未知副作用仍按当前实现进入等待/核查与隔离，风险接受仅影响 admission，不证明操作终止、不解除隔离、不生成 termination evidence。Docker `run_tests` 已有其服务端 verifier；该实现和已有测试作为现状保留，不扩展到 OpenShell 或其他通用副作用，也不再作为 Runtime 初版的待办门槛。Strict JSON Schema 属于本次批准的冻结范围后增量，仅用于 Runtime 决策调用；Provider 资格验收与运行时错误行为需单独验证，不增加 SSE/WebSocket 或实时事件 UI，也不改变本项目当前仅面向本地可信单用户的使用边界；助手功能仍由配置开关控制，默认关闭。
 
-2026-10-13 Runtime 决策与事件协议计划任务 1～4、6 已完成工程验收。阶段消息以 `assistant.message` 追加到既有 RunEvent；工具目录提供版本、可用性与前置条件，调用启动前校验当前契约、参数和权限，旧版本仅允许服务端显式无损迁移。`tool.started/succeeded/failed/waiting/unknown` 关联同一操作与执行 Step，和操作事实事务提交；启动前等待/拒绝不会显示执行中，副作用异常保持未知并等待核查。事件使用 RuntimeEvent v1、固定摘要和最小详情，仅表明本地观察，不证明外部副作用。既有 `GET /api/tasks/{run_id}/events?after=...&limit=...` 返回有序事件及 `next_cursor`，外层响应和旧事件保持兼容。任务 4 助手/执行/API 回归 226 项、共享执行补充 57 项通过；任务 6 完成门禁与 Run 集成目标测试 26 项通过。任务 5 工程验收已完成，但生产级可信终止验证仍有边界：Docker `run_tests` 已接入服务端 verifier，OpenShell 与通用外部副作用的可信终止验证暂缓；真实 Provider 资格验收仍待后续。助手顶层严格解析协议 v1 JSON，知识领域子调用继续旧契约；当前不提供实时事件 UI，详见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。
+Runtime 决策与事件协议工程任务 1～7 已完成验收。阶段消息以 `assistant.message` 追加到既有 RunEvent；工具目录提供版本、可用性与前置条件，调用启动前校验当前契约、参数和权限，旧版本仅允许服务端显式无损迁移。`tool.started/succeeded/failed/waiting/unknown` 关联同一操作与执行 Step，和操作事实事务提交；启动前等待/拒绝不会显示执行中，副作用异常保持未知并等待核查。事件使用 RuntimeEvent v1、固定摘要和最小详情，仅表明本地观察，不证明外部副作用。既有 `GET /api/tasks/{run_id}/events?after=...&limit=...` 返回有序事件及 `next_cursor`，外层响应和旧事件保持兼容。已记录任务 4 回归 226 项、共享执行补充 57 项通过，任务 6 完成门禁与 Run 集成目标测试 26 项通过。统一助手 Runtime 初版按当前实现冻结，不再开展副作用相关实现或专项验证；Docker `run_tests` verifier 及现有测试保留，不扩展其他通用副作用。未知操作仍按现有逻辑等待/核查与隔离，风险接受不构成终止证明。真实 Provider 兼容资格不在本初版验收结论内，当前不提供实时事件 UI。详见[Runtime 实施计划](docs/实施计划/2026.10.12-统一助手Runtime决策与事件协议实施计划.md)。
 
 | 文档 | 内容 |
 | --- | --- |
