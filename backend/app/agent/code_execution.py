@@ -122,7 +122,9 @@ class CodeExecutionPort(LeaseExecutionPort):
             if ref.get("kind") == "diff":
                 state["diff_artifact_id"] = ref["artifact_id"]
             if not result.success:
-                state["error_code"] = result.result_payload.get("error") or data.get("error_code") or "execution_failed"
+                state["error_code"] = (
+                    data.get("error_code") or result.result_payload.get("error") or "execution_failed"
+                )
                 state["execution_status"] = data.get("status") or {
                     "timeout": "timed_out", "cancelled": "cancelled",
                 }.get(state["error_code"], "failed")
@@ -242,6 +244,8 @@ async def execute_code(service, run, *, llm, strategy, test_tool, budget, execut
                 code = "budget_exhausted"
             elif saved.test_results and not saved.test_results[-1]["passed"]:
                 code = "tests_failed"
+            elif result.stop_reason in {"permission_denied", "invalid_arguments"}:
+                code = result.stop_reason
             elif result.stop_reason == "invalid tool call":
                 code = "invalid_arguments"
             elif result.stop_reason == "harness execution failed":

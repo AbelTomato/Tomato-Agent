@@ -280,6 +280,13 @@ class Harness:
                 "harness_state": state.model_dump(mode="json"),
                 "elapsed_upper_bound_seconds": elapsed(), **values})
 
+        def failed(code: str):
+            nonlocal state
+            state = state.model_copy(update={"structured_state": {
+                **state.structured_state, "error_code": code,
+            }})
+            return result("failed", code)
+
         try:
             while True:
                 # Revalidate ownership even when returning an already persisted final.
@@ -321,7 +328,17 @@ class Harness:
                         call = call.model_copy(update={"name": decision.tool_name, "arguments": arguments})
                         response = response.model_copy(update={"kind": "tool_call", "tool_call": call})
                         calls = [call]
-                        operation = await port.describe_operation(snapshot.logical_index, decision.tool_name, arguments)
+                        try:
+                            operation = await port.describe_operation(
+                                snapshot.logical_index, decision.tool_name, arguments
+                            )
+                        except PermissionError:
+                            return failed("permission_denied")
+                        except ValueError as exc:
+                            from app.workspaces.service import WorkspacePathError
+                            if isinstance(exc, WorkspacePathError):
+                                return failed("permission_denied")
+                            return failed("invalid_arguments")
                     elif decision.kind == "respond" and len(self._text(decision.output)) > budget.max_response_chars:
                         return result("failed", "output exceeds response budget")
                     messages.append(Message(role="assistant", content=response.content or "", tool_calls=calls))
@@ -368,7 +385,7 @@ class Harness:
                             pending_decision=None if acceptable else snapshot.pending_decision,
                             in_flight_started_at=None, in_flight_max_seconds=0.0))
                     if not tool_result.success:
-                        return result("failed", "tool execution failed")
+                        return result("failed", tool_result.error or "tool execution failed")
                     if len(self._text(tool_result.model_dump())) > policy.max_result_chars:
                         return result("failed", "tool result exceeds result budget")
                     continue

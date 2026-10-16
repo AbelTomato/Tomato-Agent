@@ -41,9 +41,7 @@ class FakeOutlineLLM:
 
 @pytest.fixture
 def rag_database_path():
-    root = Path(
-        "/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases"
-    )
+    root = Path(__file__).resolve().parents[1] / "data" / "rag" / "databases"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"writing-research-fixture-2026-09-26-{uuid4()}.db"
     assert not path.exists()

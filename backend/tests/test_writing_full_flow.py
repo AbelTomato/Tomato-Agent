@@ -55,7 +55,7 @@ class FakeWritingLLM:
 
 @pytest.fixture
 def rag_database_path():
-    root = Path("/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases")
+    root = Path(__file__).resolve().parents[1] / "data" / "rag" / "databases"
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"writing-full-flow-fixture-2026-09-27-{uuid4()}.db"
     yield path

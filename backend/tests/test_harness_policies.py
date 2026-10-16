@@ -114,6 +114,7 @@ def test_error_mapping_is_stable_and_does_not_expose_internal_details():
     assert mapped.retryable is False
 
     assert map_tool_result(ToolResult(success=True, data={"text": "ok"})) is None
+    assert map_tool_result(ToolResult(success=False, error="other")).code == "execution_failed"
     limited = map_tool_result(ToolResult(success=True, data="123456"), max_output_chars=3)
     assert limited.code == "output_limit"
     assert limited.retryable is False
