@@ -8,6 +8,8 @@ from app.agent.models import LLMResponse
 from app.execution.ports import canonical_digest
 from app.execution.state_machine import StaleExecutionOwner
 
+from app.llm.compatible_client import _REQUEST_CORRELATION
+
 
 class RunModelGateway:
     def __init__(self, client, port, *, config_digest: str, timeout_seconds: float):
@@ -56,11 +58,20 @@ class RunModelGateway:
         if request_identity is not None and ("response_format" in request_parameters or any(
             item.kind == inspect.Parameter.VAR_KEYWORD for item in request_parameters.values()
         )):
-            request = asyncio.create_task(self.client.complete(
-                messages, tools, response_format=request_identity
-            ))
+            complete = self.client.complete(messages, tools, response_format=request_identity)
         else:
-            request = asyncio.create_task(self.client.complete(messages, tools))
+            complete = self.client.complete(messages, tools)
+        correlation = {
+            "run_id": str(row["run_id"]),
+            "call_id": str(row["id"]),
+            "step_id": str(step_id) if step_id is not None else None,
+            "operation_id": str(operation_id) if operation_id is not None else None,
+        }
+        token = _REQUEST_CORRELATION.set(correlation)
+        try:
+            request = asyncio.create_task(complete)
+        finally:
+            _REQUEST_CORRELATION.reset(token)
         cancellation = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
         try:
             async with asyncio.timeout(row["timeout_seconds"]):

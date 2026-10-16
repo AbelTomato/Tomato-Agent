@@ -1,5 +1,6 @@
 import json
 import contextvars
+import inspect
 from typing import Any, Callable
 
 import httpx
@@ -8,6 +9,7 @@ from app.agent.interfaces import LLMClient
 from app.agent.models import LLMResponse, Message, ToolCall, ToolDefinition
 
 _REQUEST_CONTEXT = contextvars.ContextVar("provider_request_context", default=None)
+_REQUEST_CORRELATION = contextvars.ContextVar("provider_request_correlation", default=None)
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -84,12 +86,12 @@ class OpenAICompatibleClient(LLMClient):
             except BaseException:
                 observer = self.request_observer or _REQUEST_CONTEXT.get()
                 if observer is not None:
-                    observer(payload, None)
+                    self._notify_observer(observer, payload, None)
                 raise
 
         observer = self.request_observer or _REQUEST_CONTEXT.get()
         if observer is not None:
-            observer(payload, response)
+            self._notify_observer(observer, payload, response)
 
         if response.is_error:
             raise RuntimeError(
@@ -291,6 +293,18 @@ class OpenAICompatibleClient(LLMClient):
             kind="final",
             content=content,
         )
+
+    @staticmethod
+    def _notify_observer(observer, payload, response) -> None:
+        parameters = inspect.signature(observer).parameters.values()
+        accepts_context = any(
+            item.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            for item in parameters
+        ) or len(inspect.signature(observer).parameters) >= 3
+        if accepts_context:
+            observer(payload, response, _REQUEST_CORRELATION.get())
+        else:
+            observer(payload, response)
 
     def _tool_call_from_provider(
         self,
