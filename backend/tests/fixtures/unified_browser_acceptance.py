@@ -11,10 +11,17 @@ import websockets
 
 
 class Browser:
-    async def connect(self):
+    async def connect(self, cdp_url="http://127.0.0.1:9222", target_url=None, target_id=None):
         async with httpx.AsyncClient() as client:
-            pages = (await client.get("http://127.0.0.1:9222/json/list")).json()
-        page = next(item for item in pages if item["type"] == "page")
+            pages = (await client.get(cdp_url.rstrip("/") + "/json/list")).json()
+        page = next((item for item in pages if item.get("type") == "page" and
+                     (item.get("id") == target_id if target_id else
+                      target_url is None or item.get("url", "").startswith(target_url))), None)
+        if page is None:
+            raise RuntimeError(f"CDP page not found: target_id={target_id!r}, target_url={target_url!r}")
+        self.target_id = page["id"]
+        self.target_url = page.get("url")
+        self.cdp_url = cdp_url
         self.ws = await websockets.connect(page["webSocketDebuggerUrl"], max_size=5_000_000)
         self.sequence = 0
 
@@ -24,7 +31,9 @@ class Browser:
         while True:
             result = json.loads(await self.ws.recv())
             if result.get("id") == self.sequence:
-                assert "error" not in result, result
+                if "error" in result:
+                    raise RuntimeError(f"CDP {method} failed for target {self.target_id} ({self.target_url}): "
+                                       f"{result['error'].get('code')} {result['error'].get('message')}")
                 return result.get("result", {})
 
     async def evaluate(self, expression):
@@ -45,8 +54,8 @@ class Browser:
 
     async def input(self, selector, value):
         await self.evaluate("(() => {const e=document.querySelector(" + json.dumps(selector) +
-            ");Object.getOwnPropertyDescriptor(e instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:e instanceof HTMLSelectElement?HTMLSelectElement.prototype:HTMLInputElement.prototype,'value').set.call(e," +
-            json.dumps(value) + ");e.dispatchEvent(new Event(e instanceof HTMLSelectElement?'change':'input',{bubbles:true}));})()")
+            ");if(!e)throw Error('input not found: '+" + json.dumps(selector) + ");e.focus();e.select?.();})()")
+        await self.command("Input.insertText", text=value)
 
     async def latest(self):
         return await self.evaluate("document.querySelector('.task-card:last-of-type')?.innerText || [...document.querySelectorAll('.task-card')].at(-1)?.innerText")

@@ -20,7 +20,7 @@ export function PendingActionPanel({ task, busy, workspaces, onAction }: {
     {pending.target_capability && <p>请求能力：{pending.target_capability}</p>}
     {allowed('resolve_side_effect') && <fieldset disabled={busy}>
       <legend>核对未知操作</legend>
-      <p>系统无法确认旧操作是否已经启动或结束。你可以核查并提交报告，也可以承担风险继续工作。</p>
+      <p>系统无法确认旧操作是否已经启动或结束，这不代表旧操作已终止。你可以核查并提交报告，也可以承担风险继续工作。</p>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'executed' })}>确认已执行</button>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'not_executed' })}>确认未执行</button>
       <button type="button" disabled={acceptRisk} onClick={() => void onAction(task, 'resolve_side_effect', { resolution: 'unknown' })}>仍无法确认</button>

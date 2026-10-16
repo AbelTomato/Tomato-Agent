@@ -72,8 +72,8 @@ test('未知副作用核查提供独立分支，风险继续必须显式确认�
   assert.match(html, /确认未执行/);
   assert.match(html, /仍无法确认/);
   assert.match(html, /不代表旧操作已终止/);
-  assert.match(html, /我接受旧操作仍可能产生影响/);
-  assert.match(html, /确认已执行并继续/);
+  assert.match(html, /我已了解旧操作可能仍会产生影响/);
+  assert.match(html, /接受风险并继续/);
   assert.match(html, /disabled=""/);
 });
 
