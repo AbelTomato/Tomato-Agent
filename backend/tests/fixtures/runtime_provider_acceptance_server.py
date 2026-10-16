@@ -19,6 +19,10 @@ from app.knowledge.service import KnowledgeService
 from app.settings import Settings
 from app.llm.compatible_client import _REQUEST_CONTEXT
 from app.observability.provider_attempt_recorder import ProviderAttemptRecorder
+try:
+    from fixtures.provider_acceptance_executor import count_recorded_calls
+except ModuleNotFoundError:
+    from provider_acceptance_executor import count_recorded_calls
 
 
 backend = Path(__file__).parents[2]
@@ -123,9 +127,21 @@ class CappedProvider:
         limit = int(os.environ["RUNTIME_ACCEPTANCE_MAX_CALLS"])
         if self.calls >= limit:
             raise RuntimeError("acceptance_provider_call_budget_exhausted")
+        scenario_path = root / "active-scenario.json"
+        scenario = json.loads(scenario_path.read_text(encoding="utf-8")) if scenario_path.exists() else {}
+        scenario_id = scenario.get("scenario_id")
+        if scenario_id:
+            attempts_path = root / "provider-attempts.jsonl"
+            scenario_calls = count_recorded_calls(attempts_path, scenario_id)
+            if scenario_calls >= int(scenario["request_budget"]):
+                raise RuntimeError("acceptance_scenario_request_budget_exhausted")
         self.calls += 1
         run_id = request_run.get()
-        recorder = ProviderAttemptRecorder(root / "provider-attempts.jsonl", self.calls, run_id)
+        recorder = ProviderAttemptRecorder(
+            root / "provider-attempts.jsonl", self.calls, run_id,
+            acceptance_id=os.environ.get("RUNTIME_ACCEPTANCE_ID"), scenario_id=scenario_id,
+        )
+        recorder.record["scenario_request_index"] = scenario_calls + 1 if scenario_id else None
         token = _REQUEST_CONTEXT.set(recorder.observe)
         try:
             response = await self.client.complete(messages, tools, response_format=response_format)
@@ -138,6 +154,8 @@ class CappedProvider:
         finally:
             _REQUEST_CONTEXT.reset(token)
             recorder.write()
+
+
 
 
 deps.task_service.assistant.llm = CappedProvider(deps.task_service.assistant.llm)

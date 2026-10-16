@@ -16,6 +16,12 @@ from pathlib import Path
 import httpx
 
 from unified_browser_acceptance import Browser
+try:
+    from fixtures.provider_acceptance_executor import AcceptanceScenario, execute_scenarios
+    from fixtures.provider_acceptance_state import ScenarioRecord, ScenarioStore
+except ModuleNotFoundError:
+    from provider_acceptance_executor import AcceptanceScenario, execute_scenarios
+    from provider_acceptance_state import ScenarioRecord, ScenarioStore
 
 
 BACKEND = Path(__file__).parents[2]
@@ -37,8 +43,8 @@ def free_port(start):
     raise RuntimeError("no free frontend port in configured range")
 
 
-async def wait_task(api, run_id):
-    async with asyncio.timeout(RUN_SECONDS + 15):
+async def wait_scenario_task(api, run_id, timeout_seconds):
+    async with asyncio.timeout(timeout_seconds):
         while True:
             task = (await api.get(f"/api/tasks/{run_id}")).json()
             if task["status"] in {"completed", "failed", "cancelled", "timed_out"}:
@@ -117,6 +123,7 @@ async def main():
     env = os.environ.copy()
     env.update({
         "RUNTIME_ACCEPTANCE_ROOT": str(run_root),
+        "RUNTIME_ACCEPTANCE_ID": args.run_id,
         "RUNTIME_ACCEPTANCE_RUN_SECONDS": str(RUN_SECONDS),
         "RUNTIME_ACCEPTANCE_LLM_TIMEOUT_SECONDS": str(LLM_TIMEOUT_SECONDS),
         "RUNTIME_ACCEPTANCE_STREAM": "1" if args.stream else "",
@@ -178,122 +185,120 @@ async def main():
         await browser.wait(
             "document.readyState==='complete' && location.origin===" + json.dumps(frontend_url), 30)
         async with httpx.AsyncClient(base_url="http://127.0.0.1:8037", timeout=10) as api:
+            scenario_store = ScenarioStore(run_root / "scenarios.json", acceptance_id=args.run_id)
+            interrupted = scenario_store.recover_running()
+            if interrupted:
+                summary["scenarios"] = json.loads((run_root / "scenarios.json").read_text(encoding="utf-8"))["scenarios"]
+                raise RuntimeError("interrupted_scenario_requires_new_acceptance_run")
             with sqlite3.connect(run_root / "agent.db") as db:
                 existing = db.execute("SELECT id,session_id,status FROM task_runs WHERE task_type='assistant' ORDER BY created_at").fetchall()
-            if existing and args.resume:
-                run_id, session_id, status = existing[0]
-                clarify = (await api.get(f"/api/tasks/{run_id}")).json()
-                session = str(session_id)
-                observe("session_restore_start", session_id=session, run_id=run_id,
-                        task_status=clarify["status"], pending_action=(clarify.get("pending_action") or {}).get("action_type"))
-                if clarify["status"] == "waiting":
-                    await browser.evaluate("localStorage.setItem('tomato-agent-session-id', " + json.dumps(session) + ")")
-                    await browser.command("Page.reload")
-                    observe("page_reloaded", target_id=browser.target_id)
-                    await browser.wait("!!document.querySelector('.conversation-shell')", 25)
-                    await browser.wait("!!document.querySelector('.pending-action-panel textarea')", 35)
-                else:
-                    await browser.wait("!!document.querySelector('.conversation-shell')", 25)
-                observe("conversation_shell_ready", target_id=browser.target_id)
-                if not summary["runs"]:
-                    summary["runs"].append({"run_id": run_id, "initial_status": status})
-                if clarify["status"] == "waiting":
-                    summary["runs"][-1]["initial_status"] = clarify["status"]
-            else:
+            initial_run_count = len(existing)
+            if args.resume and existing:
+                raise RuntimeError("resume_with_existing_runs_is_not_supported_by_scenario_executor")
+
+            def provider_calls():
+                if not attempts_path.exists():
+                    return 0
+                return sum(1 for line in attempts_path.read_text(encoding="utf-8").splitlines() if line.strip())
+
+            def scenario_record(scenario_id, timeout, budget, terminal, events=(), operations=()):
+                return ScenarioRecord(
+                    acceptance_id=args.run_id, scenario_id=scenario_id, timeout_seconds=timeout,
+                    request_budget=min(budget, args.max_requests), expected_terminal=terminal,
+                    expected_events=list(events), expected_operations=list(operations),
+                    diagnostic_files={
+                        "events": "cdp-events.jsonl", "provider_attempts": "provider-attempts.jsonl",
+                        "ledger_and_operations": "agent.db", "server_log": "server.log",
+                        "frontend_log": "frontend.log", "ui": "browser.png",
+                    },
+                )
+
+            async def clarification_scenario(context):
+                request_start = provider_calls()
                 session = await new_session(browser)
                 await browser.submit("assistant", "请先问我一个澄清问题，确认想了解的主题和目标；收到回答前不要使用任何工具。")
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    run_id, session_id, status = db.execute(
-                        "SELECT id,session_id,status FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1"
-                    ).fetchone()
+                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
                 clarify = (await api.get(f"/api/tasks/{run_id}")).json()
-                summary["runs"].append({"run_id": run_id, "initial_status": status})
-            if clarify["status"] == "waiting":
+                if clarify["status"] != "waiting" or (clarify.get("pending_action") or {}).get("action_type") != "clarification":
+                    return {"run_id": str(run_id), "terminal": clarify["status"], "events": [], "operations": [],
+                            "request_count": provider_calls() - request_start}
                 summary["checks"]["clarification_wait"] = True
-                summary["runs"][-1]["pending_action"] = clarify.get("pending_action")
-                assert clarify.get("pending_action", {}).get("action_type") == "clarification", clarify
-                observe("clarification_submit_start", run_id=clarify["run_id"])
                 await browser.wait("!!document.querySelector('.pending-action-panel textarea')", 25)
                 await browser.input(".pending-action-panel textarea", "解释 Redis SETEX 的 TTL，优先使用本地知识证据。")
                 await browser.click("提交补充说明")
-                observe("clarification_submitted", run_id=clarify["run_id"])
-            else:
-                if clarify["status"] not in {"queued", "running"}:
-                    raise RuntimeError(f"cannot resume existing Run from status={clarify['status']}")
-                observe("resume_existing_execution", run_id=clarify["run_id"], status=clarify["status"])
-            resumed = await wait_task(api, clarify["run_id"])
-            summary["runs"][-1]["resumed_status"] = resumed["status"]
-            assert resumed["status"] == "completed", resumed
-            summary["checks"]["clarification_resume"] = True
-            await browser.command("Page.reload")
-            await browser.wait("document.querySelector('.assistant-result')?.innerText.length>0", 25)
-            summary["checks"]["refresh_after_resume"] = True
+                result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
+                await browser.command("Page.reload")
+                await browser.wait("document.querySelector('.assistant-result')?.innerText.length>0", 25)
+                return {"run_id": str(run_id), "terminal": result["status"],
+                        "events": ["clarification.waiting", "run.completed"], "operations": [],
+                        "request_count": provider_calls() - request_start, "refresh": True}
 
-            if args.single_run:
-                summary["status"] = "completed_single_run"
-                return
-
-            existing_ids = {item["run_id"] for item in summary["runs"]}
-            with sqlite3.connect(run_root / "agent.db") as db:
-                current_runs = db.execute("SELECT id,session_id,status FROM task_runs WHERE task_type='assistant' ORDER BY created_at").fetchall()
-            if not any(str(row[0]) not in existing_ids for row in current_runs):
+            async def cross_capability_scenario(context):
+                request_start = provider_calls()
                 session = await new_session(browser)
                 workspaces = (await api.get("/api/workspaces")).json()["workspaces"]
                 fixture_workspace = next(item for item in workspaces if item["repo_path"].endswith("/project"))
                 await bind_workspace(browser, fixture_workspace["workspace_id"])
-                bound = await api.get("/api/sessions")
-                bound.raise_for_status()
-                selected = next(item for item in bound.json()["sessions"] if item["id"] == session)
-                assert selected["default_workspace_id"] == fixture_workspace["workspace_id"]
-                summary["fixture_workspace_id"] = fixture_workspace["workspace_id"]
                 await browser.submit("assistant", "结合本地知识中的 Redis SETEX 资料与已注册项目文件 cache.py，说明该实现的 TTL，并给出来源。只读，不要执行测试。")
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    cross_id, cross_workspace = db.execute(
-                        "SELECT id,workspace_id FROM task_runs WHERE task_type='assistant' AND session_id=? "
-                        "ORDER BY created_at DESC LIMIT 1", (session,)).fetchone()
-                assert cross_workspace == fixture_workspace["workspace_id"]
-                cross = await wait_task(api, cross_id)
-                summary["runs"].append({"run_id": cross_id, "final_status": cross["status"]})
+                    run_id, workspace_id = db.execute(
+                        "SELECT id,workspace_id FROM task_runs WHERE task_type='assistant' AND session_id=? ORDER BY created_at DESC LIMIT 1", (session,)
+                    ).fetchone()
+                if workspace_id != fixture_workspace["workspace_id"]:
+                    raise RuntimeError("cross_capability_workspace_mismatch")
+                result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    tool_names = [row[0] for row in db.execute(
-                        "SELECT tool_name FROM execution_operations WHERE run_id=? AND status='succeeded'", (cross_id,))]
-                summary["runs"][-1]["successful_tools"] = tool_names
-                summary["checks"]["cross_capability_terminal"] = cross["status"] == "completed"
-                summary["checks"]["cross_capability_tools"] = "read_file" in tool_names and bool(
-                    {"search_knowledge", "read_knowledge", "answer_knowledge"} & set(tool_names))
+                    tools = [row[0] for row in db.execute(
+                        "SELECT tool_name FROM execution_operations WHERE run_id=? AND status='succeeded'", (run_id,))]
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
-                summary["checks"]["refresh_after_cross_capability"] = True
+                return {"run_id": str(run_id), "terminal": result["status"], "events": ["run.completed"],
+                        "operations": tools, "request_count": provider_calls() - request_start, "refresh": True}
 
-            if any(str(row[0]) not in existing_ids for row in current_runs):
-                pending_cross = next((row for row in current_runs if str(row[0]) not in existing_ids), None)
-                if pending_cross:
-                    cross_id = str(pending_cross[0])
-                    cross = await wait_task(api, cross_id)
-                    with sqlite3.connect(run_root / "agent.db") as db:
-                        tool_names = [row[0] for row in db.execute(
-                            "SELECT tool_name FROM execution_operations WHERE run_id=? AND status='succeeded'", (cross_id,))]
-                    if not any(item.get("run_id") == cross_id for item in summary["runs"]):
-                        summary["runs"].append({"run_id": cross_id, "final_status": cross["status"],
-                                                 "successful_tools": tool_names})
-                    summary["checks"]["cross_capability_terminal"] = cross["status"] == "completed"
-                    summary["checks"]["cross_capability_tools"] = "read_file" in tool_names and bool(
-                        {"search_knowledge", "read_knowledge", "answer_knowledge"} & set(tool_names))
-
-            if len(current_runs) < MAX_RUNS:
+            async def terminal_refresh_scenario(context):
+                request_start = provider_calls()
                 await new_session(browser)
                 await browser.submit("assistant", "请用两句话解释 Redis 持久化的主要权衡。")
-                session = await browser.evaluate("localStorage.getItem('tomato-agent-session-id')")
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    bounded_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
-                bounded = await wait_task(api, bounded_id)
-                summary["runs"].append({"run_id": bounded_id, "final_status": bounded["status"]})
-                summary["checks"]["bounded_terminal_state"] = bounded["status"] in {"completed", "failed", "timed_out"}
-                summary["checks"]["timeout_classified"] = bounded["status"] == "timed_out"
+                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+                result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
-                summary["checks"]["refresh_after_terminal"] = True
-        summary["status"] = "passed" if all(summary["checks"].values()) else "partial_or_failed"
+                terminal_event = "run." + result["status"]
+                return {"run_id": str(run_id), "terminal": result["status"], "events": [terminal_event],
+                        "operations": [], "request_count": provider_calls() - request_start, "refresh": True}
+
+            definitions = [
+                AcceptanceScenario(scenario_record("clarification_continue", RUN_SECONDS, 6, "completed",
+                    ["clarification.waiting", "run.completed"]), clarification_scenario),
+                AcceptanceScenario(scenario_record("cross_capability", RUN_SECONDS, 6, "completed",
+                    ["run.completed"], ["read_file", "search_knowledge"]), cross_capability_scenario),
+                AcceptanceScenario(scenario_record("terminal_refresh", RUN_SECONDS, 4, "completed",
+                    ["run.completed"]), terminal_refresh_scenario),
+            ]
+            if args.single_run:
+                definitions = definitions[:1]
+            scenario_results = await execute_scenarios(
+                definitions, scenario_store, max_runs=args.max_runs, max_requests=args.max_requests,
+                prior_runs=initial_run_count, prior_requests=used_calls,
+                request_observer=lambda scenario_id, record: (run_root / "active-scenario.json").write_text(
+                    json.dumps({"scenario_id": scenario_id, "request_budget": record.request_budget}),
+                    encoding="utf-8",
+                ),
+            )
+            summary["scenarios"] = scenario_results
+            summary["runs"] = [{"run_id": item["run_id"],
+                                "final_status": (item.get("actual_observations") or {}).get("terminal"),
+                                "successful_tools": (item.get("actual_observations") or {}).get("operations", [])}
+                               for item in scenario_results.values() if item.get("run_id")]
+            all_passed = len(scenario_results) == len(definitions) and all(
+                item["status"] == "passed" for item in scenario_results.values())
+            summary["status"] = ("completed_single_run" if args.single_run else "passed") if all_passed else "failed"
+            if not all_passed:
+                failed = next((item for item in scenario_results.values() if item["status"] != "passed"), None)
+                raise RuntimeError("provider_acceptance_scenario_failed:" + str((failed or {}).get("error_category")))
+
     except BaseException as exc:
         summary["status"] = "failed"
         summary["error_type"] = type(exc).__name__

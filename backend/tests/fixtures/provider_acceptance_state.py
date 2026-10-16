@@ -92,6 +92,10 @@ class ScenarioStore:
         except KeyError as exc:
             raise AcceptanceStateError("unknown_scenario") from exc
 
+    @property
+    def scenario_ids(self) -> tuple[str, ...]:
+        return tuple(self._scenarios)
+
     def update(self, scenario_id: str, **values: Any) -> None:
         record = self._record(scenario_id)
         if record.status in TERMINAL_STATUSES:
