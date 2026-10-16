@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 try:
-    from fixtures.provider_acceptance_state import AcceptanceStateError, ScenarioRecord, ScenarioStore
+    from tests.fixtures.provider_acceptance_state import AcceptanceStateError, ScenarioRecord, ScenarioStore
 except ModuleNotFoundError:
-    from provider_acceptance_state import AcceptanceStateError, ScenarioRecord, ScenarioStore
+    try:
+        from fixtures.provider_acceptance_state import AcceptanceStateError, ScenarioRecord, ScenarioStore
+    except ModuleNotFoundError:
+        from provider_acceptance_state import AcceptanceStateError, ScenarioRecord, ScenarioStore
 
 
 @dataclass
@@ -61,6 +64,7 @@ async def execute_scenarios(
     prior_runs: int = 0,
     prior_requests: int = 0,
     request_observer: Callable[[str, ScenarioRecord], None] | None = None,
+    diagnostic_collector: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     calls = prior_requests
@@ -113,19 +117,54 @@ async def execute_scenarios(
         except asyncio.TimeoutError:
             calls += min(record.request_count, record.request_budget)
             store.transition(record.scenario_id, "timed_out", failed_phase="scenario",
+                             actual_observations={"request_count": record.request_count},
                              error_category="scenario_deadline_exceeded")
         except asyncio.CancelledError:
             calls += min(record.request_count, record.request_budget)
             store.transition(record.scenario_id, "cancelled", failed_phase="scenario",
+                             actual_observations={"request_count": record.request_count},
                              error_category="cancelled")
             results[record.scenario_id] = store.get(record.scenario_id)
-            break
         except AcceptanceStateError as exc:
+            request_count = record.request_count
+            if str(exc) == "request_budget_exhausted":
+                request_count = max(request_count, record.request_budget)
+                calls += max(0, record.request_budget - record.request_count)
+                store._record(record.scenario_id).request_count = request_count
+                store._write()
             store.transition(record.scenario_id, "failed", failed_phase="budget",
+                             actual_observations={"request_count": request_count,
+                                                  "error_type": type(exc).__name__,
+                                                  "error": str(exc)},
                              error_category=str(exc))
         except Exception as exc:
             store.transition(record.scenario_id, "failed", failed_phase="scenario",
+                             actual_observations={"request_count": record.request_count,
+                                                  "error_type": type(exc).__name__,
+                                                  "error": str(exc)[:500]},
                              error_category=type(exc).__name__)
+
+        if diagnostic_collector is not None:
+            current = store.get(record.scenario_id)
+            try:
+                diagnostics = await diagnostic_collector(record.scenario_id, current)
+                attachments = {"ui": diagnostics.get("snapshot", {})}
+                if diagnostics.get("diagnostic_errors"):
+                    attachments["diagnostic_errors"] = diagnostics["diagnostic_errors"]
+                store.attach_diagnostics(
+                    record.scenario_id,
+                    actual_observations=attachments,
+                    diagnostic_files=diagnostics.get("diagnostic_files") or {},
+                )
+            except Exception as diagnostic_error:
+                store.attach_diagnostics(
+                    record.scenario_id,
+                    actual_observations={"diagnostic_errors": [{
+                        "source": "diagnostic_collector",
+                        "error_type": type(diagnostic_error).__name__,
+                        "error": str(diagnostic_error)[:500],
+                    }]},
+                )
 
         results[record.scenario_id] = store.get(record.scenario_id)
         if results[record.scenario_id]["status"] != "passed":

@@ -62,6 +62,7 @@ class Runner:
         start = timestamp()
         status = "passed"
         exit_code = None
+        termination_reason = None
         try:
             with log_path.open("w", encoding="utf-8") as log:
                 result = subprocess.run(command, cwd=cwd, env=env, stdout=log,
@@ -69,13 +70,18 @@ class Runner:
             exit_code = result.returncode
             if exit_code:
                 status = "failed"
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             status = "timed_out"
+            termination_reason = "timeout"
+            exit_code = 124
         except OSError as exc:
             status = "failed"
             log_path.write_text(str(exc), encoding="utf-8")
         self.steps.append({"name": name, "command": command, "cwd": str(cwd), "started_at": start,
-                           "status": status, "exit_code": exit_code, "log": str(log_path)})
+                           "status": status, "exit_code": exit_code,
+                           "termination_reason": termination_reason, "log": str(log_path)})
+        if status != "passed":
+            print(f"[diagnostics] artifacts={self.directory} report={self.directory / 'result.json'} log={log_path}")
         print(f"[{status}] {name}: {log_path}")
         return status == "passed"
 
@@ -92,7 +98,12 @@ class Runner:
             "environment": self.environment,
             "steps": self.steps,
             "skipped": self.skipped,
-            "artifacts": {"directory": str(self.directory), "result": str(result_path)},
+            "artifacts": {
+                "directory": str(self.directory),
+                "result": str(result_path),
+                "reports": [str(self.directory / "result.json")],
+                "logs": [step["log"] for step in self.steps],
+            },
         }
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"Result: {result_path} ({result['status']})")

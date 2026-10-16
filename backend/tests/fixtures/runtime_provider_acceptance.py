@@ -15,12 +15,17 @@ from pathlib import Path
 
 import httpx
 
-from unified_browser_acceptance import Browser
+try:
+    from tests.fixtures.unified_browser_acceptance import Browser
+except ModuleNotFoundError:
+    from unified_browser_acceptance import Browser
 try:
     from fixtures.provider_acceptance_executor import AcceptanceScenario, execute_scenarios
+    from fixtures.provider_acceptance_diagnostics import collect_ui_diagnostics
     from fixtures.provider_acceptance_state import ScenarioRecord, ScenarioStore
 except ModuleNotFoundError:
     from provider_acceptance_executor import AcceptanceScenario, execute_scenarios
+    from provider_acceptance_diagnostics import collect_ui_diagnostics
     from provider_acceptance_state import ScenarioRecord, ScenarioStore
 
 
@@ -52,6 +57,60 @@ async def wait_scenario_task(api, run_id, timeout_seconds):
             await asyncio.sleep(1)
 
 
+class AcceptanceBrowserDiagnostics:
+    def __init__(self, browser, output_dir):
+        self.browser = browser
+        self.output_dir = output_dir
+
+    @property
+    def url(self):
+        return self.browser.target_url
+
+    async def title(self):
+        return await self.browser.evaluate("document.title")
+
+    async def locator(self, selector):
+        if selector != "body":
+            raise ValueError("unsupported diagnostic selector")
+        return self
+
+    async def inner_text(self, timeout):
+        return await self.browser.evaluate("document.body.innerText")
+
+    async def screenshot(self, path, full_page):
+        image = await self.browser.command("Page.captureScreenshot", format="png", captureBeyondViewport=full_page)
+        Path(path).write_bytes(base64.b64decode(image["data"]))
+
+    async def collect(self, scenario_id, scenario):
+        observations = scenario.get("actual_observations") or {}
+        return await collect_ui_diagnostics(
+            self, self.output_dir, scenario_id=scenario_id,
+            visible_run_status=observations.get("terminal"),
+            original_error={
+                "error_category": scenario.get("error_category"),
+                "failed_phase": scenario.get("failed_phase"),
+            } if scenario.get("status") != "passed" else None,
+        )
+
+
+def observed_events(run_id, database_path):
+    with sqlite3.connect(database_path) as db:
+        rows = db.execute(
+            "SELECT event_type FROM task_run_events WHERE run_id=? ORDER BY sequence",
+            (str(run_id),),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def observed_operations(run_id, database_path):
+    with sqlite3.connect(database_path) as db:
+        rows = db.execute(
+            "SELECT tool_name FROM execution_operations WHERE run_id=? AND status='succeeded' ORDER BY rowid",
+            (str(run_id),),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
 async def new_session(browser):
     previous = await browser.evaluate("localStorage.getItem('tomato-agent-session-id')")
     await browser.click("新建会话")
@@ -81,6 +140,7 @@ async def bind_workspace(browser, workspace_id):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-real-provider", action="store_true")
+    parser.add_argument("--replay", type=Path, help="replay a recorded provider-attempts.jsonl offline")
     parser.add_argument("--run-id", default=time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--resume", action="store_true")
@@ -89,24 +149,39 @@ async def main():
     parser.add_argument("--max-runs", type=int, default=MAX_RUNS)
     parser.add_argument("--max-requests", type=int, default=MAX_CALLS)
     args = parser.parse_args()
-    if not args.run_real_provider:
+    replay_mode = args.replay is not None
+    if replay_mode and args.run_real_provider:
+        parser.error("--replay and --run-real-provider are mutually exclusive")
+    if not replay_mode and not args.run_real_provider:
         parser.error("real Provider requests require --run-real-provider")
+    if replay_mode and (args.resume or args.stream):
+        parser.error("--replay cannot be combined with --resume or --stream")
+    if replay_mode and not args.replay.is_file():
+        parser.error("replay recording does not exist")
     if not 1 <= args.max_runs <= MAX_RUNS or not 1 <= args.max_requests <= MAX_CALLS:
         parser.error(f"budget must be 1-{MAX_RUNS} runs and 1-{MAX_CALLS} requests")
     run_root = (ROOT / args.run_id).resolve()
     if not run_root.is_relative_to(ROOT.resolve()) or (run_root.exists() != args.resume):
         parser.error("use a new run-id, or pass --resume for an existing isolated directory")
-    if not (BACKEND / ".env").is_file():
+    if not replay_mode and not (BACKEND / ".env").is_file():
         parser.error("backend/.env is required; credentials will not be printed")
-    try:
-        cdp_response = httpx.get(args.cdp_url.rstrip("/") + "/json/list", timeout=3)
-        cdp_response.raise_for_status()
-        cdp_pages = cdp_response.json()
-        if not any(item.get("type") == "page" for item in cdp_pages):
-            raise ValueError("no debuggable Chrome page")
-    except (httpx.HTTPError, ValueError) as exc:
-        parser.error(f"Chrome CDP is unavailable at {args.cdp_url}: {type(exc).__name__}")
+    if not replay_mode:
+        try:
+            cdp_response = httpx.get(args.cdp_url.rstrip("/") + "/json/list", timeout=3)
+            cdp_response.raise_for_status()
+            cdp_pages = cdp_response.json()
+            if not any(item.get("type") == "page" for item in cdp_pages):
+                raise ValueError("no debuggable Chrome page")
+        except (httpx.HTTPError, ValueError) as exc:
+            parser.error(f"Chrome CDP is unavailable at {args.cdp_url}: {type(exc).__name__}")
     run_root.mkdir(parents=True, exist_ok=args.resume)
+    replay_client = None
+    if replay_mode:
+        from fixtures.provider_acceptance_replay import ProviderReplayClient
+
+        replay_client = ProviderReplayClient(args.replay)
+        replay_source = run_root / "replay-source.jsonl"
+        replay_source.write_bytes(args.replay.read_bytes())
     used_calls = 0
     attempts_path = run_root / "provider-attempts.jsonl"
     if attempts_path.exists():
@@ -131,6 +206,8 @@ async def main():
         "RUNTIME_ACCEPTANCE_MAX_CALLS": str(args.max_requests),
         "RUNTIME_ACCEPTANCE_USED_CALLS": str(used_calls),
         "RUNTIME_ACCEPTANCE_RESUME": "1" if args.resume else "",
+        "RUNTIME_ACCEPTANCE_MODE": "replay" if replay_mode else "real",
+        "RUNTIME_ACCEPTANCE_REPLAY_SOURCE": str(replay_source) if replay_mode else "",
     })
     frontend_env = os.environ.copy()
     frontend_env["VITE_API_BASE_URL"] = "http://127.0.0.1:8037"
@@ -160,7 +237,8 @@ async def main():
             events.write(json.dumps({"event": event, **details}, ensure_ascii=False) + "\n")
     summary_path = run_root / "summary.json"
     summary = (json.loads(summary_path.read_text(encoding="utf-8")) if args.resume and summary_path.exists()
-               else {"status": "running", "run_id": args.run_id, "runs": [], "checks": {}})
+               else {"status": "running", "run_id": args.run_id, "mode": "replay" if replay_mode else "real",
+                     "runs": [], "checks": {}})
     summary["status"] = "running"
     try:
         async with httpx.AsyncClient(timeout=3) as health:
@@ -175,10 +253,18 @@ async def main():
                                 raise RuntimeError("acceptance_server_exited_before_health_check")
                             pass
                         await asyncio.sleep(0.5)
-        async with httpx.AsyncClient() as cdp:
-            created = await cdp.put(args.cdp_url.rstrip("/") + "/json/new?" + frontend_url + "/")
-            created.raise_for_status()
-            browser_target_id = created.json()["id"]
+        if replay_mode:
+            async with httpx.AsyncClient() as browser_session:
+                browser_target = await browser_session.post(
+                    args.cdp_url.rstrip("/") + "/json/new?" + frontend_url + "/"
+                )
+                browser_target.raise_for_status()
+                browser_target_id = browser_target.json()["id"]
+        else:
+            async with httpx.AsyncClient() as cdp:
+                created = await cdp.put(args.cdp_url.rstrip("/") + "/json/new?" + frontend_url + "/")
+                created.raise_for_status()
+                browser_target_id = created.json()["id"]
         observe("target_created", target_id=browser_target_id, url=frontend_url + "/")
         await browser.connect(args.cdp_url, target_id=browser_target_id)
         observe("target_connected", target_id=browser.target_id, url=browser.target_url)
@@ -186,6 +272,7 @@ async def main():
             "document.readyState==='complete' && location.origin===" + json.dumps(frontend_url), 30)
         async with httpx.AsyncClient(base_url="http://127.0.0.1:8037", timeout=10) as api:
             scenario_store = ScenarioStore(run_root / "scenarios.json", acceptance_id=args.run_id)
+            ui_diagnostics = AcceptanceBrowserDiagnostics(browser, run_root)
             interrupted = scenario_store.recover_running()
             if interrupted:
                 summary["scenarios"] = json.loads((run_root / "scenarios.json").read_text(encoding="utf-8"))["scenarios"]
@@ -218,20 +305,25 @@ async def main():
                 session = await new_session(browser)
                 await browser.submit("assistant", "请先问我一个澄清问题，确认想了解的主题和目标；收到回答前不要使用任何工具。")
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' AND session_id=? ORDER BY created_at DESC LIMIT 1", (session,)).fetchone()[0]
                 clarify = (await api.get(f"/api/tasks/{run_id}")).json()
                 if clarify["status"] != "waiting" or (clarify.get("pending_action") or {}).get("action_type") != "clarification":
-                    return {"run_id": str(run_id), "terminal": clarify["status"], "events": [], "operations": [],
+                    return {"run_id": str(run_id), "terminal": clarify["status"],
+                            "events": observed_events(run_id, run_root / "agent.db"),
+                            "operations": observed_operations(run_id, run_root / "agent.db"),
                             "request_count": provider_calls() - request_start}
                 summary["checks"]["clarification_wait"] = True
                 await browser.wait("!!document.querySelector('.pending-action-panel textarea')", 25)
                 await browser.input(".pending-action-panel textarea", "解释 Redis SETEX 的 TTL，优先使用本地知识证据。")
                 await browser.click("提交补充说明")
+                waiting_events = observed_events(run_id, run_root / "agent.db")
                 result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelector('.assistant-result')?.innerText.length>0", 25)
                 return {"run_id": str(run_id), "terminal": result["status"],
-                        "events": ["clarification.waiting", "run.completed"], "operations": [],
+                        "events": list(dict.fromkeys(waiting_events + observed_events(run_id, run_root / "agent.db"))),
+                        "operations": observed_operations(run_id, run_root / "agent.db"),
+                        "clarification_status": clarify["status"],
                         "request_count": provider_calls() - request_start, "refresh": True}
 
             async def cross_capability_scenario(context):
@@ -253,20 +345,21 @@ async def main():
                         "SELECT tool_name FROM execution_operations WHERE run_id=? AND status='succeeded'", (run_id,))]
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
-                return {"run_id": str(run_id), "terminal": result["status"], "events": ["run.completed"],
+                return {"run_id": str(run_id), "terminal": result["status"],
+                        "events": observed_events(run_id, run_root / "agent.db"),
                         "operations": tools, "request_count": provider_calls() - request_start, "refresh": True}
 
             async def terminal_refresh_scenario(context):
                 request_start = provider_calls()
-                await new_session(browser)
+                session = await new_session(browser)
                 await browser.submit("assistant", "请用两句话解释 Redis 持久化的主要权衡。")
                 with sqlite3.connect(run_root / "agent.db") as db:
-                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+                    run_id = db.execute("SELECT id FROM task_runs WHERE task_type='assistant' AND session_id=? ORDER BY created_at DESC LIMIT 1", (session,)).fetchone()[0]
                 result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
-                terminal_event = "run." + result["status"]
-                return {"run_id": str(run_id), "terminal": result["status"], "events": [terminal_event],
+                return {"run_id": str(run_id), "terminal": result["status"],
+                        "events": observed_events(run_id, run_root / "agent.db"),
                         "operations": [], "request_count": provider_calls() - request_start, "refresh": True}
 
             definitions = [
@@ -282,6 +375,7 @@ async def main():
             scenario_results = await execute_scenarios(
                 definitions, scenario_store, max_runs=args.max_runs, max_requests=args.max_requests,
                 prior_runs=initial_run_count, prior_requests=used_calls,
+                diagnostic_collector=ui_diagnostics.collect,
                 request_observer=lambda scenario_id, record: (run_root / "active-scenario.json").write_text(
                     json.dumps({"scenario_id": scenario_id, "request_budget": record.request_budget}),
                     encoding="utf-8",
@@ -299,20 +393,37 @@ async def main():
                 failed = next((item for item in scenario_results.values() if item["status"] != "passed"), None)
                 raise RuntimeError("provider_acceptance_scenario_failed:" + str((failed or {}).get("error_category")))
 
-    except BaseException as exc:
-        summary["status"] = "failed"
+    except Exception as exc:
+        summary["status"] = "acceptance_failed"
         summary["error_type"] = type(exc).__name__
         summary["error"] = str(exc)[:500]
         observe("run_error", error_type=type(exc).__name__, error=str(exc)[:500],
                 target_id=getattr(browser, "target_id", None), target_url=getattr(browser, "target_url", None))
+        if replay_mode:
+            from fixtures.provider_acceptance_replay import write_replay_summary
+
+            write_replay_summary(run_root / "replay-summary.json", source_path=args.replay,
+                                 client=replay_client, status="acceptance_failed", error=type(exc).__name__)
+            summary["replay_summary_written"] = True
         raise
     finally:
         try:
             image = await browser.command("Page.captureScreenshot", format="png")
             (run_root / "browser.png").write_bytes(base64.b64decode(image["data"]))
-        except BaseException:
-            pass
+        except BaseException as diagnostic_error:
+            summary.setdefault("diagnostic_errors", []).append({
+                "source": "batch_screenshot",
+                "error_type": type(diagnostic_error).__name__,
+                "error": str(diagnostic_error)[:500],
+            })
         (run_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        if replay_mode:
+            from fixtures.provider_acceptance_replay import write_replay_summary
+
+            if not summary.get("replay_summary_written"):
+                write_replay_summary(run_root / "replay-summary.json", source_path=args.replay,
+                                     client=replay_client, status=summary["status"],
+                                     error=summary.get("error_type"))
         if getattr(browser, "ws", None):
             await browser.ws.close()
         if browser_target_id:

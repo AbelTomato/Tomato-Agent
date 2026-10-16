@@ -83,6 +83,58 @@ async def test_non_pass_outcome_stops_before_later_scenarios(tmp_path, outcome):
 
 
 @pytest.mark.asyncio
+async def test_runtime_exception_is_recorded_as_scenario_failure_not_assertion_mismatch(tmp_path):
+    store = ScenarioStore(tmp_path / "summary.json")
+
+    async def fail(context):
+        context.consume_request()
+        raise RuntimeError("LLM provider returned an empty content response")
+
+    item = AcceptanceScenario(
+        record=ScenarioRecord(
+            acceptance_id="acceptance-1", scenario_id="parse_failure", timeout_seconds=1,
+            request_budget=2, expected_terminal="completed",
+            expected_events=["run.completed"],
+        ),
+        run=fail,
+    )
+
+    results = await execute_scenarios([item], store, max_runs=1, max_requests=2)
+    result = results["parse_failure"]
+
+    assert result["status"] == "failed"
+    assert result["failed_phase"] == "scenario"
+    assert result["error_category"] == "RuntimeError"
+    assert result["actual_observations"] == {
+        "request_count": 1,
+        "error_type": "RuntimeError",
+        "error": "LLM provider returned an empty content response",
+    }
+    assert result["request_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assertion_failure_keeps_observed_events_separate_from_expectations(tmp_path):
+    store = ScenarioStore(tmp_path / "summary.json")
+    item = scenario("missing_event")
+    item.record.expected_events = ["run.completed"]
+    item.run = lambda context: asyncio.sleep(0, result={
+        "terminal": "failed",
+        "events": ["clarification.waiting"],
+        "operations": [],
+        "request_count": 1,
+    })
+
+    result = (await execute_scenarios([item], store, max_runs=1, max_requests=1))["missing_event"]
+
+    assert result["status"] == "failed"
+    assert result["failed_phase"] == "assertions"
+    assert result["error_category"] == "expectation_mismatch"
+    assert result["expected_events"] == ["run.completed"]
+    assert result["actual_observations"]["events"] == ["clarification.waiting"]
+
+
+@pytest.mark.asyncio
 async def test_global_budgets_reject_before_starting_scenario(tmp_path):
     store = ScenarioStore(tmp_path / "summary.json")
     store.add(ScenarioRecord(acceptance_id="acceptance-1", scenario_id="prior"))

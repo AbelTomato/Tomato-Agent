@@ -12,17 +12,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.application import create_app
-from app.assistant.strategy import AssistantStrategy
+from app.assistant.strategy import ASSISTANT_DECISION_RESPONSE_FORMAT, AssistantStrategy
 from app.knowledge.models import Chunk, Document
 from app.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import KnowledgeService
 from app.settings import Settings
-from app.llm.compatible_client import _REQUEST_CONTEXT
+from app.llm.compatible_client import _REQUEST_CONTEXT, _REQUEST_CORRELATION
 from app.observability.provider_attempt_recorder import ProviderAttemptRecorder
+from tests.fixtures.provider_acceptance_runtime import CappedProvider
 try:
-    from fixtures.provider_acceptance_executor import count_recorded_calls
+    from tests.fixtures.provider_acceptance_executor import count_recorded_calls
+    from tests.fixtures.provider_acceptance_replay import ProviderReplayClient
 except ModuleNotFoundError:
-    from provider_acceptance_executor import count_recorded_calls
+    try:
+        from fixtures.provider_acceptance_executor import count_recorded_calls
+        from fixtures.provider_acceptance_replay import ProviderReplayClient
+    except ModuleNotFoundError:
+        from provider_acceptance_executor import count_recorded_calls
+        from provider_acceptance_replay import ProviderReplayClient
 
 
 backend = Path(__file__).parents[2]
@@ -43,7 +50,7 @@ cache_fixture.write_text(expected_cache, encoding="utf-8")
 test_fixture.write_text(expected_test, encoding="utf-8")
 knowledge_path = root / "knowledge.db"
 config = Settings(
-    _env_file=backend / ".env",
+    _env_file=backend / ".env" if os.environ.get("RUNTIME_ACCEPTANCE_MODE") != "replay" else None,
     database_path=root / "agent.db", docs_root=project,
     draft_directory=root / "drafts", code_task_workspace_root=root / "metadata",
     code_task_artifact_root=root / "artifacts", workspace_allowed_roots=[project],
@@ -56,7 +63,10 @@ config = Settings(
     runtime_tool_timeout_seconds=20,
     llm_timeout_seconds=int(os.environ["RUNTIME_ACCEPTANCE_LLM_TIMEOUT_SECONDS"]),
 )
-assert config.llm_api_key.strip(), "real Provider must be configured in backend/.env"
+if os.environ.get("RUNTIME_ACCEPTANCE_MODE") == "replay":
+    config.llm_api_key = ""
+else:
+    assert config.llm_api_key.strip(), "real Provider must be configured in backend/.env"
 app = create_app(config)
 app.add_middleware(
     CORSMiddleware, allow_origins=[os.environ["RUNTIME_ACCEPTANCE_FRONTEND_ORIGIN"]],
@@ -65,7 +75,15 @@ app.add_middleware(
 knowledge = KnowledgeRepository(knowledge_path)
 knowledge_service = KnowledgeService(knowledge, pipeline=None)
 deps = app.state.dependencies
-if os.environ.get("RUNTIME_ACCEPTANCE_STREAM") == "1":
+if os.environ.get("RUNTIME_ACCEPTANCE_MODE") != "replay":
+    deps.task_service.assistant.llm.response_format_identity = ASSISTANT_DECISION_RESPONSE_FORMAT
+if os.environ.get("RUNTIME_ACCEPTANCE_MODE") == "replay":
+    replay_path = Path(os.environ["RUNTIME_ACCEPTANCE_REPLAY_SOURCE"]).resolve()
+    if not replay_path.is_relative_to(root.resolve()):
+        raise RuntimeError("replay source must be copied into the isolated acceptance directory")
+    replay_client = ProviderReplayClient(replay_path)
+    deps.task_service.assistant.llm = replay_client
+elif os.environ.get("RUNTIME_ACCEPTANCE_STREAM") == "1":
     from app.llm.compatible_client import OpenAICompatibleClient
 
     deps.task_service.assistant.llm = OpenAICompatibleClient(
@@ -107,57 +125,14 @@ async def _recording_decide(self, state, available_tools, llm_response=None):
                     "position": cause.pos,
                     "line": cause.lineno,
                     "column": cause.colno,
-                    "near": content[max(0, cause.pos - 80):cause.pos + 80],
                 }
-            with (root / "strategy-input-errors.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            (root / "protocol-errors.jsonl").open("a", encoding="utf-8").write(
+                json.dumps(record, ensure_ascii=False) + "\n"
+            )
         raise
 
 
 AssistantStrategy.decide = _recording_decide
-
-
-class CappedProvider:
-    def __init__(self, client):
-        self.client = client
-        self.calls = int(os.environ.get("RUNTIME_ACCEPTANCE_USED_CALLS", "0"))
-        self.timeout = getattr(client, "timeout", None)
-
-    async def complete(self, messages, tools, *, response_format=None):
-        limit = int(os.environ["RUNTIME_ACCEPTANCE_MAX_CALLS"])
-        if self.calls >= limit:
-            raise RuntimeError("acceptance_provider_call_budget_exhausted")
-        scenario_path = root / "active-scenario.json"
-        scenario = json.loads(scenario_path.read_text(encoding="utf-8")) if scenario_path.exists() else {}
-        scenario_id = scenario.get("scenario_id")
-        if scenario_id:
-            attempts_path = root / "provider-attempts.jsonl"
-            scenario_calls = count_recorded_calls(attempts_path, scenario_id)
-            if scenario_calls >= int(scenario["request_budget"]):
-                raise RuntimeError("acceptance_scenario_request_budget_exhausted")
-        self.calls += 1
-        run_id = request_run.get()
-        recorder = ProviderAttemptRecorder(
-            root / "provider-attempts.jsonl", self.calls, run_id,
-            acceptance_id=os.environ.get("RUNTIME_ACCEPTANCE_ID"), scenario_id=scenario_id,
-        )
-        recorder.record["scenario_request_index"] = scenario_calls + 1 if scenario_id else None
-        token = _REQUEST_CONTEXT.set(recorder.observe)
-        try:
-            response = await self.client.complete(messages, tools, response_format=response_format)
-            recorder.record["response_format"] = response_format
-            recorder.record["response"] = response.model_dump(mode="json")
-            return response
-        except BaseException as exc:
-            recorder.record["error_type"] = type(exc).__name__
-            raise
-        finally:
-            _REQUEST_CONTEXT.reset(token)
-            recorder.write()
-
-
-
-
 deps.task_service.assistant.llm = CappedProvider(deps.task_service.assistant.llm)
 _assistant_execute = deps.task_service.assistant.execute
 
@@ -206,6 +181,7 @@ async def seed():
 
 asyncio.run(seed())
 (root / "config-summary.json").write_text(json.dumps({
+    "mode": os.environ.get("RUNTIME_ACCEPTANCE_MODE", "real"),
     "model": config.llm_model,
     "provider_host": urlsplit(config.llm_base_url).hostname,
     "max_runs": int(os.environ["RUNTIME_ACCEPTANCE_MAX_RUNS"]),

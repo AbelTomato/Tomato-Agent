@@ -112,6 +112,24 @@ class ScenarioStore:
         self._touch(record)
         self._write()
 
+    def attach_diagnostics(
+        self,
+        scenario_id: str,
+        *,
+        actual_observations: dict[str, Any] | None = None,
+        diagnostic_files: dict[str, str] | None = None,
+    ) -> None:
+        """Attach post-terminal diagnostics without reopening the scenario."""
+        record = self._record(scenario_id)
+        if record.status not in TERMINAL_STATUSES:
+            raise AcceptanceStateError("diagnostics_require_terminal_scenario")
+        if actual_observations:
+            record.actual_observations.update(actual_observations)
+        if diagnostic_files:
+            record.diagnostic_files.update(diagnostic_files)
+        self._touch(record)
+        self._write()
+
     def transition(self, scenario_id: str, status: ScenarioStatus, **values: Any) -> None:
         record = self._record(scenario_id)
         if status not in _TRANSITIONS.get(record.status, set()):
