@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+mod lifecycle;
+
 #[derive(Deserialize)]
 struct Handshake {
     protocol: u32,
@@ -147,7 +149,16 @@ async fn probe(distribution: String, backend_path: String) -> Result<ProbeResult
 }
 
 fn main() {
+    use tauri::{Emitter, Manager};
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--lifecycle-report") {
+        if args.len() != 6 { std::process::exit(2); }
+        let result = lifecycle::acceptance_report(&args[2], &args[3], &args[4]);
+        let ok = result.is_ok();
+        let report = match result { Ok(value) => value, Err(error) => serde_json::json!({"passed":false,"error":error}) };
+        if std::fs::write(&args[5], serde_json::to_vec_pretty(&report).unwrap()).is_err() { std::process::exit(3); }
+        std::process::exit(if ok {0} else {1});
+    }
     if args.get(1).map(String::as_str) == Some("--probe-report") {
         if args.len() != 5 { std::process::exit(2); }
         let result = run_probe(&args[2], &args[3]);
@@ -162,7 +173,27 @@ fn main() {
         }
         std::process::exit(if ok {0} else {1});
     }
-    tauri::Builder::default().invoke_handler(tauri::generate_handler![distributions, probe])
+    let connection = lifecycle::SharedConnection::default();
+    if args.get(1).map(String::as_str) == Some("--acceptance-data") {
+        let path = args.get(2).expect("acceptance data path required");
+        validate_path(path).expect("absolute WSL acceptance path required");
+        connection.lock().unwrap().acceptance_root = Some(path.clone());
+    }
+    tauri::Builder::default()
+        .manage(connection)
+        .invoke_handler(tauri::generate_handler![distributions, probe,
+            lifecycle::connect_service, lifecycle::connection_status, lifecycle::desktop_request,
+            lifecycle::connection_facts, lifecycle::close_service, lifecycle::exit_desktop])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.emit("desktop-close-requested", ());
+            }
+        })
+        .setup(|app| {
+            let _ = app.state::<lifecycle::SharedConnection>();
+            Ok(())
+        })
         .run(tauri::generate_context!()).expect("desktop startup failed");
 }
 

@@ -97,7 +97,20 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, init);
+    const native = typeof window !== 'undefined' ? (window as Window & {
+      __TAURI__?: { core: { invoke<T>(command: string, args: Record<string, unknown>): Promise<T> } };
+    }).__TAURI__ : undefined;
+    if (native) {
+      init?.signal?.throwIfAborted();
+      const value = await native.core.invoke<{ status: number; body: unknown }>('desktop_request', {
+        method: init?.method ?? 'GET', path,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
+      });
+      init?.signal?.throwIfAborted();
+      response = new Response(JSON.stringify(value.body), { status: value.status });
+    } else {
+      response = await fetch(`${API_BASE_URL}${path}`, init);
+    }
   } catch {
     throw new ApiError('无法连接后端服务，请确认后端正在运行。', 0);
   }

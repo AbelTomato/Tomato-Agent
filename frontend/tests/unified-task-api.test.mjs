@@ -8,6 +8,27 @@ const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const { code } = await transformWithOxc(source, 'api.ts');
 const api = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 
+test('desktop requests use native credentials bridge and never retry submissions', async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.window = { __TAURI__: { core: { async invoke(command, args) {
+    calls.push([command, args]);
+    if (args.method === 'POST') throw new Error('connection lost');
+    return { status: 200, body: { run_id: 'existing' } };
+  } } } };
+  globalThis.fetch = () => { throw new Error('browser transport must not be used'); };
+  try {
+    assert.equal((await api.getTask('existing')).run_id, 'existing');
+    await assert.rejects(() => api.submitTask('session', {
+      kind: 'chat', message: 'once', client_request_id: 'once',
+    }));
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0][0], 'desktop_request');
+    assert.equal(calls[1][1].body.client_request_id, 'once');
+    assert.equal(JSON.stringify(calls).includes('Authorization'), false);
+  } finally { globalThis.fetch = original; delete globalThis.window; }
+});
+
 test('统一协议编码 ID、分页、动作版本、原目录目标和 AbortSignal', async () => {
   const calls = [];
   const original = globalThis.fetch;
