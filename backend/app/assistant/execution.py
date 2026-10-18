@@ -48,7 +48,11 @@ class AssistantExecutionPort(LeaseExecutionPort):
         diagnostic_stage = "initialize"
         started = monotonic()
         baseline = snapshot.elapsed_upper_bound_seconds
-        messages = list(snapshot.messages)
+        # Assistant decisions and results use JSON content, not native tool messages.
+        # Normalize legacy snapshots without changing pending execution metadata.
+        messages = [item.model_copy(update={"tool_calls": []})
+                    if item.role == "assistant" and item.tool_calls else item
+                    for item in snapshot.messages]
         if not messages and state.structured_state.get("task"):
             messages.extend(Message(role=item["role"], content=str(item["content"]))
                 for item in state.structured_state.get("history", []) if item["role"] in {"user", "assistant"})
@@ -97,7 +101,9 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 revised = await self.repository.apply_steer(self.lease, updated())
                 if revised is not None:
                     snapshot = revised
-                    messages = list(revised.messages)
+                    messages = [item.model_copy(update={"tool_calls": []})
+                                if item.role == "assistant" and item.tool_calls else item
+                                for item in revised.messages]
                     state = state.model_copy(update={"structured_state": revised.harness_state["structured_state"]})
                 remaining = min(budget.max_duration_seconds,
                     snapshot.budget_limits.get("max_execution_seconds", budget.max_duration_seconds)) - baseline - (monotonic() - started)
@@ -165,7 +171,6 @@ class AssistantExecutionPort(LeaseExecutionPort):
                                 text=harness._text(decision.output), expected_logical_index=snapshot.logical_index)
                         continue
                     operation = None
-                    calls = []
                     if decision.kind == "call_tool":
                         if decision.tool_name not in policy.allowed_tools:
                             feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
@@ -234,11 +239,10 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         decision = decision.model_copy(update={"arguments": arguments,
                             "contract_version": descriptor.contract_version})
                         response = response.model_copy(update={"kind": "tool_call", "tool_call": call})
-                        calls = [call]
                         operation = await self.describe_operation(snapshot.logical_index, decision.tool_name, arguments)
                     elif decision.kind == "respond" and len(harness._text(decision.output)) > budget.max_response_chars:
                         return await result("failed", "output exceeds response budget")
-                    messages.append(Message(role="assistant", content=response.content or "", tool_calls=calls))
+                    messages.append(Message(role="assistant", content=response.content or ""))
                     snapshot = await self.commit_model_response(response, updated(
                         phase="pending_tool" if operation else "ready_finish", loop_count=snapshot.loop_count + 1,
                         pending_operation_id=operation.id if operation else None,

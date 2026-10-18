@@ -34,7 +34,9 @@ def assistant_decision_json_schema() -> dict[str, Any]:
         if "$ref" in node:
             name = node["$ref"].rsplit("/", 1)[-1]
             return resolve(definitions[name])
-        result = {key: resolve(value) for key, value in node.items()
+        # Property names are application data, even when named like schema metadata.
+        result = {key: ({name: resolve(field) for name, field in value.items()}
+                        if key == "properties" else resolve(value)) for key, value in node.items()
                   if key not in {"title", "default", "discriminator", "oneOf"}}
         if "const" in result:
             result["enum"] = [result.pop("const")]

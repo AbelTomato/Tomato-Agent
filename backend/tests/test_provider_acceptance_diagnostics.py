@@ -33,6 +33,53 @@ class ScreenshotFailurePage(FakePage):
 
 
 @pytest.mark.asyncio
+async def test_cdp_diagnostics_waits_for_body_after_navigation(tmp_path):
+    from tests.fixtures.runtime_provider_acceptance import AcceptanceBrowserDiagnostics
+
+    class LoadingBrowser:
+        target_url = "http://127.0.0.1:5197/"
+
+        def __init__(self):
+            self.ready = False
+
+        async def wait(self, expression, timeout):
+            assert "document.body" in expression
+            self.ready = True
+
+        async def evaluate(self, expression):
+            return "Completed result" if self.ready else ""
+
+    page = AcceptanceBrowserDiagnostics(LoadingBrowser(), tmp_path)
+    assert await page.inner_text(timeout=2000) == "Completed result"
+
+
+@pytest.mark.asyncio
+async def test_refresh_waits_for_new_document_and_target_result():
+    from tests.fixtures.runtime_provider_acceptance import refresh_assistant_result
+
+    class ReloadingBrowser:
+        def __init__(self):
+            self.old_document = True
+            self.marked = False
+
+        async def evaluate(self, expression):
+            assert "window.__acceptanceBeforeReload" in expression
+            self.marked = True
+
+        async def command(self, method):
+            assert method == "Page.reload" and self.marked
+
+        async def wait(self, expression, timeout):
+            assert "!window.__acceptanceBeforeReload" in expression
+            assert "target-run" in expression and "assistant-result" in expression
+            self.old_document = False
+
+    browser = ReloadingBrowser()
+    await refresh_assistant_result(browser, "target-run")
+    assert not browser.old_document
+
+
+@pytest.mark.asyncio
 async def test_collects_bounded_page_snapshot_and_screenshot(tmp_path):
     result = await collect_ui_diagnostics(
         FakePage(), tmp_path, scenario_id="scenario-1", visible_run_status="running"

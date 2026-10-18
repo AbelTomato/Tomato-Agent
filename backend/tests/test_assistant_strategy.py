@@ -109,6 +109,23 @@ def test_discovery_empty_filters_recover_cross_capability_catalog(tmp_path):
     assert "过滤结果为空时先将两个条件设为 null 重试" in INSTRUCTION
 
 
+def test_provider_citation_schema_preserves_runtime_fields():
+    from app.assistant.strategy import assistant_decision_json_schema
+    from app.knowledge.service import CitationSnapshot
+
+    schema = assistant_decision_json_schema()
+    finish = next(branch for branch in schema["properties"]["decision"]["anyOf"]
+                  if branch["properties"]["type"]["enum"] == ["finish"])
+    citation = finish["properties"]["payload"]["properties"]["result"]["properties"]["citations"]["items"]
+    runtime = CitationSnapshot.model_json_schema()
+
+    assert set(citation["properties"]) == set(runtime["properties"])
+    assert set(citation["required"]) == set(runtime["properties"])
+    assert citation["properties"]["title"] == {"type": "string", "minLength": 1}
+    assert "title" not in citation
+    assert citation["additionalProperties"] is False
+
+
 def test_assistant_decision_json_schema_is_strict_compatible_and_covers_protocol():
     from app.assistant.strategy import assistant_decision_json_schema
 

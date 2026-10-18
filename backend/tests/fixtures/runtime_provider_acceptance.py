@@ -57,6 +57,15 @@ async def wait_scenario_task(api, run_id, timeout_seconds):
             await asyncio.sleep(1)
 
 
+async def refresh_assistant_result(browser, run_id):
+    await browser.evaluate("window.__acceptanceBeforeReload = true")
+    await browser.command("Page.reload")
+    await browser.wait(
+        "!window.__acceptanceBeforeReload && [...document.querySelectorAll('.task-card')]"
+        ".some(card => card.innerText.includes(" + json.dumps(str(run_id)) + ") && "
+        "card.querySelector('.assistant-result')?.innerText.length > 0)", 25)
+
+
 class AcceptanceBrowserDiagnostics:
     def __init__(self, browser, output_dir):
         self.browser = browser
@@ -75,6 +84,7 @@ class AcceptanceBrowserDiagnostics:
         return self
 
     async def inner_text(self, timeout):
+        await self.browser.wait("!!document.body?.innerText.trim()", timeout / 1000)
         return await self.browser.evaluate("document.body.innerText")
 
     async def screenshot(self, path, full_page):
@@ -162,6 +172,7 @@ async def main():
     parser.add_argument("--single-run", action="store_true")
     parser.add_argument("--max-runs", type=int, default=MAX_RUNS)
     parser.add_argument("--max-requests", type=int, default=MAX_CALLS)
+    parser.add_argument("--max-loops", type=int, default=12)
     args = parser.parse_args()
     replay_mode = args.replay is not None
     if replay_mode and args.run_real_provider:
@@ -172,8 +183,8 @@ async def main():
         parser.error("--replay cannot be combined with --resume or --stream")
     if replay_mode and not args.replay.is_file():
         parser.error("replay recording does not exist")
-    if not 1 <= args.max_runs <= MAX_RUNS or not 1 <= args.max_requests <= MAX_CALLS:
-        parser.error(f"budget must be 1-{MAX_RUNS} runs and 1-{MAX_CALLS} requests")
+    if not 1 <= args.max_runs <= MAX_RUNS or args.max_requests < 1 or args.max_loops < 1:
+        parser.error(f"budget must be 1-{MAX_RUNS} runs, positive requests and positive loops")
     run_root = (ROOT / args.run_id).resolve()
     if not run_root.is_relative_to(ROOT.resolve()) or (run_root.exists() != args.resume):
         parser.error("use a new run-id, or pass --resume for an existing isolated directory")
@@ -218,6 +229,7 @@ async def main():
         "RUNTIME_ACCEPTANCE_STREAM": "1" if args.stream else "",
         "RUNTIME_ACCEPTANCE_MAX_RUNS": str(args.max_runs),
         "RUNTIME_ACCEPTANCE_MAX_CALLS": str(args.max_requests),
+        "RUNTIME_ACCEPTANCE_MAX_LOOPS": str(args.max_loops),
         "RUNTIME_ACCEPTANCE_USED_CALLS": str(used_calls),
         "RUNTIME_ACCEPTANCE_RESUME": "1" if args.resume else "",
         "RUNTIME_ACCEPTANCE_MODE": "replay" if replay_mode else "real",
@@ -334,8 +346,7 @@ async def main():
                 await browser.click("提交补充说明")
                 waiting_events = observed_events(run_id, run_root / "agent.db")
                 result = await wait_scenario_task(api, run_id, context.record.timeout_seconds)
-                await browser.command("Page.reload")
-                await browser.wait("document.querySelector('.assistant-result')?.innerText.length>0", 25)
+                await refresh_assistant_result(browser, run_id)
                 return {"run_id": str(run_id), "terminal": result["status"],
                         **observed_failure(run_id, run_root / "agent.db"),
                         "events": list(dict.fromkeys(waiting_events + observed_events(run_id, run_root / "agent.db"))),
@@ -384,11 +395,11 @@ async def main():
             definitions = [
                 AcceptanceScenario(scenario_record("clarification_continue", RUN_SECONDS,
                     args.max_requests if args.single_run else 6, "completed",
-                    ["clarification.waiting", "run.completed"]), clarification_scenario),
+                    ["assistant.waiting", "assistant.resumed"]), clarification_scenario),
                 AcceptanceScenario(scenario_record("cross_capability", RUN_SECONDS, 6, "completed",
-                    ["run.completed"], ["read_file", "search_knowledge"]), cross_capability_scenario),
+                    ["model.succeeded"], ["read_file", "search_knowledge"]), cross_capability_scenario),
                 AcceptanceScenario(scenario_record("terminal_refresh", RUN_SECONDS, 4, "completed",
-                    ["run.completed"]), terminal_refresh_scenario),
+                    ["model.succeeded"]), terminal_refresh_scenario),
             ]
             if args.single_run:
                 definitions = definitions[:1]

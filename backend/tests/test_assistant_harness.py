@@ -140,6 +140,50 @@ async def test_protocol_messages_continue_until_explicit_finish(tmp_path):
             if event.event_type == "assistant.message"] == ["阶段消息一", "阶段消息二"]
 
 
+@pytest.mark.parametrize("restore_legacy_history", [False, True])
+async def test_custom_tool_history_does_not_emit_native_tool_calls(tmp_path, restore_legacy_history):
+    from app.agent.models import Message, ToolCall
+    from app.llm.compatible_client import OpenAICompatibleClient
+    from app.observability.provider_diagnostics import request_shape
+
+    outcome = CapabilityOutcome(kind="result", result=AssistantResult(answer="checked"))
+    run, repo, port, registry, gateway, provider, tool = await fixture(tmp_path, [outcome])
+    decision_text = json.dumps({"decision": {
+        "protocol_version": 1, "type": "call_tool", "payload": {"name": "check"}}})
+    if restore_legacy_history:
+        snap = await repo.get_snapshot(run.id)
+        await repo.save_snapshot(port.lease, snap.model_copy(update={"messages": [
+            Message(role="user", content="goal"),
+            Message(role="assistant", content=decision_text,
+                    tool_calls=[ToolCall(name="check", arguments={})]),
+            Message(role="user", content=json.dumps({
+                "assistant_tool_result": outcome.model_dump(mode="json")})),
+        ]}))
+
+    observed = []
+
+    async def capture(messages, tools):
+        observed.append([OpenAICompatibleClient._message_to_provider(None, item) for item in messages])
+        provider.calls += 1
+        return LLMResponse(kind="final", content=decision_text)
+
+    provider.complete = capture
+    decisions = [] if restore_legacy_history else [
+        Decision(kind="call_tool", tool_name="check", arguments={})]
+    result = await run_harness(repo, run, port, registry, gateway,
+        Strategy([*decisions, Decision(kind="respond", output={"answer": "done"})]))
+
+    assert result.status == "completed"
+    assert len(tool.contexts) == (0 if restore_legacy_history else 1)
+    history = observed[-1]
+    assert any(item["role"] == "assistant" and item["content"] == decision_text for item in history)
+    assert "assistant_tool_result" in json.loads(history[-1]["content"])
+    assert all("tool_calls" not in item and "tool_call_id" not in item for item in history)
+    assert request_shape({"messages": history}, None)["tool_pairing_issues"] == []
+    saved = await repo.get_snapshot(run.id)
+    assert all(not item.tool_calls for item in saved.messages)
+
+
 async def test_json_message_text_is_not_a_capability_decision(tmp_path):
     run, repo, port, registry, gateway, _, _ = await fixture(tmp_path)
     text = '{"type":"describe_tool","payload":{"name":"missing"}}'
