@@ -21,6 +21,13 @@ _REQUEST_CONTEXT = contextvars.ContextVar("provider_request_context", default=No
 _REQUEST_CORRELATION = contextvars.ContextVar("provider_request_correlation", default=None)
 
 
+def _decoded_headers(headers):
+    # HTTPX aiter_bytes/aiter_lines already decoded Content-Encoding.
+    # Rebuilt responses contain decoded bytes and must not decode them again.
+    return [(key, value) for key, value in headers.multi_items()
+            if key.lower() not in {"content-encoding", "content-length", "transfer-encoding"}]
+
+
 class OpenAICompatibleClient(LLMClient):
     def __init__(
         self,
@@ -103,7 +110,7 @@ class OpenAICompatibleClient(LLMClient):
                             state["body_chunks"].append(chunk)
                     finally:
                         await response.aclose()
-                    response = httpx.Response(response.status_code, headers=response.headers,
+                    response = httpx.Response(response.status_code, headers=_decoded_headers(response.headers),
                         content=b"".join(state["body_chunks"]), request=response.request, extensions=response.extensions)
                     state["response"] = response
                     data = None
@@ -137,13 +144,13 @@ class OpenAICompatibleClient(LLMClient):
         try:
             response = state["response"]
             if self.stream and response is not None and not response.is_error:
-                response = httpx.Response(response.status_code, headers=response.headers,
+                response = httpx.Response(response.status_code, headers=_decoded_headers(response.headers),
                     content="\n".join(state["raw_lines"]).encode(), request=response.request, extensions=response.extensions)
             elif response is not None:
                 try:
                     response.content
                 except httpx.ResponseNotRead:
-                    response = httpx.Response(response.status_code, headers=response.headers,
+                    response = httpx.Response(response.status_code, headers=_decoded_headers(response.headers),
                         content=b"".join(state["body_chunks"]), request=response.request, extensions=response.extensions)
             correlation = dict(_REQUEST_CORRELATION.get() or {})
             correlation.setdefault("call_id", uuid4().hex)
@@ -186,7 +193,7 @@ class OpenAICompatibleClient(LLMClient):
             correlation = scrub(correlation)
             safe_payload = scrub(payload)
             if response is not None and self.api_key and self.api_key.encode() in response.content:
-                response = httpx.Response(response.status_code, headers=response.headers,
+                response = httpx.Response(response.status_code, headers=_decoded_headers(response.headers),
                     content=response.content.replace(self.api_key.encode(), b"[REDACTED]"), request=response.request, extensions=response.extensions)
             if observer is not None:
                 self._notify_observer(observer, safe_payload, response, correlation)
@@ -216,7 +223,7 @@ class OpenAICompatibleClient(LLMClient):
             if streamed.is_error:
                 async for chunk in streamed.aiter_bytes():
                     state["body_chunks"].append(chunk)
-                response = httpx.Response(streamed.status_code, headers=streamed.headers,
+                response = httpx.Response(streamed.status_code, headers=_decoded_headers(streamed.headers),
                     content=b"".join(state["body_chunks"]), request=streamed.request, extensions=streamed.extensions)
                 state["response"] = response
                 return response, None
@@ -270,7 +277,7 @@ class OpenAICompatibleClient(LLMClient):
                                     target["function"][key] += value
             response = httpx.Response(
                 streamed.status_code,
-                headers=streamed.headers,
+                headers=_decoded_headers(streamed.headers),
                 content="\n".join(raw_events).encode("utf-8"),
                 request=streamed.request,
                 extensions=streamed.extensions,

@@ -219,3 +219,26 @@ def test_diagnostic_toml_settings(tmp_path):
     settings = Settings(config_file=config)
     assert settings.llm_diagnostics_enabled is True
     assert settings.llm_diagnostics_root.is_absolute()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("status", [200, 502])
+async def test_gzip_response_is_decoded_only_once(tmp_path, stream, status):
+    import gzip
+
+    body = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n' if stream else '{"choices":[{"message":{"content":"ok"}}]}'
+    if status == 502:
+        body = "gateway failure"
+    client = OpenAICompatibleClient(api_key="test-key", model="m", stream=stream, diagnostics_root=tmp_path,
+        transport=httpx.MockTransport(lambda request: httpx.Response(status,
+            content=gzip.compress(body.encode()), headers={"content-encoding": "gzip"})))
+    if status == 200:
+        assert (await client.complete([], [])).content == "ok"
+    else:
+        with pytest.raises(RuntimeError, match="HTTP 502"):
+            await client.complete([], [])
+    row = rows(client)[0]
+    assert row["http_status"] == status
+    assert row["diagnostic"]["error_category"] == ("http_502" if status == 502 else None)
+    assert ("gateway failure" if status == 502 else "ok") in row["raw_response_body"]
