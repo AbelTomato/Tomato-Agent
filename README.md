@@ -18,6 +18,8 @@ Tomato Agent 是一个面向个人知识库与技术写作的 Agent 项目，提
 
 ## 验证入口
 
+离线确定性 Runtime/UI 验收使用合成脚本驱动真实 API、Worker、SQLite 与浏览器，覆盖澄清后同 Run 恢复及刷新；操作见[确定性 Runtime 与 UI 闭环验收](docs/确定性Runtime与UI闭环验收.md)。该入口不调用真实 Provider，也不替代 Provider 资格验收。
+
 统一验证入口为 `python3 scripts/verify.py`，每次执行会在 `verification-artifacts/<run-id>/` 写入 `result.json` 和各步骤日志。常用命令：
 
 ```bash
