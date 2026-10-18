@@ -4,14 +4,29 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.llm.compatible_client import _REQUEST_CONTEXT, _REQUEST_CORRELATION
 from app.observability.provider_attempt_recorder import ProviderAttemptRecorder
+from app.errors import ProviderCallBudgetExceeded
 from tests.fixtures.provider_acceptance_executor import count_recorded_calls
 
 
 class CappedProvider:
+    def _budget_blocked(self, root, scenario, *, scope, used, limit):
+        correlation = _REQUEST_CORRELATION.get() or {}
+        record = {
+            "event_type": "budget.blocked", "reason_code": ProviderCallBudgetExceeded.code,
+            "scope": scope, "used": used, "limit": limit,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "scenario_id": scenario.get("scenario_id"),
+            **{key: correlation.get(key) for key in ("run_id", "step_id", "call_id")},
+        }
+        with (root / "budget-events.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record) + "\n")
+        raise ProviderCallBudgetExceeded()
+
     def __init__(self, client):
         self.client = client
         self.response_format_identity = getattr(client, "response_format_identity", None)
@@ -21,18 +36,19 @@ class CappedProvider:
 
     async def complete(self, messages, tools, *, response_format=None):
         limit = int(os.environ["RUNTIME_ACCEPTANCE_MAX_CALLS"])
-        if self.calls >= limit:
-            raise RuntimeError("acceptance_provider_call_budget_exhausted")
         root = Path(os.environ["RUNTIME_ACCEPTANCE_ROOT"]).resolve()
         scenario_path = root / "active-scenario.json"
         scenario = json.loads(scenario_path.read_text(encoding="utf-8")) if scenario_path.exists() else {}
+        if self.calls >= limit:
+            self._budget_blocked(root, scenario, scope="global", used=self.calls, limit=limit)
         scenario_id = scenario.get("scenario_id")
         scenario_calls = 0
         if scenario_id:
             attempts_path = root / "provider-attempts.jsonl"
             scenario_calls = count_recorded_calls(attempts_path, scenario_id)
             if scenario_calls >= int(scenario["request_budget"]):
-                raise RuntimeError("acceptance_scenario_request_budget_exhausted")
+                self._budget_blocked(root, scenario, scope="scenario", used=scenario_calls,
+                                     limit=int(scenario["request_budget"]))
         self.calls += 1
         if self.is_replay:
             try:

@@ -4,12 +4,14 @@ import asyncio
 from dataclasses import dataclass
 import inspect
 import logging
+import traceback
 from uuid import uuid4
 from uuid import UUID
 
 from .ports import LeaseExecutionPort, WorkerRepository
 from .recovery import RecoveryObservation, classify_recovery
 from .state_machine import StaleExecutionOwner
+from app.errors import ProviderCallBudgetExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +153,20 @@ class ExecutionWorker:
             raise
         except StaleExecutionOwner:
             return
-        except Exception:
-            logger.error("Worker executor failed for run %s", run.id)
+        except Exception as exc:
+            diagnostic = {
+                "error_type": type(exc).__name__,
+                "reason_code": (ProviderCallBudgetExceeded.code
+                                if isinstance(exc, ProviderCallBudgetExceeded) else "executor_exception"),
+                "phase": "executor",
+                "frames": [{"function": frame.name, "line": frame.lineno}
+                           for frame in traceback.extract_tb(exc.__traceback__)],
+            }
+            logger.error("Worker executor failed for run %s diagnostic=%s", run.id, diagnostic)
             try:
                 await port.finish(
                     "failed", event_type="execution.failed",
-                    event_payload={"code": "worker_executor_failed"},
+                    event_payload={"code": "worker_executor_failed", "diagnostic": diagnostic},
                     error={"code": "worker_executor_failed"},
                 )
             except StaleExecutionOwner:

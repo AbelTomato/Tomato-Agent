@@ -111,6 +111,20 @@ def observed_operations(run_id, database_path):
     return [row[0] for row in rows]
 
 
+def observed_failure(run_id, database_path):
+    """Read safe failure facts; never infer a cause from request counts."""
+    with sqlite3.connect(database_path) as db:
+        rows = db.execute(
+            "SELECT payload FROM task_run_events WHERE run_id=? AND event_type='execution.failed' ORDER BY sequence",
+            (str(run_id),),
+        ).fetchall()
+    failures = [json.loads(row[0]) for row in rows]
+    budget_path = Path(database_path).parent / "budget-events.jsonl"
+    blocks = [json.loads(line) for line in budget_path.read_text().splitlines() if line.strip()] if budget_path.exists() else []
+    return {"execution_failures": failures,
+            "budget_blocks": [item for item in blocks if item.get("run_id") == str(run_id)]}
+
+
 async def new_session(browser):
     previous = await browser.evaluate("localStorage.getItem('tomato-agent-session-id')")
     await browser.click("新建会话")
@@ -310,6 +324,7 @@ async def main():
                 clarify = (await api.get(f"/api/tasks/{run_id}")).json()
                 if clarify["status"] != "waiting" or (clarify.get("pending_action") or {}).get("action_type") != "clarification":
                     return {"run_id": str(run_id), "terminal": clarify["status"],
+                            **observed_failure(run_id, run_root / "agent.db"),
                             "events": observed_events(run_id, run_root / "agent.db"),
                             "operations": observed_operations(run_id, run_root / "agent.db"),
                             "request_count": provider_calls() - request_start}
@@ -322,6 +337,7 @@ async def main():
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelector('.assistant-result')?.innerText.length>0", 25)
                 return {"run_id": str(run_id), "terminal": result["status"],
+                        **observed_failure(run_id, run_root / "agent.db"),
                         "events": list(dict.fromkeys(waiting_events + observed_events(run_id, run_root / "agent.db"))),
                         "operations": observed_operations(run_id, run_root / "agent.db"),
                         "clarification_status": clarify["status"],
@@ -347,6 +363,7 @@ async def main():
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
                 return {"run_id": str(run_id), "terminal": result["status"],
+                        **observed_failure(run_id, run_root / "agent.db"),
                         "events": observed_events(run_id, run_root / "agent.db"),
                         "operations": tools, "request_count": provider_calls() - request_start, "refresh": True}
 
@@ -360,6 +377,7 @@ async def main():
                 await browser.command("Page.reload")
                 await browser.wait("document.querySelectorAll('.task-card').length>0", 25)
                 return {"run_id": str(run_id), "terminal": result["status"],
+                        **observed_failure(run_id, run_root / "agent.db"),
                         "events": observed_events(run_id, run_root / "agent.db"),
                         "operations": [], "request_count": provider_calls() - request_start, "refresh": True}
 

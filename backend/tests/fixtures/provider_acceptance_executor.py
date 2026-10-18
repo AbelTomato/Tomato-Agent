@@ -110,9 +110,20 @@ async def execute_scenarios(
                 raise AcceptanceStateError("request_budget_exhausted")
             status = "passed" if _matches(record, result) else "failed"
             category = None if status == "passed" else "expectation_mismatch"
+            phase = None if status == "passed" else "assertions"
+            if status == "failed":
+                result["assertion_failure"] = "expectation_mismatch"
+                budget_failure = any(
+                    (failure.get("diagnostic") or {}).get("reason_code") == "provider_call_budget_exhausted"
+                    for failure in result.get("execution_failures", [])
+                )
+                if result.get("budget_blocks") or budget_failure:
+                    category, phase = "provider_call_budget_exhausted", "budget"
+                elif result.get("execution_failures"):
+                    category, phase = "execution_failed", "execution"
             store.transition(record.scenario_id, status,
                              run_id=result.get("run_id"), actual_observations=result,
-                             failed_phase=None if status == "passed" else "assertions",
+                             failed_phase=phase,
                              error_category=category)
         except asyncio.TimeoutError:
             calls += min(record.request_count, record.request_budget)

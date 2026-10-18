@@ -3,6 +3,10 @@ class AgentError(Exception):
     retryable = False
 
 
+class ProviderCallBudgetExceeded(AgentError):
+    code = "provider_call_budget_exhausted"
+
+
 class ToolNotFoundError(AgentError):
     code = "TOOL_NOT_FOUND"
 

@@ -14,6 +14,8 @@
 
 Observability 记录实际发生的请求、决策、工具 operation、事件、checkpoint 和 UI 观察，以关联 ID 串联并保留失败原因。Eval 基于这些事实检查结果和约束，不把某条固定轨迹作为唯一答案。多次运行应报告成功率、失败类别、调用次数、耗时及可获得的 token/费用数据；未采集指标标为缺失，单次成功不代表稳定质量通过。上述评测口径是方向约定，不表示当前 harness 已自动实现所有指标。
 
+本地请求预算拒绝单独写入 `budget-events.jsonl`，记录 `budget.blocked`、全局/场景范围、已用量、上限及可获得的 Run/Step/Call 关联；不会新增 Provider attempt 或消耗请求计数。Worker 保留公开错误码 `worker_executor_failed`，在 `execution.failed` 事件及日志中补充异常类型、受控原因码、执行阶段和函数/行号栈，不记录异常原文、局部变量或请求内容。验收实际观察包含 `execution_failures` 和按 Run 过滤的 `budget_blocks`；未满足预期时保留 `assertion_failure=expectation_mismatch`，并优先以 `provider_call_budget_exhausted` 或 `execution_failed` 报告已观察到的底层失败。普通异常的具体原因仍需结合受限调用栈调查，历史工件不会自动补齐新字段。
+
 ## 范围与隔离
 
 - 只允许 `assistant` Run；默认最多 4 个 Run、最多 16 次模型请求，每 Run 600 秒。通过 `--max-runs`、`--max-requests` 可降低上限（范围分别为 1–4、1–16）；场景预算进一步受全局剩余预算限制，不能扩大全局上限。预算耗尽不表示场景验收通过。
