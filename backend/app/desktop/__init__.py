@@ -1,0 +1,1 @@
+"""Isolated desktop technology probe; does not initialize business storage."""
