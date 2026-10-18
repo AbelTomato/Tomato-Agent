@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agent.models import LLMResponse, Message, ToolDefinition
+from app.observability.provider_attempt_recorder import _redact
 
 
 class ReplayError(RuntimeError):
@@ -38,6 +39,67 @@ def _tool_payload(tool: ToolDefinition) -> dict[str, Any]:
 def _digest(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _mismatch_summary(expected: dict[str, Any], actual: dict[str, Any]) -> str:
+    expected_messages = expected.get("messages", [])
+    actual_messages = actual.get("messages", [])
+    differing = []
+    for index in range(max(len(expected_messages), len(actual_messages))):
+        expected_message = expected_messages[index] if index < len(expected_messages) else None
+        actual_message = actual_messages[index] if index < len(actual_messages) else None
+        if expected_message != actual_message:
+            differing.append(str(index))
+    extra = sorted(set(expected) ^ set(actual))
+    return f"messages={','.join(differing) or '-'};extra_keys={','.join(extra) or '-'}"
+
+
+def _canonicalize_tool_call_ids(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize ephemeral tool identities and legacy-redacted policy booleans."""
+    normalized = json.loads(json.dumps(payload))
+    identifiers: dict[str, str] = {}
+
+    def restore_policy_booleans(value: Any) -> Any:
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                if key == "requires_execution_authorization" and item == "[REDACTED]":
+                    value[key] = True
+                else:
+                    value[key] = restore_policy_booleans(item)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = restore_policy_booleans(item)
+        elif isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return value
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(restore_policy_booleans(parsed), ensure_ascii=False)
+        return value
+
+    def canonical_id(identifier: str) -> str:
+        if identifier not in identifiers:
+            identifiers[identifier] = f"tool-call-{len(identifiers) + 1}"
+        return identifiers[identifier]
+
+    for message in normalized.get("messages", []):
+        if "content" in message:
+            content = message["content"]
+            try:
+                parsed_content = json.loads(content) if isinstance(content, str) else None
+            except (json.JSONDecodeError, TypeError):
+                parsed_content = None
+            if isinstance(parsed_content, (dict, list)):
+                message["content"] = json.dumps(restore_policy_booleans(parsed_content), ensure_ascii=False)
+        for tool_call in message.get("tool_calls", []):
+            identifier = tool_call.get("id")
+            if isinstance(identifier, str):
+                tool_call["id"] = canonical_id(identifier)
+        identifier = message.get("tool_call_id")
+        if isinstance(identifier, str):
+            message["tool_call_id"] = canonical_id(identifier)
+    return normalized
 
 
 def _request_payload(messages, tools, response_format):
@@ -92,8 +154,15 @@ class ProviderReplayClient:
         expected = attempt["request_payload"]
         expected = {key: value for key, value in expected.items() if key != "model"}
         actual = {key: value for key, value in actual.items() if key != "model"}
-        if _digest(actual) != _digest(expected):
-            raise ReplayError(f"request_mismatch:{attempt['call_id']}")
+        comparable_expected = _canonicalize_tool_call_ids(expected)
+        comparable_actual = _canonicalize_tool_call_ids(actual)
+        if _digest(comparable_actual) != _digest(comparable_expected):
+            summary = _mismatch_summary(expected, actual)
+            error = ReplayError(f"request_mismatch:{attempt['call_id']}:{summary}")
+            error.expected_payload = _redact(expected)
+            error.actual_payload = _redact(actual)
+            error.call_id = attempt["call_id"]
+            raise error
         self.calls += 1
         status = attempt.get("http_status")
         if isinstance(status, int) and status >= 400:

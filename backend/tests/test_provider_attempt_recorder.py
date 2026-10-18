@@ -125,6 +125,24 @@ def test_recorder_never_persists_credentials_or_authorization_headers(tmp_path):
     assert json.loads(row["raw_response_body"]) == {"token": "[REDACTED]"}
 
 
+def test_recorder_preserves_authorization_policy_schema_fields(tmp_path):
+    path = tmp_path / "attempts.jsonl"
+    recorder = ProviderAttemptRecorder(path, 1, "run-1", call_id="ledger-call-1")
+    payload = {
+        "tools": [{"function": {"parameters": {
+            "requires_execution_authorization": {"type": "boolean"},
+            "authorization_header": {"type": "string"},
+        }}}],
+    }
+    recorder.observe(payload, None)
+    recorder.write()
+
+    row = json.loads(path.read_text(encoding="utf-8"))
+    parameters = row["request_payload"]["tools"][0]["function"]["parameters"]
+    assert parameters["requires_execution_authorization"] == {"type": "boolean"}
+    assert parameters["authorization_header"] == "[REDACTED]"
+
+
 @pytest.mark.asyncio
 async def test_compatible_client_delivers_runtime_correlation_to_recorder(tmp_path):
     import httpx

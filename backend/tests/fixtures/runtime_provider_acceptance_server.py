@@ -83,6 +83,7 @@ if os.environ.get("RUNTIME_ACCEPTANCE_MODE") == "replay":
         raise RuntimeError("replay source must be copied into the isolated acceptance directory")
     replay_client = ProviderReplayClient(replay_path)
     deps.task_service.assistant.llm = replay_client
+    deps.task_service.model_available = True
 elif os.environ.get("RUNTIME_ACCEPTANCE_STREAM") == "1":
     from app.llm.compatible_client import OpenAICompatibleClient
 

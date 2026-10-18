@@ -45,6 +45,18 @@ class CappedProvider:
                         "call_index": self.client.calls, "status": "error",
                         "error_type": type(exc).__name__, "error": str(exc)[:500],
                     }, ensure_ascii=False) + "\n")
+                if isinstance(exc, Exception) and hasattr(exc, "actual_payload"):
+                    diagnostic = {
+                        "mode": "replay",
+                        "scenario_id": scenario_id,
+                        "call_index": self.client.calls + 1,
+                        "call_id": exc.call_id,
+                        "error": str(exc)[:500],
+                        "expected_payload": exc.expected_payload,
+                        "actual_payload": exc.actual_payload,
+                    }
+                    with (root / "replay-mismatches.jsonl").open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(diagnostic, ensure_ascii=False) + "\n")
                 raise
             finally:
                 self.calls = self.client.calls

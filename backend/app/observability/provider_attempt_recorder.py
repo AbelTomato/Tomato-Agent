@@ -5,10 +5,11 @@ from typing import Any
 
 _SECRET_KEY = re.compile(r"(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|token|secret|password|credential)", re.I)
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s\",}]+")
+_NON_SECRET_AUTHORIZATION_FIELDS = {"requires_execution_authorization"}
 
 
 def _redact(value: Any, key: str = "") -> Any:
-    if _SECRET_KEY.search(key):
+    if key.lower() not in _NON_SECRET_AUTHORIZATION_FIELDS and _SECRET_KEY.search(key):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {str(item_key): _redact(item, str(item_key)) for item_key, item in value.items()}

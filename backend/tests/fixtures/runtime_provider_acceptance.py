@@ -69,7 +69,7 @@ class AcceptanceBrowserDiagnostics:
     async def title(self):
         return await self.browser.evaluate("document.title")
 
-    async def locator(self, selector):
+    def locator(self, selector):
         if selector != "body":
             raise ValueError("unsupported diagnostic selector")
         return self
@@ -255,7 +255,7 @@ async def main():
                         await asyncio.sleep(0.5)
         if replay_mode:
             async with httpx.AsyncClient() as browser_session:
-                browser_target = await browser_session.post(
+                browser_target = await browser_session.put(
                     args.cdp_url.rstrip("/") + "/json/new?" + frontend_url + "/"
                 )
                 browser_target.raise_for_status()
@@ -284,9 +284,10 @@ async def main():
                 raise RuntimeError("resume_with_existing_runs_is_not_supported_by_scenario_executor")
 
             def provider_calls():
-                if not attempts_path.exists():
+                count_path = run_root / "replay-attempts.jsonl" if replay_mode else attempts_path
+                if not count_path.exists():
                     return 0
-                return sum(1 for line in attempts_path.read_text(encoding="utf-8").splitlines() if line.strip())
+                return sum(1 for line in count_path.read_text(encoding="utf-8").splitlines() if line.strip())
 
             def scenario_record(scenario_id, timeout, budget, terminal, events=(), operations=()):
                 return ScenarioRecord(
