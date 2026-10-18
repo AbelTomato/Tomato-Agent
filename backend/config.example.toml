@@ -17,6 +17,8 @@ enabled = true # 统一聊天/RAG/写作/代码入口需要 Worker
 
 [providers]
 # llm_timeout_seconds = 60.0
+# llm_diagnostics_enabled = false # 保存脱敏请求/响应，仅本地排障时开启
+# llm_diagnostics_root = "data/provider-diagnostics"
 # embedding_timeout_seconds = 60.0
 
 [runtime]

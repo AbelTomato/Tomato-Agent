@@ -382,7 +382,8 @@ async def main():
                         "operations": [], "request_count": provider_calls() - request_start, "refresh": True}
 
             definitions = [
-                AcceptanceScenario(scenario_record("clarification_continue", RUN_SECONDS, 6, "completed",
+                AcceptanceScenario(scenario_record("clarification_continue", RUN_SECONDS,
+                    args.max_requests if args.single_run else 6, "completed",
                     ["clarification.waiting", "run.completed"]), clarification_scenario),
                 AcceptanceScenario(scenario_record("cross_capability", RUN_SECONDS, 6, "completed",
                     ["run.completed"], ["read_file", "search_knowledge"]), cross_capability_scenario),

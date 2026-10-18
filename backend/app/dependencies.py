@@ -77,6 +77,7 @@ def create_llm_client(config: Settings) -> LLMClient:
         base_url=config.llm_base_url,
         model=config.llm_model,
         timeout_seconds=config.llm_timeout_seconds,
+        diagnostics_root=config.llm_diagnostics_root if config.llm_diagnostics_enabled else None,
     )
 
 

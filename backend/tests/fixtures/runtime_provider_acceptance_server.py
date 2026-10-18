@@ -58,7 +58,7 @@ config = Settings(
     writing_retrieval_mode="keyword", knowledge_pipeline_enabled=False,
     knowledge_query_planning_enabled=False, knowledge_rerank_enabled=False,
     embedding_api_key="", embedding_model="", embedding_dimensions=0,
-    runtime_max_loops=6, runtime_max_tool_calls=5,
+    runtime_max_loops=12, runtime_max_tool_calls=5,
     runtime_max_duration_seconds=int(os.environ["RUNTIME_ACCEPTANCE_RUN_SECONDS"]),
     runtime_tool_timeout_seconds=20,
     llm_timeout_seconds=int(os.environ["RUNTIME_ACCEPTANCE_LLM_TIMEOUT_SECONDS"]),

@@ -18,6 +18,25 @@ Observability 记录实际发生的请求、决策、工具 operation、事件�
 
 ## 范围与隔离
 
+### Provider 错误诊断
+
+兼容客户端为验收 recorder 补充 `diagnostic`：UTC 起止时间、总耗时、响应头到达耗时、首个 SSE 数据事件耗时、脱敏端点、模型、stream、有效超时、HTTP/Python/httpx 版本、环境代理是否存在、自定义 transport 标志、实际请求字节数、消息角色顺序、工具数量与配对检查、白名单响应头、失败阶段、异常类型链和函数/行号栈。DNS/TLS 分阶段耗时未采集，明确记录 null；代理存在标志不证明请求实际经过代理。
+
+HTTP 错误保留精确 `http_<status>` 分类，并分认证权限、限流、HTTP 超时、请求错误、服务端错误组；传输错误保留 httpx 异常类型，HTTP 200 后 JSON/SSE/结构解析失败归为响应协议错误。取消单独归类。本地预算拒绝继续只进入 `budget-events.jsonl`。HTTP 状态描述接收到的响应，不能直接证明 Provider 或项目的责任，根因默认 `undetermined`。
+
+每次记录后生成 `provider-errors.jsonl` 和 `provider-error-report.md`，指向 `provider-attempts.jsonl` 的对应行，关联同 Run/端点/模型最近一次成功请求，列出消息数变化及变化的 payload 顶层字段。完整脱敏 payload 和响应正文仍在 attempts 中；流式 HTTP 错误与中途断流保留已收到的状态、响应头和部分正文，`response_complete` 标注完整性。SSE 正文是按收到的文本行重建，不是原始网络字节转储。记录失败仅产生受控告警 `provider_diagnostics_write_failed`，不替换原调用结果；磁盘故障时不能保证记录成功。
+
+普通应用调用默认不记录完整上下文。在 `backend/config.local.toml` 的 `[providers]` 下显式设置：
+
+```toml
+llm_diagnostics_enabled = true
+llm_diagnostics_root = "data/provider-diagnostics"
+```
+
+也可设置 `LLM_DIAGNOSTICS_ENABLED=true`。重启后，应用依赖工厂创建的兼容客户端将记录到 `backend/data/provider-diagnostics/<客户端会话标识>/`；会话标识包含 UTC 时间和随机 ID。验收 recorder 优先使用已有独立验收目录，不重复写入普通目录。其他独立 CLI 直接构造的客户端需显式传入 `diagnostics_root` 才会开启普通目录记录。
+
+报告不记录 Authorization、Cookie、任意请求头、代理地址/凭据和异常原文。保留的响应头仅限 Content-Type、Request/Trace ID、Retry-After、Server、CF-Ray 等白名单；已配置 API Key 即使出现在请求或响应正文中也会替换。脱敏不能保证识别业务文本中的所有第三方秘密；提示词与工具结果可能包含业务信息，因此这些工件只应本地保管，禁止提交。诊断不增加模型请求、重试或预算，不自动发送对照请求。
+
 - 只允许 `assistant` Run；默认最多 4 个 Run、最多 16 次模型请求，每 Run 600 秒。通过 `--max-runs`、`--max-requests` 可降低上限（范围分别为 1–4、1–16）；场景预算进一步受全局剩余预算限制，不能扩大全局上限。预算耗尽不表示场景验收通过。
 - 数据、日志和截图写入全新的 `backend/data/runtime-provider-acceptance/<run-id>/`。已有目录会拒绝复用。
 - 使用独立 SQLite、固定只读项目 fixture 和本地知识 fixture；不调用 Embedding、Docker 或测试执行能力。

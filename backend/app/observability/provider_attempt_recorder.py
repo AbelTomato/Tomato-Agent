@@ -1,11 +1,13 @@
 import json
 import re
+from threading import RLock
 from pathlib import Path
 from typing import Any
 
 _SECRET_KEY = re.compile(r"(?:api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|token|secret|password|credential)", re.I)
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s\",}]+")
 _NON_SECRET_AUTHORIZATION_FIELDS = {"requires_execution_authorization"}
+_WRITE_LOCK = RLock()
 
 
 def _redact(value: Any, key: str = "") -> Any:
@@ -59,6 +61,8 @@ class ProviderAttemptRecorder:
 
     def observe(self, payload: dict[str, Any], response, context: dict[str, Any] | None = None) -> None:
         context = context or {}
+        if context.get("diagnostic") is not None:
+            self.record["diagnostic"] = _redact(context["diagnostic"])
         for name in ("acceptance_id", "scenario_id", "run_id", "call_id", "step_id", "operation_id"):
             if context.get(name) is not None:
                 self.record[name] = context[name]
@@ -70,5 +74,10 @@ class ProviderAttemptRecorder:
             self.record["raw_response_body_encoding"] = "utf-8-replace"
 
     def write(self) -> None:
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(_redact(self.record), ensure_ascii=False) + "\n")
+        with _WRITE_LOCK:
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(_redact(self.record), ensure_ascii=False) + "\n")
+            if "diagnostic" in self.record:
+                from app.observability.provider_diagnostics import write_error_report
+
+                write_error_report(self.path)

@@ -104,4 +104,9 @@ class CappedProvider:
             raise
         finally:
             _REQUEST_CONTEXT.reset(token)
-            recorder.write()
+            try:
+                recorder.write()
+            except Exception:
+                from app.observability.provider_diagnostics import diagnostic_warning
+
+                diagnostic_warning()

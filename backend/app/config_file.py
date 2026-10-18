@@ -14,7 +14,7 @@ GROUPS = {
     "runtime": {**{name: "runtime_" + name for name in (
         "max_loops", "max_tool_calls", "max_duration_seconds", "tool_timeout_seconds")},
         "max_doc_bytes": "max_doc_bytes", "max_tool_result_chars": "max_tool_result_chars"},
-    "providers": {name: name for name in ("llm_timeout_seconds", "embedding_timeout_seconds")},
+    "providers": {name: name for name in ("llm_timeout_seconds", "embedding_timeout_seconds", "llm_diagnostics_enabled", "llm_diagnostics_root")},
     "knowledge": {name: "knowledge_" + name for name in (
         "pipeline_enabled", "min_vector_similarity", "candidate_limit", "candidate_min_vector_similarity",
         "candidate_keyword_limit", "candidate_vector_limit")},

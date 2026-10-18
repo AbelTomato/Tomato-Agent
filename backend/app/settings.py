@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-5.6-luna"
     llm_timeout_seconds: float = 60.0
+    llm_diagnostics_enabled: bool = False
+    llm_diagnostics_root: Path = Path("data/provider-diagnostics")
     embedding_api_key: str = ""
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_model: str = ""
@@ -112,7 +114,7 @@ class Settings(BaseSettings):
     def empty_config_disables_file(cls, value):
         return None if value == "" else value
 
-    @field_validator("database_path", "docs_root", "draft_directory",
+    @field_validator("database_path", "docs_root", "draft_directory", "llm_diagnostics_root",
                      "code_task_workspace_root", "code_task_artifact_root", mode="after")
     @classmethod
     def anchor_storage_paths(cls, path: Path) -> Path:
