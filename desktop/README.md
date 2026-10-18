@@ -34,6 +34,8 @@ Pop-Location
 
 `scripts/windows.ps1` 封装相同命令；若系统拒绝 UNC 未签名脚本，执行上面的明确命令，不更改执行策略。
 
+官方 NSIS 插件下载受阻时，手动下载后应核对 CLI 对应版本的官方哈希，缓存路径为 `%LOCALAPPDATA%\tauri\NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll`，不可省略 `additional`。CLI 2.12.3使用插件0.5.3，官方源码SHA-1为 `75197FEE3C6A814FE035788D1C34EAD39349B860`；本次实际文件SHA-256及安装包指纹见技术验证文档。
+
 ## 验证边界
 
 WSL 启动固定为独立 argv：`wsl.exe --distribution <已发现发行版> --cd <后端绝对路径> --exec <后端>/.venv/bin/python -m app.desktop.probe`，不经 shell。Python 路径必须存在才能启动，启动错误使用固定摘要，不输出原始子进程日志。

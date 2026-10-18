@@ -201,6 +201,40 @@ mod tests {
     }
 
     #[test]
+    fn occupied_loopback_port_rejects_another_service_identity() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(TcpListener::bind(address).is_err());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = r#"{"protocol":1,"service_instance_id":"unrelated-service"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let client = reqwest::blocking::Client::builder().no_proxy()
+            .timeout(Duration::from_secs(5)).build().unwrap();
+        let response: serde_json::Value = request(&client, address.port(), "probe-token", "expected", "health")
+            .send().unwrap().error_for_status().unwrap().json().unwrap();
+        assert!(check_response(&response, "expected").is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn credential_header_is_sensitive_and_absent_from_request_url() {
+        let client = reqwest::blocking::Client::new();
+        let built = request(&client, 12345, "private-test-token", "instance", "health")
+            .build().unwrap();
+        assert!(built.headers()[reqwest::header::AUTHORIZATION].is_sensitive());
+        assert!(!built.url().as_str().contains("private-test-token"));
+        assert!(!format!("{built:?}").contains("private-test-token"));
+    }
+
+    #[test]
     fn decodes_windows_wsl_output() {
         let bytes: Vec<u8> = "Ubuntu\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(decode_wsl(&bytes), "Ubuntu\r\n");
