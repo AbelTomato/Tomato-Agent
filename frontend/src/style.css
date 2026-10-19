@@ -53,3 +53,27 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .risk-confirm-dialog h4, .risk-confirm-dialog p { margin: 0; }
 .assistant-result ul { padding-left: 22px; overflow-wrap: anywhere; }
 @media (max-width: 800px) { .conversation-layout { grid-template-columns: minmax(0, 1fr); }.session-sidebar { position: static; }.session-sidebar nav { max-height: 160px; }.conversation-layout > .document-panel { grid-column: 1; } }
+.project-sidebar { align-content: start; max-height: calc(100vh - 48px); }
+.environment-label, .project-nav-group h2 { margin: 0; color: #55616f; font-size: 13px; }
+.sidebar-actions { display: flex; gap: 8px; }
+.project-session-nav { align-content: start; }
+.project-nav-group { display: grid; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #e0e5ea; }
+.project-nav-heading { display: flex; justify-content: space-between; gap: 8px; min-width: 0; text-align: left; font-weight: 650; }
+.project-nav-heading span, .session-nav-select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-nav-heading small { flex: none; color: #536779; font-weight: 400; }
+.session-nav-item { display: flex; align-items: center; min-width: 0; gap: 4px; }
+.session-nav-item .session-nav-select { flex: 1; text-align: left; background: transparent; border-color: transparent; }
+.session-nav-rename { flex: none; padding: 4px 6px; font-size: 12px; }
+.project-unavailable { margin: 0; color: #a12622; font-size: 12px; }
+.advanced-workspace { margin: 14px 0; }
+.advanced-workspace > summary { cursor: pointer; color: #495768; font-size: 13px; }
+.project-dialog, .rename-dialog { position: fixed; z-index: 1000; inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; display: grid; gap: 12px; padding: 18px; background: #fff; border: 1px solid #aeb8c2; border-radius: 8px; box-shadow: 0 16px 48px rgb(15 23 42 / 24%); }
+.project-dialog header { display: flex; justify-content: space-between; align-items: center; }
+.project-dialog h2 { margin: 0; font-size: 18px; }
+.project-path { margin: 0; overflow-wrap: anywhere; color: #425466; font: 13px/1.5 ui-monospace, monospace; }
+.project-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.project-directory-list { display: grid; gap: 4px; max-height: 36vh; overflow: auto; border-block: 1px solid #e0e5ea; padding-block: 8px; }
+.project-directory-list button { display: flex; justify-content: space-between; text-align: left; }
+.project-dialog form, .rename-dialog label { display: grid; gap: 8px; }
+.rename-dialog { width: min(380px, calc(100vw - 32px)); }
+@media (max-width: 800px) { .project-sidebar { max-height: none; }.project-dialog { inset: auto 0 0; transform: none; width: 100%; max-height: 85vh; border-radius: 8px 8px 0 0; } }

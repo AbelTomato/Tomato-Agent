@@ -73,6 +73,11 @@ class ProjectService:
             raise
         return {"path": str(directory), "directories": entries}
 
+    async def roots(self):
+        await self._ensure_initialized()
+        return [{"name": root.name or str(root), "path": str(root), "available": True}
+                for root in self.allowed_roots if root.is_dir() and not root.is_symlink()]
+
     async def open(self, path: Path):
         await self._ensure_initialized()
         root = self._trusted_directory(path)

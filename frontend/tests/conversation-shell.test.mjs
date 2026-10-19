@@ -32,7 +32,7 @@ let eventReader;
 let submitReader;
 let actionReader;
 let taskReader;
-const session = (id) => ({ id, title: id, metadata: { title: id }, default_workspace_id: 'ws' });
+const session = (id) => ({ id, title: id, metadata: { title: id }, default_workspace_id: 'ws', project_id: id === 's1' ? 'p1' : null });
 const task = (id, status = 'completed', kind = 'chat') => ({ run_id: id, session_id: 's1', kind, status,
   phase: 'finished', version: 3, capabilities: status === 'running' ? ['cancel'] : [],
   pending_action: null, result: { answer: `answer-${id}` }, messages: [], legacy: false });
@@ -46,6 +46,7 @@ globalThis.__conversationApi = {
   async openProject(path) { calls.push(['open-project', path]); return { project_id: 'p2', workspace_id: 'ws2', display_name: 'Opened', root_path: path, available: true }; },
   async createProject(parent, name) { calls.push(['create-project', parent, name]); return { project_id: 'p3', workspace_id: 'ws3', display_name: name, root_path: `${parent}/${name}`, available: true }; },
   async setSessionProject(id, project) { calls.push(['session-project', id, project]); return session(id); },
+  async renameSession(id, title, version) { calls.push(['rename-session', id, title, version]); return { ...session(id), title, title_version: version + 1 }; },
   async listWorkspaces() { return { workspaces: [{ workspace_id: 'ws', repo_path: '/project', available: true }] }; },
   async listSessionTasks(id, limit, offset, signal) { calls.push(['history', id, offset, signal]); return historyReader(id, offset); },
   async getTask(id, signal) { calls.push(['task', id, signal]); return taskReader(id); },
@@ -66,10 +67,14 @@ async function compile(path, replacements) {
 }
 const { ConversationShell } = await compile('../src/components/ConversationShell.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
-  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument, listSessionQueue, enqueueTask, controlSessionQueue, steerTask, listProjects, openProject, createProject, setSessionProject } = globalThis.__conversationApi;'],
+  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument, listSessionQueue, enqueueTask, controlSessionQueue, steerTask, listProjects, openProject, createProject, setSessionProject, renameSession } = globalThis.__conversationApi;'],
   [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { assistant: "助手", chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
   [/import \{ WorkspacePicker \} from '.\/WorkspacePicker';/, 'const WorkspacePicker = "workspace-picker";'],
+  [/import \{ ProjectDialog \} from '.\/ProjectDialog';/, 'const ProjectDialog = "project-dialog";'],
+  [/import \{ ProjectSidebar \} from '.\/ProjectSidebar';/, 'const ProjectSidebar = "project-sidebar";'],
+  [/export function ConversationShell\(\{ environment = 'Web' \}: \{ environment\?: string \} = \{\}\)/, 'export function ConversationShell({ environment = "Web" } = {})'],
 ]);
+globalThis.__testProjectSidebar = (props) => ({ type: 'project-sidebar', props });
 globalThis.__cardApi = {
   async loadCodeTaskArtifact() { return { content: 'diff-content' }; },
   async listEffectSettlements(...args) { return cardSettlementReader(...args); },
@@ -82,7 +87,7 @@ const { TaskCard, CodeTestResults } = await compile('../src/components/TaskCard.
   [/import \{ AssistantResult \} from '.\/AssistantResult';/, 'const AssistantResult = "assistant-result";'],
   [/import \{ PendingActionPanel \} from '.\/PendingActionPanel';/, 'const PendingActionPanel = "pending-action-panel";'],
 ]);
-const { WorkspacePicker } = await compile('../src/components/WorkspacePicker.tsx', [
+  const { WorkspacePicker } = await compile('../src/components/WorkspacePicker.tsx', [
   [/import \{ useState \} from 'react';/, 'const { useState } = globalThis.__conversationHooks;'],
 ]);
 
@@ -103,6 +108,16 @@ function unmount() { harness.slots.forEach((slot) => slot?.cleanup?.()); }
 function elements(node = harness.tree) {
   if (!node || typeof node !== 'object') return [];
   if (Array.isArray(node)) return node.flatMap((child) => elements(child ?? null));
+  if (node.type === 'project-dialog') return [node];
+  if (node.type === 'project-sidebar') {
+    const props = node.props;
+    return [node,
+      { type: 'button', props: { children: '打开文件夹', onClick: props.onOpenProject } },
+      { type: 'button', props: { children: '新建对话', onClick: props.onNewSession } },
+      ...props.sessions.map((session) => ({ type: 'button', props: { children: session.title, onClick: () => props.onSelectSession(session.id) } })),
+      ...props.sessions.map((session) => ({ type: 'button', props: { 'aria-label': `重命名 ${session.title}`, onClick: () => props.onRenameSession(session) } })),
+    ];
+  }
   return [node, ...elements(node.props?.children ?? null)];
 }
 function text(node = harness.tree) {
@@ -135,13 +150,12 @@ test('刷新恢复服务端事实、切模式保留历史、终态停止轮询�
   mount(); await flush();
   assert.equal(cards()[0].props.task.result.answer, 'answer-s1');
   assert.equal(timers.size, 0);
-  button('s1').props.onClick(); await flush();
   assert.doesNotMatch(text(), /恢复中/);
   elements().find((node) => node.type === 'select').props.onChange({ target: { value: 'writing' } }); await flush();
   assert.equal(cards().length, 1);
   unmount(); mount(); await flush();
   assert.equal(cards()[0].props.task.run_id, 's1');
-  button('s2').props.onClick(); await flush();
+  elements().find((node) => node.type === 'project-sidebar').props.onSelectSession('s2'); await flush();
   assert.equal(cards()[0].props.task.run_id, 's2');
   assert.deepEqual([...values.keys()], ['tomato-agent-session-id']);
   assert.equal(values.get('tomato-agent-session-id'), 's2');
@@ -165,16 +179,44 @@ test('默认助手提交可选工作区且不带检索配置，禁用时保留�
 
 test('打开和新建项目后关联当前会话及工作区', async () => scenario(async () => {
   mount(); await flush();
-  const input = (label) => elements().find((node) => node.type === 'input' && node.props['aria-label'] === label);
-  input('项目目录').props.onChange({ target: { value: '/home/user/demo' } }); await flush();
-  button('打开项目').props.onClick(); await flush();
+  elements().find((node) => node.type === 'button' && node.props.children === '打开文件夹').props.onClick(); await flush();
+  const dialog = elements().find((node) => node.type === 'project-dialog');
+  await dialog.props.onOpen('/home/user/demo'); await flush();
   assert.ok(calls.some(([name, path]) => name === 'open-project' && path === '/home/user/demo'));
   assert.ok(calls.some(([name, id, project]) => name === 'session-project' && id === 's1' && project === 'p2'));
-  input('新建项目父目录').props.onChange({ target: { value: '/home/user' } }); await flush();
-  input('项目名称').props.onChange({ target: { value: '新项目' } }); await flush();
-  button('新建项目').props.onClick(); await flush();
+  elements().find((node) => node.type === 'button' && node.props.children === '打开文件夹').props.onClick(); await flush();
+  const createDialog = elements().find((node) => node.type === 'project-dialog');
+  await createDialog.props.onCreate('/home/user', '新项目'); await flush();
   assert.ok(calls.some(([name, parent, project]) => name === 'create-project' && parent === '/home/user' && project === '新项目'));
   assert.ok(calls.some(([name, id, project]) => name === 'session-project' && id === 's1' && project === 'p3'));
+}));
+
+test('新建项目流程首次启动会创建会话并绑定项目，绝不提交任务', async () => scenario(async () => {
+  globalThis.localStorage = { getItem: () => '', setItem: (key, value) => calls.push(['storage', key, value]) };
+  mount(); await flush();
+  assert.match(text(), /高级设置：工作区与测试目标/);
+  assert.doesNotMatch(text(), /项目目录/);
+  elements().find((node) => node.type === 'button' && node.props.children === '打开文件夹').props.onClick(); await flush();
+  const dialog = elements().find((node) => node.type === 'project-dialog');
+  assert.ok(dialog);
+  await dialog.props.onCreate('/home/user', '新项目'); await flush();
+  assert.ok(calls.some((call) => call[0] === 'create-project' && call[1] === '/home/user' && call[2] === '新项目'));
+  assert.ok(calls.some((call) => call[0] === 'session-project' && call[1] === 's2' && call[2] === 'p3'));
+  assert.ok(calls.some((call) => call[0] === 'bind' && call[1] === 's2' && call[2] === 'ws3'));
+  assert.equal(calls.some((call) => call[0] === 'submit'), false);
+}));
+
+test('手动改名发送期望版本并更新侧栏标题', async () => scenario(async () => {
+  const selected = { ...session('s1'), title: '旧名', title_version: 4 };
+  globalThis.__conversationApi.listSessions = async () => ({ sessions: [selected] });
+  mount(); await flush();
+  elements().find((node) => node.type === 'project-sidebar').props.onRenameSession(selected); await flush();
+  const input = elements().find((node) => node.type === 'input');
+  input.props.onChange({ target: { value: '新名称' } }); await flush();
+  elements().find((node) => node.type === 'form' && node.props['aria-label'] === '重命名对话').props.onSubmit({ preventDefault() {} });
+  await flush();
+  assert.deepEqual(calls.find((call) => call[0] === 'rename-session'), ['rename-session', 's1', '新名称', 4]);
+  assert.equal(calls.some((call) => call[0] === 'rename-session' && call[2] === '新名称'), true);
 }));
 
 test('助手绑定是版本动作，过期动作刷新事实并保留错误，网络重试复用动作ID', async () => scenario(async () => {
@@ -201,7 +243,7 @@ test('切换清理计时器与请求，旧会话迟到历史不能覆盖新会�
   historyReader = (id) => id === 's1' ? new Promise((resolve) => { release = resolve; }) : Promise.resolve({ tasks: [task('new')] });
   mount(); await flush();
   const oldSignal = calls.find((call) => call[0] === 'history')[3];
-  button('s2').props.onClick(); await flush();
+  elements().find((node) => node.type === 'button' && node.props.children === 's2').props.onClick(); await flush();
   assert.equal(oldSignal.aborted, true);
   release({ tasks: [task('old')] }); await flush();
   assert.deepEqual(cards().map((card) => card.props.task.run_id), ['new']);

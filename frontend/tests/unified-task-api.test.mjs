@@ -52,17 +52,22 @@ test('统一协议编码 ID、分页、动作版本、原目录目标和 AbortSi
     await api.setSessionWorkspace('s/a', null, signal);
     await api.listEffectSettlements('r/a', signal);
     await api.acceptEffectConflictRisk('r/a', 'i/a', 'risk/a', signal);
+    await api.browseProjectDirectories('/home/a b', signal);
+    await api.listProjectRoots(signal);
+    await api.renameSession('s/a', '项目对话', 4, signal);
     assert.deepEqual(calls.map((call) => call.path), [
       '/api/sessions?limit=200&offset=4', '/api/sessions/s%2Fa/tasks?limit=200&offset=2',
       '/api/sessions/s%2Fa/tasks', '/api/tasks/r%2Fa', '/api/tasks/r%2Fa/events?after=7&limit=200',
       '/api/tasks/r%2Fa/actions', '/api/workspaces', '/api/workspaces', '/api/sessions/s%2Fa/workspace',
       '/api/tasks/r%2Fa/effect-settlements', '/api/tasks/r%2Fa/effect-settlements/i%2Fa/accept-risk',
+      '/api/projects/directories?path=%2Fhome%2Fa%20b', '/api/projects/roots', '/api/sessions/s%2Fa/title',
     ]);
-    assert.deepEqual(JSON.parse(calls[2].init.body), body);
-    assert.deepEqual(JSON.parse(calls[5].init.body), action);
-    assert.deepEqual(JSON.parse(calls[7].init.body), { path: '/project', pytest_paths: ['tests'] });
-    assert.deepEqual(JSON.parse(calls[8].init.body), { workspace_id: null });
-    assert.deepEqual(JSON.parse(calls[10].init.body), { client_request_id: 'risk/a' });
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/api/sessions/s%2Fa/tasks').init.body), body);
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/api/tasks/r%2Fa/actions').init.body), action);
+    assert.deepEqual(JSON.parse(calls.filter((call) => call.path === '/api/workspaces').find((call) => call.init.method === 'POST').init.body), { path: '/project', pytest_paths: ['tests'] });
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/api/sessions/s%2Fa/workspace').init.body), { workspace_id: null });
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path.endsWith('/accept-risk')).init.body), { client_request_id: 'risk/a' });
+    assert.deepEqual(JSON.parse(calls.find((call) => call.path === '/api/sessions/s%2Fa/title').init.body), { title: '项目对话', expected_version: 4 });
     assert.ok(calls.every((call) => call.init.signal === signal));
   } finally { globalThis.fetch = original; }
 });

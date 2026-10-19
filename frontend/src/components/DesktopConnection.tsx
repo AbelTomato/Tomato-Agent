@@ -70,7 +70,7 @@ export function DesktopConnection() {
       </>}
       {status.state === 'ready' && <button onClick={() => void invoke('close_service').then(() => setStatus({ state: 'disconnected', summary: '已断开连接，任务保留在原环境', detail: '' }))}>断开连接</button>}
     </header>
-    {status.state === 'ready' && <ConversationShell key={epoch} />}
+    {status.state === 'ready' && <ConversationShell key={epoch} environment={distribution} />}
     {closing && <section role="dialog" aria-modal="true" aria-label="退出应用" className="fixed inset-0 bg-white p-10 z-50">
       <p>{closeDetail}</p>
       <button onClick={() => setClosing(false)}>返回应用</button>

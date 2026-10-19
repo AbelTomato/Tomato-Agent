@@ -38,6 +38,11 @@ async def list_projects(request: Request):
     return {"projects": await _service(request).list()}
 
 
+@router.get("/roots")
+async def list_project_roots(request: Request):
+    return {"roots": await _service(request).roots()}
+
+
 @router.get("/directories")
 async def browse_directories(request: Request, path: str, include_hidden: bool = False):
     try:

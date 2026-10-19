@@ -1,6 +1,6 @@
 # Windows 桌面连接与生命周期
 
-2026-10-19：切片3后端工程阶段和切片4应用界面阶段已实现。WSL 桌面启动通过受控 stdin 将发行版名作为 `environment_id` 传入；项目 SQLite 记录由后端 `.desktop-instance` 绑定 `service_instance_id`，并通过配置的 `workspace_allowed_roots` 限定浏览、打开与新建。前端侧栏支持登记项目、打开/新建项目、关联工作区及恢复会话；会话标题支持临时标题、可选辅助生成和人工改名的 CAS 保护。当前没有 Windows 实机验收证据，真实模型调用未执行，标题辅助默认关闭。此前任务2连接边界依然有效。
+2026-10-19：切片3后端工程阶段、切片4会话标题与项目关联，以及切片5日常项目与对话界面工程实现已完成。WSL 桌面启动通过受控 stdin 将发行版名作为 `environment_id` 传入；项目 SQLite 记录由后端 `.desktop-instance` 绑定 `service_instance_id`，并通过配置的 `workspace_allowed_roots` 限定浏览、打开与新建。前端侧栏按项目组织会话并显示 WSL 环境，支持打开文件夹、新建项目、关联工作区、会话恢复和人工改名；项目目录选择从已批准根目录逐级浏览 WSL POSIX 路径。会话标题支持临时标题、可选辅助生成和人工改名的 CAS 保护。当前没有切片5真实 Windows UI 人工验收证据，真实模型调用未执行，标题辅助默认关闭。此前任务2连接边界依然有效。
 
 任务1技术选型依据见 [Windows桌面技术验证](Windows桌面技术验证.md)。
 
@@ -14,7 +14,7 @@ Windows 窗口中点击“发现 WSL 发行版”，在高级连接设置填写�
 
 项目操作使用 WSL 后端服务解释的 POSIX 路径。`GET /api/projects/directories?path=<absolute-path>` 只列直接子目录，默认隐藏点目录、忽略符号链接并限制最多500项；路径必须落入明确配置的 `workspace_allowed_roots`，不能使用 `/` 作为允许根。`POST /api/projects/open` 可信任并登记已有目录，重复打开返回既有项目身份；`POST /api/projects` 在已批准父目录下创建单层目录，不覆盖冲突对象。打开或创建项目只关联现有 workspace，不授权 shell，也不自动配置测试。
 
-桌面侧栏通过输入 WSL 后端可见的 POSIX 绝对路径打开项目，或指定父目录与单层名称新建项目。关联当前会话时先写入项目身份，再写入对应 workspace；会话列表显示服务端标题，启动时从后端恢复项目和会话。项目浏览器式逐层目录选择尚未提供。会话项目关联端点为 `PATCH /api/sessions/{session_id}/project`，仅允许绑定当前服务实例中可用的已登记项目。
+桌面侧栏通过项目目录选择器从服务端返回的已批准 WSL 根目录逐级浏览 POSIX 目录，选择文件夹打开项目，或指定父目录与单层名称新建项目；不使用 Windows 原生文件选择器解释 WSL 路径。关联当前会话时先写入项目身份，再写入对应 workspace；会话列表显示服务端标题，启动时从后端恢复项目和会话。会话项目关联端点为 `PATCH /api/sessions/{session_id}/project`，仅允许绑定当前服务实例中可用的已登记项目。
 
 旧 `POST /api/workspaces` 支持 `pytest_paths: []` 或省略字段用于普通目录读取。空 profile 不会生成伪造的 `tests` 目标；`run_tests` 仍由服务端 `TestTargetRegistry` 拒绝。原有非空 profile 校验与代码任务 API 保持不变。创建目录后若 SQLite 项目记录失败，实际目录保留以供核查，不自动删除。
 
@@ -40,6 +40,8 @@ Windows 先选择本机可绑定端口，经 stdin 交给 WSL 绑定 `127.0.0.1`
 - 工件保存在本地 `backend/data/desktop-acceptance/task2-20261018/`，包括 `native-lifecycle-final.json`、`ui-final-result.txt`、`windows-package-final.log`，保持Git忽略。所有验收使用独立数据，无真实Provider请求。
 
 - 切片4目标测试：后端会话标题/首任务项目关联 4/4，前端统一会话及项目侧栏 18/18；前端 `tsc --noEmit -p tsconfig.json` 通过。标准 frontend build 工具在当前 WSL 工作树中调用了 Windows `npm`，因 CMD 不支持 UNC 工作目录而失败；Windows build 和项目完整验收未执行。
+
+- 2026-10-19 切片5工作树定向验证：前端侧栏、项目目录对话框、连接设置、会话与 API 共29项 Node 测试通过；`pnpm build`（`tsc -b` + Vite）通过；后端会话标题、历史、统一任务及项目 API 定向测试38项通过；`git diff --check` 通过。此证据仅覆盖 Linux/WSL 工程验证，不替代真实 Windows UI 人工检查。
 
 实机发现并修复：WSL随机端口44685位于Windows排除段44647–44746；关窗事件缺少Tauri capability。首次事件修复后打包与窗口验证并行导致exe被占用，关闭验收窗口后最终打包退出码0。最终指纹以末次构建为准，任务1和中间构建指纹只表示对应历史产物。任务2未重新执行安装器安装；安装行为已有任务1证据。
 

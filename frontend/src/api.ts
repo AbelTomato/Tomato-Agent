@@ -300,8 +300,9 @@ export type TaskRecoveryObservation = {
   action: 'reuse' | 'retry' | 'reconcile' | 'manual_review' | 'reject';
   allowed_actions: Extract<TaskAction, 'cancel' | 'inspect_recovery' | 'continue_recovery'>[];
 };
-export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string; title?: string; project_id?: string | null };
+export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string; title?: string; title_version?: number; project_id?: string | null };
 export type Project = { project_id: string; workspace_id: string; display_name: string; root_path: string; available: boolean };
+export type ProjectDirectory = { name: string; path: string; available: boolean };
 export type Workspace = { workspace_id: string; repo_path?: string; pytest_paths?: string[]; available?: boolean };
 export type UnifiedResult = Partial<WritingTask> & {
   answer?: string; content?: string; evidence_status?: string;
@@ -355,6 +356,12 @@ export function listSessions(limit = 200, offset = 0, signal?: AbortSignal): Pro
 export function listProjects(signal?: AbortSignal): Promise<{ projects: Project[] }> {
   return request('/api/projects', { signal });
 }
+export function browseProjectDirectories(path: string, signal?: AbortSignal): Promise<{ path: string; directories: ProjectDirectory[] }> {
+  return request(`/api/projects/directories?path=${encodeURIComponent(path)}`, { signal });
+}
+export function listProjectRoots(signal?: AbortSignal): Promise<{ roots: ProjectDirectory[] }> {
+  return request('/api/projects/roots', { signal });
+}
 export function openProject(path: string, signal?: AbortSignal): Promise<Project> {
   return request('/api/projects/open', { ...jsonRequest({ path }), signal });
 }
@@ -363,6 +370,9 @@ export function createProject(parent_path: string, name: string, signal?: AbortS
 }
 export function setSessionProject(id: string, project_id: string | null, signal?: AbortSignal): Promise<Session> {
   return request(`${sessionPath(id)}/project`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id }), signal });
+}
+export function renameSession(id: string, title: string, expected_version: number, signal?: AbortSignal): Promise<Session> {
+  return request(`${sessionPath(id)}/title`, { method: 'PATCH', ...jsonRequest({ title, expected_version }), signal });
 }
 export function listSessionTasks(id: string, limit = 200, offset = 0, signal?: AbortSignal): Promise<{ tasks: UnifiedTask[] }> {
   return request(`${sessionPath(id)}/tasks?limit=${limit}&offset=${offset}`, { signal });

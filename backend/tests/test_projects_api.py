@@ -19,6 +19,9 @@ async def test_projects_api_browse_open_create_and_reject_outside_path(tmp_path)
     app.state.project_service.service_instance_id = "instance-1"
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        roots = await client.get("/api/projects/roots")
+        assert roots.status_code == 200
+        assert roots.json() == {"roots": [{"name": "home", "path": str(home), "available": True}]}
         listing = await client.get("/api/projects/directories", params={"path": str(home)})
         assert listing.status_code == 200
         assert [item["name"] for item in listing.json()["directories"]] == ["existing"]

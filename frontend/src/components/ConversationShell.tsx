@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import {
   createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents,
   actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument,
-  listProjects, openProject, createProject, setSessionProject, type Project,
+  listProjects, openProject, createProject, setSessionProject, renameSession, type Project,
   listSessionQueue, enqueueTask, controlSessionQueue, steerTask, type SessionQueue,
   type Session, type Workspace, type UnifiedTask, type TaskKind, type TaskAction,
   type RetrievalMode, type Citation, type KnowledgeDocument, type CodeTaskEvent,
 } from '../api';
 import { TaskCard, taskLabels } from './TaskCard';
 import { WorkspacePicker } from './WorkspacePicker';
+import { ProjectDialog } from './ProjectDialog';
+import { ProjectSidebar } from './ProjectSidebar';
 
 const storageKey = 'tomato-agent-session-id';
 const terminal = (task: UnifiedTask) => ['completed', 'failed', 'cancelled', 'timed_out'].includes(task.status) || task.legacy;
@@ -20,16 +22,16 @@ function remember(id: string) {
   try { localStorage.setItem(storageKey, id); } catch { /* 存储不可用时仍可操作。 */ }
 }
 
-export function ConversationShell() {
+export function ConversationShell({ environment = 'Web' }: { environment?: string } = {}) {
   const [sessionId, setSessionId] = useState(storedId);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [tasks, setTasks] = useState<UnifiedTask[]>([]);
   const [events, setEvents] = useState<Record<string, CodeTaskEvent[]>>({});
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [projectPath, setProjectPath] = useState('');
-  const [projectParent, setProjectParent] = useState('');
-  const [projectName, setProjectName] = useState('');
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<Session | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const [workspaceId, setWorkspaceId] = useState('');
   const [kind, setKind] = useState<TaskKind>('assistant');
   const [input, setInput] = useState('');
@@ -178,6 +180,55 @@ export function ConversationShell() {
       setSessions((previous) => previous.map((item) => item.id === sessionId ? { ...item, project_id: project.project_id, default_workspace_id: project.workspace_id } : item));
     } else setError('请先新建或恢复会话，再关联项目。');
   }
+  async function openProjectAt(path: string) {
+    await operate(async (signal) => {
+      const project = await openProject(path, signal);
+      if (!project.available) throw new Error('项目路径不可用，请检查当前 WSL 环境。');
+      if (!sessionId) {
+        const id = await createSession(signal);
+        remember(id); setSessionId(id);
+        await setSessionProject(id, project.project_id, signal);
+        await setSessionWorkspace(id, project.workspace_id, signal);
+        setProjects((previous) => [...previous.filter((item) => item.project_id !== project.project_id), project]);
+        setWorkspaces((previous) => [...previous.filter((item) => item.workspace_id !== project.workspace_id), { workspace_id: project.workspace_id, repo_path: project.root_path, available: true }]);
+        setWorkspaceId(project.workspace_id);
+        setRefresh((value) => value + 1);
+        return;
+      }
+      await attachProject(project);
+    });
+  }
+  async function createProjectAt(parent: string, name: string) {
+    await operate(async (signal) => {
+      const project = await createProject(parent, name, signal);
+      if (!project.available) throw new Error('新建项目后无法访问其 WSL 路径。');
+      if (!sessionId) {
+        const id = await createSession(signal);
+        remember(id); setSessionId(id);
+        await setSessionProject(id, project.project_id, signal);
+        await setSessionWorkspace(id, project.workspace_id, signal);
+        setProjects((previous) => [...previous.filter((item) => item.project_id !== project.project_id), project]);
+        setWorkspaces((previous) => [...previous.filter((item) => item.workspace_id !== project.workspace_id), { workspace_id: project.workspace_id, repo_path: project.root_path, available: true }]);
+        setWorkspaceId(project.workspace_id);
+        setRefresh((value) => value + 1);
+        return;
+      }
+      await attachProject(project);
+    });
+  }
+  async function renameSelected(session: Session) {
+    const title = renameValue.trim();
+    if (!title) return;
+    await operate(async (signal) => {
+      const updated = await renameSession(session.id, title, session.title_version ?? 0, signal);
+      setSessions((previous) => previous.map((item) => item.id === session.id ? updated : item));
+      setRenameTarget(null);
+    });
+  }
+  function startRename(session: Session) {
+    setRenameTarget(session);
+    setRenameValue(String(session.title ?? session.metadata.title ?? ''));
+  }
   async function send() {
     if (!sessionId || !input.trim() || loading || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))) return;
     await operate(async (signal, current) => {
@@ -262,30 +313,22 @@ export function ConversationShell() {
   }
 
   return <main className="conversation-layout">
-    <aside className="session-sidebar"><h1>Tomato Agent</h1>
-      <section aria-label="项目"><h2>项目</h2><label>打开项目目录<input aria-label="项目目录" value={projectPath} disabled={busy} onChange={(event) => setProjectPath(event.target.value)} placeholder="WSL 中允许访问的目录" /></label>
-        <button type="button" disabled={busy || !projectPath.trim()} onClick={() => void operate(async (signal) => {
-          const project = await openProject(projectPath.trim(), signal); await attachProject(project); setProjectPath('');
-        })}>打开项目</button>
-        <label>新建项目的父目录<input aria-label="新建项目父目录" value={projectParent} disabled={busy} onChange={(event) => setProjectParent(event.target.value)} /></label>
-        <label>项目名称<input aria-label="项目名称" value={projectName} disabled={busy} onChange={(event) => setProjectName(event.target.value)} /></label>
-        <button type="button" disabled={busy || !projectParent.trim() || !projectName.trim()} onClick={() => void operate(async (signal) => {
-          const project = await createProject(projectParent.trim(), projectName.trim(), signal); await attachProject(project); setProjectName('');
-        })}>新建项目</button>
-        <nav aria-label="已登记项目">{projects.map((project) => <button className="secondary-button" type="button" key={project.project_id} disabled={!project.available || busy} aria-current={sessions.find((item) => item.id === sessionId)?.project_id === project.project_id ? 'true' : undefined} onClick={() => void operate(async () => attachProject(project))}>{project.display_name}</button>)}</nav>
-      </section>
-      <button type="button" disabled={busy} onClick={() => void newSession()}>新建会话</button>
-      <nav aria-label="会话列表">{sessions.map((session) => <button className="secondary-button" type="button" key={session.id} aria-current={session.id === sessionId ? 'true' : undefined} onClick={() => selectSession(session.id)}>{String(session.title ?? session.metadata.title ?? session.id)}</button>)}</nav>
-    </aside>
-    <section className="card conversation-shell" aria-label="统一会话">
+    <ProjectSidebar projects={projects} sessions={sessions} sessionId={sessionId} environment={environment} busy={busy}
+      onNewSession={() => void newSession()} onOpenProject={() => setProjectDialog(true)} onSelectSession={selectSession}
+      onRenameSession={startRename}
+      onShowUnavailable={() => setError('项目路径不可用，请检查连接的 WSL 环境。')} />
+    <section className="conversation-shell" aria-label="统一会话">
       <header><div><h2>统一助手</h2><p>直接描述目标，助手在同一任务中检索资料、读取项目并解释；当前助手能力为只读。</p></div><span>{loading ? '恢复中' : active ? '有活动任务' : '就绪'}</span></header>
-      <div className="controls"><label>入口（其他为高级模式）<select value={kind} onChange={(event) => setKind(event.target.value as TaskKind)}>{Object.entries(taskLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <div className="controls"><label>入口<select value={kind} onChange={(event) => setKind(event.target.value as TaskKind)}>{Object.entries(taskLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         {kind === 'knowledge' && <label>检索方式<select value={retrievalMode} onChange={(event) => setRetrievalMode(event.target.value as RetrievalMode)}>{modes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></label>}
         <button type="button" className="secondary-button" disabled={busy} onClick={() => setRefresh((value) => value + 1)}>刷新会话</button>
       </div>
       {kind === 'knowledge' && <p className="capability-note">{capabilityNotice}</p>}
       {kind === 'assistant' && <p className="capability-note">工作区可选；需要读取项目时可按任务请求绑定一次，已绑定任务不能切换项目。</p>}
-      <WorkspacePicker workspaces={workspaces} value={workspaceId} disabled={busy || loading || active || !sessionId} onSelect={(id) => void bind(id)} onRegister={register} />
+      <details className="advanced-workspace"><summary>高级设置：工作区与测试目标</summary>
+        {projects.find((project) => project.workspace_id === workspaceId)?.available === false && <p className="notice error">当前项目路径不可用；测试和项目读取能力已禁用。</p>}
+        <WorkspacePicker workspaces={workspaces} value={workspaceId} disabled={busy || loading || active || !sessionId} onSelect={(id) => void bind(id)} onRegister={register} />
+      </details>
       {error && <p className="notice error" role="alert">{error}</p>}
       {pollError && <p className="notice error" role="alert">读取失败：{pollError}</p>}
       <div className="task-timeline" aria-live="polite">{tasks.length === 0 && <p className="empty-state">{sessionId ? '当前会话暂无任务。' : '请新建或选择会话。'}</p>}
@@ -308,6 +351,12 @@ export function ConversationShell() {
       </form>
       <small>当前 Session：{sessionId || '未选择'} · 新任务通过单 Worker 后台执行。</small>
     </section>
+    {projectDialog && <ProjectDialog onClose={() => setProjectDialog(false)} onOpen={openProjectAt} onCreate={createProjectAt} />}
+    {renameTarget && <form className="rename-dialog" aria-label="重命名对话" onSubmit={(event) => { event.preventDefault(); void renameSelected(renameTarget); }}>
+      <label>对话名称<input autoFocus value={renameValue} maxLength={200} onChange={(event) => setRenameValue(event.target.value)} /></label>
+      <button type="submit" disabled={busy || !renameValue.trim()}>保存名称</button>
+      <button type="button" disabled={busy} onClick={() => setRenameTarget(null)}>取消</button>
+    </form>}
     {(document || documentError) && <section className="document-panel"><button className="close-button" type="button" onClick={() => { documentController.current += 1; setDocument(null); setDocumentError(''); }}>关闭</button>
       {documentError ? <p className="notice error">{documentError}</p> : document && <><h2>{document.document.title}</h2><p className="document-meta">{document.document.source_path} · {document.document.document_version}</p>{document.chunks.map((chunk) => <article className="document-chunk" key={chunk.chunk_id}><h3>{chunk.heading_path}</h3><span>第 {chunk.start_line}–{chunk.end_line} 行</span><p>{chunk.text}</p></article>)}</>}
     </section>}

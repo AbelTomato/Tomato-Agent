@@ -36,8 +36,10 @@ class UnifiedTaskRequest(BaseModel):
             if "allow_test_execution" in self.options and type(self.options["allow_test_execution"]) is not bool:
                 raise ValueError("allow_test_execution must be boolean")
             return self
-        elif (self.kind == "code") != bool(self.workspace_id):
-            raise ValueError("workspace is required only for code")
+        elif self.kind == "code" and not self.workspace_id:
+            raise ValueError("workspace is required for code")
+        elif self.kind != "code" and self.workspace_id is not None:
+            raise ValueError("workspace is supported only for code")
         if self.kind != "knowledge" and self.options:
             raise ValueError("options are supported only for knowledge")
         if set(self.options) - {"retrieval_mode", "limit"}:
