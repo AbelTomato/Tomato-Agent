@@ -14,7 +14,7 @@ Tomato Agent 是一个面向个人知识库与技术写作的 Agent 项目，提
 
 ## 技术栈
 
-Windows 桌面增量：Tauri 2 技术验证与 WSL 服务连接/认证/生命周期（任务1、2）已完成，可复用现有会话界面；项目导航与完整桌面产品尚未交付。使用及验证边界见[Windows桌面连接与生命周期](docs/Windows桌面连接与生命周期.md)。
+Windows 桌面增量：Tauri 2 技术验证、WSL 服务连接/认证/生命周期及项目/目录后端（计划任务1、2和切片3后端工程阶段）已完成，可复用现有会话界面。桌面项目导航 UI、会话标题和完整产品尚未交付。使用及验证边界见[Windows桌面连接与生命周期](docs/Windows桌面连接与生命周期.md)。
 
 - 后端：Python ≥ 3.11、FastAPI、Pydantic、SQLite。
 - 前端：React、TypeScript、Vite、Tailwind CSS。

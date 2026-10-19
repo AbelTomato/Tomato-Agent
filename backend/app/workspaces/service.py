@@ -61,7 +61,7 @@ class WorkspaceService:
                    Path(part).suffix.lower() in {".pem", ".key", ".p12", ".pfx"}
                    for part in path.parts)
 
-    async def register_original(self, path: Path, pytest_paths: list[str]) -> WorkspaceRecord:
+    async def register_original(self, path: Path, pytest_paths: list[str] | None = None) -> WorkspaceRecord:
         source = Path(path)
         if not source.is_absolute():
             raise ValueError("Original path must be absolute")
@@ -75,8 +75,7 @@ class WorkspaceService:
             self._reject_links(root)
         if self.root.is_relative_to(source) or source.is_relative_to(self.root):
             raise WorkspacePathError("Workspace metadata and original project must be separate")
-        if not pytest_paths:
-            raise ValueError("pytest_paths must not be empty")
+        pytest_paths = pytest_paths or []
         targets = []
         for value in pytest_paths:
             target = Path(value)

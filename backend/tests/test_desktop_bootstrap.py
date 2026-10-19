@@ -11,7 +11,7 @@ import httpx
 def launch(root, *, token="a" * 64, port=0):
     result = subprocess.run(
         [sys.executable, "-m", "app.desktop.bootstrap"],
-        input=json.dumps({"token": token, "owner": "owner", "acceptance_root": str(root), "port": port}) + "\n",
+        input=json.dumps({"token": token, "owner": "owner", "environment_id": "Ubuntu", "acceptance_root": str(root), "port": port}) + "\n",
         text=True, capture_output=True, timeout=25,
         env={**os.environ, "PYTHONPATH": str(Path.cwd())},
     )

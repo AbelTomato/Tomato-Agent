@@ -26,6 +26,10 @@ def read_input():
         raise ValueError("invalid input")
     if not isinstance(value.get("owner"), str) or not value["owner"]:
         raise ValueError("invalid owner")
+    environment_id = value.get("environment_id", "local")
+    if not isinstance(environment_id, str) or not environment_id.strip() or len(environment_id) > 128:
+        raise ValueError("invalid environment")
+    value["environment_id"] = environment_id
     return value
 
 
@@ -38,8 +42,10 @@ def configuration(value):
                         docs_root=root, draft_directory=root / "drafts",
                         code_task_workspace_root=root / "workspaces",
                         code_task_artifact_root=root / "artifacts", llm_api_key="",
-                        embedding_api_key="", task_worker_enabled=False)
-    return Settings()
+                        embedding_api_key="", task_worker_enabled=False,
+                        desktop_environment_id=value["environment_id"],
+                        desktop_service_instance_id="pending")
+    return Settings(desktop_environment_id=value["environment_id"])
 
 
 async def serve(value):
@@ -50,6 +56,7 @@ async def serve(value):
         identity_path.write_text(secrets.token_hex(16))
         identity_path.chmod(0o600)
     instance = identity_path.read_text().strip()
+    app.state.project_service.service_instance_id = instance
     sock = socket.socket()
     port_request = value.get("port", 0)
     if type(port_request) is not int or not 0 <= port_request <= 65535:

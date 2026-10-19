@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     code_task_max_artifact_bytes: int = Field(default=1000000, gt=0)
     code_task_workspace_root: Path = Path("data/code-workspaces")
     workspace_allowed_roots: list[Path] = Field(default_factory=list)
+    desktop_environment_id: str = "local"
+    desktop_service_instance_id: str = "local"
     code_task_artifact_root: Path = Path("data/code-artifacts")
     code_task_sandbox_backend: Literal["local", "docker", "openshell"] = "local"
     code_task_docker_image: str = ""

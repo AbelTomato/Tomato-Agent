@@ -1,12 +1,20 @@
 # Windows 桌面连接与生命周期
 
-2026-10-18：桌面实施计划任务2完成。任务1技术选型依据见 [Windows桌面技术验证](Windows桌面技术验证.md)。当前可连接已准备好的 WSL 后端并复用会话界面；项目导航、自动标题及完整安装交付仍属于后续任务。
+2026-10-19：桌面实施计划切片3后端工程阶段完成。WSL 桌面启动通过受控 stdin 将发行版名作为 `environment_id` 传入；项目 SQLite 记录由后端 `.desktop-instance` 绑定 `service_instance_id`，并通过配置的 `workspace_allowed_roots` 限定浏览、打开与新建。普通项目登记可不配置 pytest；无测试 profile 的工作区仍不能运行测试。项目 API 为 `/api/projects` 与 `/api/projects/directories`。真实 Windows UI 项目流程尚未实现，属于后续切片。此前任务2连接边界依然有效。
+
+任务1技术选型依据见 [Windows桌面技术验证](Windows桌面技术验证.md)。
 
 ## 启动和连接
 
 Windows 窗口中点击“发现 WSL 发行版”，在高级连接设置填写已有后端的 WSL 绝对路径，再点击“连接 / 重连助手服务”。要求该目录已有 `.venv/bin/python` 和项目依赖。不自动安装、部署或修改 `.env`。普通 Web 启动仍使用 `app.main:app`。
 
 原生层固定调用 `wsl.exe --distribution <发行版> --cd <后端目录> --exec <后端目录>/.venv/bin/python -m app.desktop.bootstrap`，不经过 shell。发行版必须来自发现结果，路径作为独立 argv。令牌由 Windows 凭据管理器按环境/后端目录保存，通过 stdin 注入，不传入 WebView、URL、命令行或日志。模型密钥设置不在本任务范围。
+
+桌面业务启动的 stdin JSON 同时携带已发现的发行版名称 `environment_id`、连接凭据与启动所有权信息；该值不在命令行或日志出现。服务实例身份来自 WSL 数据目录的 `.desktop-instance`，不可由客户端覆盖。`desktop_environment_id` 和 `desktop_service_instance_id` 是后端应用配置项；日常桌面启动分别由原生连接和服务端身份提供。项目记录以三元组 `(environment_id, service_instance_id, root_path)` 区分；同一路径在不同发行版或实例中是不同项目。
+
+项目操作使用 WSL 后端服务解释的 POSIX 路径。`GET /api/projects/directories?path=<absolute-path>` 只列直接子目录，默认隐藏点目录、忽略符号链接并限制最多500项；路径必须落入明确配置的 `workspace_allowed_roots`，不能使用 `/` 作为允许根。`POST /api/projects/open` 可信任并登记已有目录，重复打开返回既有项目身份；`POST /api/projects` 在已批准父目录下创建单层目录，不覆盖冲突对象。打开或创建项目只关联现有 workspace，不授权 shell，也不自动配置测试。
+
+旧 `POST /api/workspaces` 支持 `pytest_paths: []` 或省略字段用于普通目录读取。空 profile 不会生成伪造的 `tests` 目标；`run_tests` 仍由服务端 `TestTargetRegistry` 拒绝。原有非空 profile 校验与代码任务 API 保持不变。创建目录后若 SQLite 项目记录失败，实际目录保留以供核查，不自动删除。
 
 Windows 先选择本机可绑定端口，经 stdin 交给 WSL 绑定 `127.0.0.1`，避免随机 WSL 端口落入 Windows 排除段。实际仍须通过认证与实例核验；竞争或连接失败明确报错，不改变防火墙、监听公网或自动重启服务。原生启动等待20秒，WSL启动等待18秒，单次HTTP请求30秒；失败不循环启动或重发业务提交。
 

@@ -14,7 +14,7 @@ class RegisterWorkspaceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     path: str = Field(min_length=1)
-    pytest_paths: list[str] = Field(min_length=1)
+    pytest_paths: list[str] = Field(default_factory=list)
 
 
 def _service(request: Request) -> WorkspaceService:

@@ -57,6 +57,31 @@ async def test_registration_denies_unconfigured_outside_and_non_directory_paths(
     assert Settings(_env_file=None).workspace_allowed_roots == []
 
 
+async def test_registration_without_test_profile_is_readable_but_not_runnable(tmp_path):
+    from app.tools.code_tests import TestTargetRegistry
+
+    service, project = environment(tmp_path)
+    (project / "tests").rmdir()
+    (project / "app.py").write_text("print('read only')\n")
+    record = await service.register_original(project, [])
+    assert record.pytest_paths == ()
+    assert await service.read_file(record.workspace_id, "app.py", 100) == "print('read only')\n"
+    with pytest.raises(ValueError, match="test profile"):
+        TestTargetRegistry.for_workspace(service, record.workspace_id)
+
+
+async def test_workspace_http_registration_without_profile_remains_compatible(tmp_path):
+    _, project = environment(tmp_path)
+    config = Settings(_env_file=None, database_path=tmp_path / "agent.db", docs_root=tmp_path,
+        draft_directory=tmp_path / "drafts", code_task_workspace_root=tmp_path / "metadata",
+        code_task_artifact_root=tmp_path / "artifacts", workspace_allowed_roots=[project.parent])
+    app = create_app(config)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/workspaces", json={"path": str(project), "pytest_paths": []})
+        assert response.status_code == 201
+        assert response.json()["pytest_paths"] == []
+
+
 @pytest.mark.parametrize("target", ["-q", "../outside", "/etc", "missing", ".env", "tests/link"])
 async def test_pytest_paths_are_validated_on_registration(tmp_path, target):
     service, project = environment(tmp_path)
@@ -64,8 +89,8 @@ async def test_pytest_paths_are_validated_on_registration(tmp_path, target):
     (project / "tests" / "link").symlink_to(project / "app.py")
     with pytest.raises((ValueError, WorkspacePathError)):
         await service.register_original(project, [target])
-    with pytest.raises(ValueError):
-        await service.register_original(project, [])
+    no_profile = await service.register_original(project, [])
+    assert no_profile.pytest_paths == ()
 
 
 async def test_registration_rejects_links_in_root_and_ancestors(tmp_path):

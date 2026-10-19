@@ -62,6 +62,7 @@ class AppDependencies:
     writing_research_service: WritingResearchQueryPort
     writing_executor: WritingTaskExecutor
     workspace_service: WorkspaceService
+    project_service: object
     artifact_service: ArtifactService
     code_task_service: CodeTaskService
     execution_repository: ExecutionRepository
@@ -158,6 +159,9 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         max_file_bytes=config.code_task_max_file_bytes,
         allowed_roots=config.workspace_allowed_roots,
     )
+    from app.projects.service import ProjectService
+    project_service = ProjectService(config.database_path, config.workspace_allowed_roots,
+        config.desktop_environment_id, config.desktop_service_instance_id, workspace_service)
     artifact_service = ArtifactService(
         config.code_task_artifact_root,
         workspace_service,
@@ -275,6 +279,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         writing_research_service=writing_research_service,
         writing_executor=writing_executor,
         workspace_service=workspace_service,
+        project_service=project_service,
         artifact_service=artifact_service,
         code_task_service=code_task_service,
         execution_repository=code_task_service.execution_repository,

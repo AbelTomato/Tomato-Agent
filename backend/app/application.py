@@ -8,6 +8,7 @@ from app.api.sessions import router as sessions_router
 from app.api.writing import router as writing_router
 from app.api.code_tasks import router as code_tasks_router
 from app.api.workspaces import router as workspaces_router
+from app.api.projects import router as projects_router
 from app.api.tasks import router as tasks_router
 from app.dependencies import build_app_dependencies, create_runtime
 from app.settings import Settings, settings
@@ -38,6 +39,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await dependencies.session_repository.init()
+        await dependencies.project_service.initialize()
         await dependencies.run_repository.init()
         await dependencies.knowledge_repository.init()
         await dependencies.writing_repository.init()
@@ -70,6 +72,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
     app.include_router(writing_router)
     app.include_router(code_tasks_router)
     app.include_router(workspaces_router)
+    app.include_router(projects_router)
     app.include_router(tasks_router)
     app.add_middleware(
         CORSMiddleware,

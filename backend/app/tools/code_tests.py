@@ -65,6 +65,8 @@ class TestTargetRegistry:
         if metadata.get("mode") != "original":
             raise ValueError("Original workspace required")
         paths = metadata["pytest_paths"]
+        if not paths:
+            raise ValueError("Workspace has no registered test profile")
         for name in paths:
             if not name or name.startswith("-") or "\x00" in name:
                 raise ValueError("Invalid pytest path")

@@ -127,7 +127,7 @@ impl Connection {
             let mut child = Command::new("wsl.exe").args(args)
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
                 .spawn().map_err(|_| "WSL 服务启动失败；请检查后端安装路径")?;
-            let mut input = json!({"token":token,"owner":owner});
+            let mut input = json!({"token":token,"owner":owner,"environment_id":distribution});
             let available = std::net::TcpListener::bind("127.0.0.1:0")
                 .map_err(|_| "Windows 无可用本机端口")?;
             input["port"] = json!(available.local_addr().map_err(|_| "无法查询本机端口")?.port());
