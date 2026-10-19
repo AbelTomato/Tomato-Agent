@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -7,6 +8,7 @@ from app.tasks.models import SteerRequest, TaskActionRequest, TaskRecoveryObserv
 from app.workspaces.service import WorkspacePathError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 PageLimit = Query(default=50, ge=1, le=200)
 
 
@@ -114,6 +116,10 @@ async def submit_task(session_id: str, body: UnifiedTaskRequest, request: Reques
         run = await request.app.state.task_service.submit(session_id, body)
     except (KeyError, ValueError, RuntimeError) as exc:
         raise task_error(exc) from exc
+    try:
+        await update_temporary_metadata(request, session_id, body.message)
+    except Exception:
+        logger.exception("Could not update temporary session metadata")
     return await task_payload(request, run)
 
 
@@ -127,9 +133,24 @@ async def enqueue_task(session_id: str, body: UnifiedTaskRequest, request: Reque
     session_id = ident(session_id, "session_id")
     await session_required(request, session_id)
     try:
-        return await request.app.state.task_service.enqueue(session_id, body)
+        result = await request.app.state.task_service.enqueue(session_id, body)
+        try:
+            await update_temporary_metadata(request, session_id, body.message)
+        except Exception:
+            logger.exception("Could not update queued session metadata")
+        return result
     except (KeyError, ValueError, RuntimeError) as exc:
         raise task_error(exc) from exc
+
+
+async def update_temporary_metadata(request: Request, session_id: str, message: str):
+    session = await request.app.state.session_repository.get_session(session_id)
+    project_id = None
+    if session and session.default_workspace_id:
+        project_id = next((project["project_id"] for project in
+            await request.app.state.project_service.list()
+            if project["workspace_id"] == session.default_workspace_id and project["available"]), None)
+    await request.app.state.session_repository.ensure_temporary_title(session_id, message, project_id)
 
 
 @router.get("/api/sessions/{session_id}/queue")

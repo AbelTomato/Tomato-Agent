@@ -16,6 +16,11 @@ def parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _bounded_title(value: str) -> str:
+    first_line = str(value).splitlines()[0] if str(value).splitlines() else ""
+    return " ".join(first_line.split())[:30].strip()
+
+
 class SessionRepository:
     def __init__(self, path: Path):
         self.path = path
@@ -36,6 +41,12 @@ class SessionRepository:
             columns = await db.execute_fetchall("PRAGMA table_info(sessions)")
             if "default_workspace_id" not in {column[1] for column in columns}:
                 await db.execute("ALTER TABLE sessions ADD COLUMN default_workspace_id TEXT")
+            for name, definition in (("title_source", "TEXT NOT NULL DEFAULT 'temporary'"),
+                                     ("title_version", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("title_status", "TEXT NOT NULL DEFAULT 'idle'"),
+                                     ("project_id", "TEXT")):
+                if name not in {column[1] for column in columns}:
+                    await db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
             await db.commit()
 
     async def create_session(self, metadata: dict | None = None) -> UUID:
@@ -60,7 +71,8 @@ class SessionRepository:
         async with aiosqlite.connect(self.path) as db:
             await self._enable_foreign_keys(db)
             cursor = await db.execute(
-                "SELECT id, status, metadata, created_at, updated_at, default_workspace_id "
+                "SELECT id, status, metadata, created_at, updated_at, default_workspace_id, "
+                "title_source, title_version, title_status, project_id "
                 "FROM sessions WHERE id = ?",
                 (str(session_id),),
             )
@@ -70,23 +82,112 @@ class SessionRepository:
         return SessionRecord(
             id=UUID(row[0]),
             status=row[1],
-            metadata=json.loads(row[2]),
+            metadata={**json.loads(row[2]), "title": json.loads(row[2]).get("title") or "未命名对话"},
             created_at=parse_datetime(row[3]),
             updated_at=parse_datetime(row[4]),
             default_workspace_id=row[5],
+            title_source=row[6] or "temporary",
+            title_version=row[7] or 0,
+            title_status=row[8] or "idle",
+            project_id=row[9],
         )
 
     async def list_sessions(self, limit=50, offset=0):
         async with aiosqlite.connect(self.path) as db:
             rows = await db.execute_fetchall(
                 "SELECT id FROM sessions ORDER BY created_at, id LIMIT ? OFFSET ?", (limit, offset))
-        return [await self.get_session(UUID(row[0])) for row in rows]
+        sessions = [await self.get_session(UUID(row[0])) for row in rows]
+        for session in sessions:
+            if session is not None:
+                session.metadata.setdefault("title", "未命名对话")
+        return sessions
 
     async def set_default_workspace(self, session_id, workspace_id):
         async with aiosqlite.connect(self.path) as db:
             cursor = await db.execute(
                 "UPDATE sessions SET default_workspace_id=?, updated_at=? WHERE id=?",
                 (workspace_id, now(), str(session_id)))
+            if cursor.rowcount != 1:
+                raise KeyError("session_not_found")
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def ensure_temporary_title(self, session_id: UUID, title: str, project_id=None):
+        title = _bounded_title(title) or "新对话"
+        async with aiosqlite.connect(self.path) as db:
+            row = await (await db.execute(
+                "SELECT metadata, title_source, project_id, title_version FROM sessions WHERE id=?",
+                (str(session_id),))).fetchone()
+            if row is None:
+                raise KeyError("session_not_found")
+            metadata = json.loads(row[0])
+            changed = False
+            if metadata.get("title") in {None, "", "未命名对话"} and row[3] == 0:
+                metadata["title"] = title
+                changed = True
+            if project_id and row[2] is None:
+                await db.execute("UPDATE sessions SET project_id=? WHERE id=?",
+                                 (project_id, str(session_id)))
+            if changed or (project_id and row[2] is None):
+                await db.execute("UPDATE sessions SET metadata=?, title_source=?, "
+                                 "title_status='idle', updated_at=? WHERE id=?",
+                                 (json.dumps(metadata, ensure_ascii=False),
+                                  "temporary" if changed else row[1], now(), str(session_id)))
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def set_title(self, session_id: UUID, title: str, *, source: str = "manual",
+                        expected_version: int | None = None):
+        title = " ".join(str(title).splitlines()[0].split())[:30].strip()
+        if not title:
+            raise ValueError("title_required")
+        if source not in {"manual", "model", "temporary"}:
+            raise ValueError("invalid_title_source")
+        async with aiosqlite.connect(self.path) as db:
+            row = await (await db.execute(
+                "SELECT metadata, title_version FROM sessions WHERE id=?", (str(session_id),)
+            )).fetchone()
+            if row is None:
+                raise KeyError("session_not_found")
+            version = row[1] or 0
+            if expected_version is not None and version != expected_version:
+                raise ValueError("title_version_conflict")
+            metadata = json.loads(row[0])
+            metadata["title"] = title
+            cursor = await db.execute(
+                "UPDATE sessions SET metadata=?, title_source=?, title_version=?, title_status='ready', "
+                "updated_at=? WHERE id=? AND title_version=?",
+                (json.dumps(metadata, ensure_ascii=False), source, version + 1, now(),
+                 str(session_id), version))
+            if cursor.rowcount != 1:
+                raise ValueError("title_version_conflict")
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def set_generated_title(self, session_id: UUID, title: str, expected_version: int):
+        title = _bounded_title(title)
+        if not title:
+            return False
+        async with aiosqlite.connect(self.path) as db:
+            row = await (await db.execute(
+                "SELECT metadata FROM sessions WHERE id=? AND title_version=? "
+                "AND title_source!='manual'", (str(session_id), expected_version)
+            )).fetchone()
+            if row is None:
+                return False
+            metadata = json.loads(row[0])
+            metadata["title"] = " ".join(title.splitlines()[0].split())[:30].strip()
+            cursor = await db.execute(
+                "UPDATE sessions SET metadata=?, title_source='model', title_version=title_version+1, "
+                "title_status='ready', updated_at=? WHERE id=? AND title_version=? AND title_source!='manual'",
+                (json.dumps(metadata, ensure_ascii=False), now(), str(session_id), expected_version))
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def set_project(self, session_id: UUID, project_id: str | None):
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute("UPDATE sessions SET project_id=?, updated_at=? WHERE id=?",
+                                      (project_id, now(), str(session_id)))
             if cursor.rowcount != 1:
                 raise KeyError("session_not_found")
             await db.commit()

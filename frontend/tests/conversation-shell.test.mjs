@@ -32,7 +32,7 @@ let eventReader;
 let submitReader;
 let actionReader;
 let taskReader;
-const session = (id) => ({ id, metadata: {}, default_workspace_id: 'ws' });
+const session = (id) => ({ id, title: id, metadata: { title: id }, default_workspace_id: 'ws' });
 const task = (id, status = 'completed', kind = 'chat') => ({ run_id: id, session_id: 's1', kind, status,
   phase: 'finished', version: 3, capabilities: status === 'running' ? ['cancel'] : [],
   pending_action: null, result: { answer: `answer-${id}` }, messages: [], legacy: false });
@@ -42,6 +42,10 @@ globalThis.__conversationApi = {
   async steerTask(id, body) { calls.push(['steer', id, body]); return { request_id: 'steer', status: 'requested' }; },
   async controlSessionQueue() { return { paused: false, requests: [] }; },
   async listSessions() { return { sessions: [session('s1'), session('s2')] }; },
+  async listProjects() { return { projects: [{ project_id: 'p1', workspace_id: 'ws', display_name: 'Demo', root_path: '/project', available: true }] }; },
+  async openProject(path) { calls.push(['open-project', path]); return { project_id: 'p2', workspace_id: 'ws2', display_name: 'Opened', root_path: path, available: true }; },
+  async createProject(parent, name) { calls.push(['create-project', parent, name]); return { project_id: 'p3', workspace_id: 'ws3', display_name: name, root_path: `${parent}/${name}`, available: true }; },
+  async setSessionProject(id, project) { calls.push(['session-project', id, project]); return session(id); },
   async listWorkspaces() { return { workspaces: [{ workspace_id: 'ws', repo_path: '/project', available: true }] }; },
   async listSessionTasks(id, limit, offset, signal) { calls.push(['history', id, offset, signal]); return historyReader(id, offset); },
   async getTask(id, signal) { calls.push(['task', id, signal]); return taskReader(id); },
@@ -62,7 +66,7 @@ async function compile(path, replacements) {
 }
 const { ConversationShell } = await compile('../src/components/ConversationShell.tsx', [
   [/import \{ useEffect, useRef, useState \} from 'react';/, 'const { useEffect, useRef, useState } = globalThis.__conversationHooks;'],
-  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument, listSessionQueue, enqueueTask, controlSessionQueue, steerTask } = globalThis.__conversationApi;'],
+  [/import \{.*?\} from '..\/api';/s, 'const { createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents, actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument, listSessionQueue, enqueueTask, controlSessionQueue, steerTask, listProjects, openProject, createProject, setSessionProject } = globalThis.__conversationApi;'],
   [/import \{ TaskCard, taskLabels \} from '.\/TaskCard';/, 'const TaskCard = "task-card", taskLabels = { assistant: "助手", chat: "普通聊天", knowledge: "知识问答", writing: "技术写作", code: "代码任务" };'],
   [/import \{ WorkspacePicker \} from '.\/WorkspacePicker';/, 'const WorkspacePicker = "workspace-picker";'],
 ]);
@@ -157,6 +161,20 @@ test('默认助手提交可选工作区且不带检索配置，禁用时保留�
   elements().find((node) => node.type === 'workspace-picker').props.onSelect(''); await flush();
   elements().find((node) => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush();
   assert.equal(calls.filter((call) => call[0] === 'submit').at(-1)[2].workspace_id, undefined);
+}));
+
+test('打开和新建项目后关联当前会话及工作区', async () => scenario(async () => {
+  mount(); await flush();
+  const input = (label) => elements().find((node) => node.type === 'input' && node.props['aria-label'] === label);
+  input('项目目录').props.onChange({ target: { value: '/home/user/demo' } }); await flush();
+  button('打开项目').props.onClick(); await flush();
+  assert.ok(calls.some(([name, path]) => name === 'open-project' && path === '/home/user/demo'));
+  assert.ok(calls.some(([name, id, project]) => name === 'session-project' && id === 's1' && project === 'p2'));
+  input('新建项目父目录').props.onChange({ target: { value: '/home/user' } }); await flush();
+  input('项目名称').props.onChange({ target: { value: '新项目' } }); await flush();
+  button('新建项目').props.onClick(); await flush();
+  assert.ok(calls.some(([name, parent, project]) => name === 'create-project' && parent === '/home/user' && project === '新项目'));
+  assert.ok(calls.some(([name, id, project]) => name === 'session-project' && id === 's1' && project === 'p3'));
 }));
 
 test('助手绑定是版本动作，过期动作刷新事实并保留错误，网络重试复用动作ID', async () => scenario(async () => {

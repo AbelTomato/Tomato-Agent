@@ -92,6 +92,10 @@ class SessionRecord(BaseModel):
     status: str
     metadata: dict[str, Any]
     default_workspace_id: str | None = None
+    title_source: str = "temporary"
+    title_version: int = 0
+    title_status: str = "idle"
+    project_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

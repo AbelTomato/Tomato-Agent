@@ -300,7 +300,8 @@ export type TaskRecoveryObservation = {
   action: 'reuse' | 'retry' | 'reconcile' | 'manual_review' | 'reject';
   allowed_actions: Extract<TaskAction, 'cancel' | 'inspect_recovery' | 'continue_recovery'>[];
 };
-export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string };
+export type Session = { id: string; metadata: Record<string, unknown>; default_workspace_id: string | null; created_at: string; title?: string; project_id?: string | null };
+export type Project = { project_id: string; workspace_id: string; display_name: string; root_path: string; available: boolean };
 export type Workspace = { workspace_id: string; repo_path?: string; pytest_paths?: string[]; available?: boolean };
 export type UnifiedResult = Partial<WritingTask> & {
   answer?: string; content?: string; evidence_status?: string;
@@ -350,6 +351,18 @@ export function steerTask(id: string, body: { client_request_id: string; message
 }
 export function listSessions(limit = 200, offset = 0, signal?: AbortSignal): Promise<{ sessions: Session[] }> {
   return request(`/api/sessions?limit=${limit}&offset=${offset}`, { signal });
+}
+export function listProjects(signal?: AbortSignal): Promise<{ projects: Project[] }> {
+  return request('/api/projects', { signal });
+}
+export function openProject(path: string, signal?: AbortSignal): Promise<Project> {
+  return request('/api/projects/open', { ...jsonRequest({ path }), signal });
+}
+export function createProject(parent_path: string, name: string, signal?: AbortSignal): Promise<Project> {
+  return request('/api/projects', { ...jsonRequest({ parent_path, name }), signal });
+}
+export function setSessionProject(id: string, project_id: string | null, signal?: AbortSignal): Promise<Session> {
+  return request(`${sessionPath(id)}/project`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id }), signal });
 }
 export function listSessionTasks(id: string, limit = 200, offset = 0, signal?: AbortSignal): Promise<{ tasks: UnifiedTask[] }> {
   return request(`${sessionPath(id)}/tasks?limit=${limit}&offset=${offset}`, { signal });

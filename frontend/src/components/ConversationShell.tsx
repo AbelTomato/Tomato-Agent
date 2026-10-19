@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   createSession, listSessions, listSessionTasks, submitTask, getTask, listTaskEvents,
   actOnTask, listWorkspaces, registerWorkspace, setSessionWorkspace, loadKnowledgeCapabilities, loadDocument,
+  listProjects, openProject, createProject, setSessionProject, type Project,
   listSessionQueue, enqueueTask, controlSessionQueue, steerTask, type SessionQueue,
   type Session, type Workspace, type UnifiedTask, type TaskKind, type TaskAction,
   type RetrievalMode, type Citation, type KnowledgeDocument, type CodeTaskEvent,
@@ -25,6 +26,10 @@ export function ConversationShell() {
   const [tasks, setTasks] = useState<UnifiedTask[]>([]);
   const [events, setEvents] = useState<Record<string, CodeTaskEvent[]>>({});
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectPath, setProjectPath] = useState('');
+  const [projectParent, setProjectParent] = useState('');
+  const [projectName, setProjectName] = useState('');
   const [workspaceId, setWorkspaceId] = useState('');
   const [kind, setKind] = useState<TaskKind>('assistant');
   const [input, setInput] = useState('');
@@ -121,9 +126,9 @@ export function ConversationShell() {
           allSessions.push(...page.sessions);
           if (page.sessions.length < 200) break;
         }
-        const available = await listWorkspaces(controller.signal);
+        const [available, registered] = await Promise.all([listWorkspaces(controller.signal), listProjects(controller.signal)]);
         if (!current()) return;
-        setSessions(allSessions); setWorkspaces(available.workspaces);
+        setSessions(allSessions); setWorkspaces(available.workspaces); setProjects(registered.projects);
         if (!sessionId) { setLoading(false); return; }
         const selected = allSessions.find((session) => session.id === sessionId);
         if (!selected) { setLoading(false); setError('保存的会话已失效，请选择或新建会话。'); return; }
@@ -161,6 +166,17 @@ export function ConversationShell() {
       const id = await createSession(signal);
       if (current()) selectSession(id);
     });
+  }
+  async function attachProject(project: Project) {
+    if (sessionId) {
+      await setSessionProject(sessionId, project.project_id);
+      await setSessionWorkspace(sessionId, project.workspace_id);
+      setProjects((previous) => [...previous.filter((item) => item.project_id !== project.project_id), project]);
+      setWorkspaces((previous) => [...previous.filter((item) => item.workspace_id !== project.workspace_id),
+        { workspace_id: project.workspace_id, repo_path: project.root_path, available: project.available }]);
+      setWorkspaceId(project.workspace_id);
+      setSessions((previous) => previous.map((item) => item.id === sessionId ? { ...item, project_id: project.project_id, default_workspace_id: project.workspace_id } : item));
+    } else setError('请先新建或恢复会话，再关联项目。');
   }
   async function send() {
     if (!sessionId || !input.trim() || loading || (kind === 'code' && !workspaces.some((item) => item.workspace_id === workspaceId && item.available !== false))) return;
@@ -246,8 +262,20 @@ export function ConversationShell() {
   }
 
   return <main className="conversation-layout">
-    <aside className="session-sidebar"><h1>Tomato Agent</h1><button type="button" disabled={busy} onClick={() => void newSession()}>新建会话</button>
-      <nav aria-label="会话列表">{sessions.map((session) => <button className="secondary-button" type="button" key={session.id} aria-current={session.id === sessionId ? 'true' : undefined} onClick={() => selectSession(session.id)}>{String(session.metadata.title ?? session.id)}</button>)}</nav>
+    <aside className="session-sidebar"><h1>Tomato Agent</h1>
+      <section aria-label="项目"><h2>项目</h2><label>打开项目目录<input aria-label="项目目录" value={projectPath} disabled={busy} onChange={(event) => setProjectPath(event.target.value)} placeholder="WSL 中允许访问的目录" /></label>
+        <button type="button" disabled={busy || !projectPath.trim()} onClick={() => void operate(async (signal) => {
+          const project = await openProject(projectPath.trim(), signal); await attachProject(project); setProjectPath('');
+        })}>打开项目</button>
+        <label>新建项目的父目录<input aria-label="新建项目父目录" value={projectParent} disabled={busy} onChange={(event) => setProjectParent(event.target.value)} /></label>
+        <label>项目名称<input aria-label="项目名称" value={projectName} disabled={busy} onChange={(event) => setProjectName(event.target.value)} /></label>
+        <button type="button" disabled={busy || !projectParent.trim() || !projectName.trim()} onClick={() => void operate(async (signal) => {
+          const project = await createProject(projectParent.trim(), projectName.trim(), signal); await attachProject(project); setProjectName('');
+        })}>新建项目</button>
+        <nav aria-label="已登记项目">{projects.map((project) => <button className="secondary-button" type="button" key={project.project_id} disabled={!project.available || busy} aria-current={sessions.find((item) => item.id === sessionId)?.project_id === project.project_id ? 'true' : undefined} onClick={() => void operate(async () => attachProject(project))}>{project.display_name}</button>)}</nav>
+      </section>
+      <button type="button" disabled={busy} onClick={() => void newSession()}>新建会话</button>
+      <nav aria-label="会话列表">{sessions.map((session) => <button className="secondary-button" type="button" key={session.id} aria-current={session.id === sessionId ? 'true' : undefined} onClick={() => selectSession(session.id)}>{String(session.title ?? session.metadata.title ?? session.id)}</button>)}</nav>
     </aside>
     <section className="card conversation-shell" aria-label="统一会话">
       <header><div><h2>统一助手</h2><p>直接描述目标，助手在同一任务中检索资料、读取项目并解释；当前助手能力为只读。</p></div><span>{loading ? '恢复中' : active ? '有活动任务' : '就绪'}</span></header>
