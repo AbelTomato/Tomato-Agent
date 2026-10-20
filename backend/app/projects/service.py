@@ -89,6 +89,75 @@ class ProjectService:
             return existing
         return await self._register(root, device, inode)
 
+    async def create_project(self, display_name: str):
+        await self._ensure_initialized()
+        name = display_name.strip()
+        if not name or len(name) > 255 or "\x00" in name:
+            raise ValueError("Project name must contain 1 to 255 characters")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record = {"project_id": str(uuid4()), "environment_id": self.environment_id,
+            "service_instance_id": self.service_instance_id, "display_name": name,
+            "created_at": timestamp, "updated_at": timestamp}
+        return await self.repository.create_project(record)
+
+    async def list_projects(self):
+        await self._ensure_initialized()
+        return await self.repository.list_projects(self.environment_id, self.service_instance_id)
+
+    async def rename_project(self, project_id: str, display_name: str):
+        await self._ensure_initialized()
+        name = display_name.strip()
+        if not name or len(name) > 255 or "\x00" in name:
+            raise ValueError("Project name must contain 1 to 255 characters")
+        updated = await self.repository.rename_project(project_id, self.environment_id,
+            self.service_instance_id, name, datetime.now(timezone.utc).isoformat())
+        if not updated:
+            raise KeyError(project_id)
+        return await self.repository.get_project(project_id, self.environment_id, self.service_instance_id)
+
+    async def add_directory(self, project_id: str, path: Path):
+        await self._ensure_initialized()
+        project = await self.repository.get_project(project_id, self.environment_id, self.service_instance_id)
+        if project is None:
+            raise KeyError(project_id)
+        root = self._trusted_directory(path)
+        device, inode = self._identity(root)
+        existing = await self.repository.list_directories(project_id)
+        for directory in existing:
+            if directory["root_path"] == str(root):
+                if (directory["device"], directory["inode"]) != (device, inode):
+                    raise ProjectPathError("Project directory identity changed")
+                return directory
+        workspace_id = self.workspace_service.repository.find_original(root)
+        if workspace_id is None:
+            workspace_id = (await self.workspace_service.register_original(root, [])).workspace_id
+        record = {"root_path": str(root), "workspace_id": workspace_id, "device": device,
+            "inode": inode, "created_at": datetime.now(timezone.utc).isoformat()}
+        await self.repository.add_directory(project_id, record)
+        return record
+
+    async def remove_directory(self, project_id: str, path: Path):
+        await self._ensure_initialized()
+        project = await self.repository.get_project(project_id, self.environment_id, self.service_instance_id)
+        if project is None:
+            raise KeyError(project_id)
+        root = Path(path).resolve(strict=False)
+        return await self.repository.remove_directory(project_id, str(root))
+
+    async def list_directories(self, project_id: str):
+        await self._ensure_initialized()
+        project = await self.repository.get_project(project_id, self.environment_id, self.service_instance_id)
+        if project is None:
+            raise KeyError(project_id)
+        directories = await self.repository.list_directories(project_id)
+        for directory in directories:
+            try:
+                root = self._trusted_directory(Path(directory["root_path"]))
+                directory["available"] = self._identity(root) == (directory["device"], directory["inode"])
+            except (OSError, ValueError, WorkspacePathError):
+                directory["available"] = False
+        return directories
+
     async def create(self, parent_path: Path, name: str):
         await self._ensure_initialized()
         parent = self._trusted_directory(parent_path)

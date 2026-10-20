@@ -29,6 +29,94 @@ async def test_project_browse_open_create_and_restart_are_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_projects_support_multiple_shared_directories_and_remove_only_associations(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    first = home / "first"
+    second = home / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "keep.txt").write_text("keep")
+    service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
+
+    project = await service.create_project("Alpha")
+    await service.add_directory(project["project_id"], first)
+    await service.add_directory(project["project_id"], second)
+    await service.add_directory(project["project_id"], first)
+    other = await service.create_project("Beta")
+    await service.add_directory(other["project_id"], first)
+
+    assert [item["root_path"] for item in await service.list_directories(project["project_id"])] == [str(first), str(second)]
+    assert [item["root_path"] for item in await service.list_directories(other["project_id"])] == [str(first)]
+    await service.remove_directory(project["project_id"], first)
+    assert first.is_dir()
+    assert (first / "keep.txt").read_text() == "keep"
+    assert (await service.list_directories(other["project_id"]))[0]["root_path"] == str(first)
+
+
+@pytest.mark.asyncio
+async def test_legacy_single_root_projects_migrate_idempotently(tmp_path):
+    import aiosqlite
+
+    home = tmp_path / "home"
+    home.mkdir()
+    root = home / "legacy"
+    root.mkdir()
+    service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
+    await service.initialize()
+    legacy = {
+        "project_id": "legacy-id", "workspace_id": "workspace-id", "display_name": "Legacy",
+        "root_path": str(root), "environment_id": "Ubuntu", "service_instance_id": "instance-1",
+        "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+        "device": root.stat().st_dev, "inode": root.stat().st_ino,
+    }
+    await service.repository.create(legacy)
+    await service.initialize()
+    await service.initialize()
+
+    projects = await service.list_projects()
+    assert len(projects) == 1
+    assert projects[0]["project_id"] == "legacy-id"
+    assert projects[0]["display_name"] == "Legacy"
+    directories = await service.list_directories("legacy-id")
+    assert [item["root_path"] for item in directories] == [str(root)]
+    assert directories[0]["workspace_id"] == "workspace-id"
+    async with aiosqlite.connect(tmp_path / "agent.db") as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM project_directories")
+        assert (await cursor.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_project_directory_is_reported_and_rename_is_supported(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    source = home / "source"
+    source.mkdir()
+    service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
+    project = await service.create_project("Before")
+    await service.add_directory(project["project_id"], source)
+    renamed = await service.rename_project(project["project_id"], "After")
+    assert renamed["display_name"] == "After"
+
+    source.rename(home / "renamed-away")
+    entries = await service.list_directories(project["project_id"])
+    assert entries[0]["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_renamed_migrated_project_keeps_legacy_open_response_in_sync(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    root = home / "legacy"
+    root.mkdir()
+    service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
+    legacy = await service.open(root)
+    await service.rename_project(legacy["project_id"], "Updated name")
+
+    assert (await service.open(root))["display_name"] == "Updated name"
+
+
+@pytest.mark.asyncio
 async def test_project_paths_names_links_and_missing_directories_are_rejected(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
