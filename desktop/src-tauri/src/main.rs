@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 mod lifecycle;
+mod chat;
 
 #[derive(Deserialize)]
 struct Handshake {
@@ -181,7 +182,7 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(connection)
-        .invoke_handler(tauri::generate_handler![distributions, probe,
+        .invoke_handler(tauri::generate_handler![chat::desktop_chat_status, distributions, probe,
             lifecycle::connect_service, lifecycle::connection_status, lifecycle::desktop_request,
             lifecycle::connection_facts, lifecycle::close_service, lifecycle::exit_desktop])
         .on_window_event(|window, event| {
