@@ -22,10 +22,16 @@ fn main() {
             chat::desktop_chat_configure,
             chat::desktop_chat_delete_credential,
             chat::desktop_chat_create_session,
+            chat::desktop_chat_sessions,
+            chat::desktop_chat_rename_session,
+            chat::desktop_chat_delete_session,
             chat::desktop_chat_history,
+            chat::desktop_chat_history_page,
             chat::desktop_chat_latest_session,
             chat::desktop_chat_send,
-            chat::desktop_chat_cancel
+            chat::desktop_chat_cancel,
+            chat::desktop_chat_test_connection,
+            chat::desktop_chat_cancel_connection_test
         ])
         .build(tauri::generate_context!())
         .expect("failed to build chat application");

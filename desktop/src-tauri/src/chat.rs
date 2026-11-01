@@ -45,6 +45,13 @@ pub struct ChatMessage {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendInput {
@@ -78,11 +85,38 @@ impl ChatStore {
     }
 
     pub fn create_session(&self, title: &str) -> Result<String, String> {
+        let title = normalize_title(title)?;
         let id = uuid::Uuid::new_v4().to_string();
         self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
             .execute("INSERT INTO sessions(id,title,created_at) VALUES(?1,?2,?3)",
                 params![id, title, utc_now()]).map_err(|_| "无法创建对话".to_string())?;
         Ok(id)
+    }
+
+    pub fn sessions(&self) -> Result<Vec<ChatSession>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let mut statement = connection.prepare("SELECT id,title,created_at FROM sessions ORDER BY created_at DESC,id DESC")
+            .map_err(|_| "无法读取对话列表".to_string())?;
+        let rows = statement.query_map([], |row| Ok(ChatSession { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)? }))
+            .map_err(|_| "无法读取对话列表".to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取对话列表".to_string())
+    }
+
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let title = normalize_title(title)?;
+        let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("UPDATE sessions SET title=?1 WHERE id=?2", params![title, session_id])
+            .map_err(|_| "无法重命名对话".to_string())?;
+        if changed == 0 { return Err("对话不存在".into()); }
+        Ok(())
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("DELETE FROM sessions WHERE id=?1", [session_id])
+            .map_err(|_| "无法删除对话".to_string())?;
+        if changed == 0 { return Err("对话不存在".into()); }
+        Ok(())
     }
 
     pub fn append_message(&self, session_id: &str, role: &str, content: &str) -> Result<ChatMessage, String> {
@@ -97,11 +131,15 @@ impl ChatStore {
     }
 
     pub fn messages(&self, session_id: &str) -> Result<Vec<ChatMessage>, String> {
+        self.messages_page(session_id, 0, 500)
+    }
+
+    pub fn messages_page(&self, session_id: &str, offset: u32, limit: u32) -> Result<Vec<ChatMessage>, String> {
         let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
         let mut statement = connection.prepare(
-            "SELECT id,session_id,role,content,created_at FROM messages WHERE session_id=?1 ORDER BY rowid",
+            "SELECT id,session_id,role,content,created_at FROM messages WHERE session_id=?1 ORDER BY rowid LIMIT ?2 OFFSET ?3",
         ).map_err(|_| "无法读取消息".to_string())?;
-        let rows = statement.query_map([session_id], |row| Ok(ChatMessage {
+        let rows = statement.query_map(params![session_id, limit.clamp(1, 500), offset], |row| Ok(ChatMessage {
             id: row.get(0)?, session_id: row.get(1)?, role: row.get(2)?,
             content: row.get(3)?, created_at: row.get(4)?,
         })).map_err(|_| "无法读取消息".to_string())?;
@@ -112,6 +150,57 @@ impl ChatStore {
         self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
             .query_row("SELECT id FROM sessions ORDER BY created_at DESC,id DESC LIMIT 1", [], |row| row.get(0))
             .optional().map_err(|_| "无法恢复最近对话".to_string())
+    }
+}
+
+fn normalize_title(title: &str) -> Result<String, String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().any(char::is_control) || title.chars().count() > 120 {
+        return Err("对话标题无效".into());
+    }
+    Ok(title.to_string())
+}
+
+#[derive(Default)]
+struct SseParser { buffer: Vec<u8>, done: bool }
+
+impl SseParser {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
+        self.buffer.extend_from_slice(bytes);
+        let mut deltas = Vec::new();
+        while let Some((end, separator_len)) = frame_boundary(&self.buffer) {
+            let frame = self.buffer.drain(..end).collect::<Vec<_>>();
+            self.buffer.drain(..separator_len);
+            let frame = String::from_utf8(frame).map_err(|_| "Provider 返回无效 UTF-8".to_string())?;
+            let data = frame.lines().filter_map(|line| line.strip_prefix("data:").map(str::trim_start)).collect::<Vec<_>>().join("\n");
+            if data.is_empty() { continue; }
+            if data == "[DONE]" { self.done = true; continue; }
+            let value: serde_json::Value = serde_json::from_str(&data).map_err(|_| "Provider 返回无效流数据".to_string())?;
+            if let Some(content) = value.pointer("/choices/0/delta/content").and_then(serde_json::Value::as_str) {
+                if !content.is_empty() { deltas.push(content.to_string()); }
+            }
+            if let Some(error) = value.pointer("/error/message").and_then(serde_json::Value::as_str) {
+                let _ = error;
+                return Err("Provider 请求失败".into());
+            }
+        }
+        Ok(deltas)
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        if !self.done { return Err("Provider 流意外结束".into()); }
+        if !self.buffer.iter().all(u8::is_ascii_whitespace) { return Err("Provider 流意外结束".into()); }
+        Ok(())
+    }
+}
+
+fn frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer.windows(2).position(|w| w == b"\n\n").map(|at| (at, 2));
+    let crlf = buffer.windows(4).position(|w| w == b"\r\n\r\n").map(|at| (at, 4));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 
@@ -146,19 +235,67 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 }
 
 pub trait ChatProvider: Send + Sync {
-    fn complete(&self, prompt: &str, emit: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String>;
+    fn complete(&self, config: &ChatConfig, api_key: &str, messages: &[ChatMessage], cancel: &AtomicBool, emit: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String>;
 }
 
+#[cfg(test)]
 pub struct FakeProvider { chunks: Vec<String> }
 
+#[cfg(test)]
 impl FakeProvider {
     pub fn new(chunks: Vec<String>) -> Self { Self { chunks } }
 }
 
+#[cfg(test)]
 impl ChatProvider for FakeProvider {
-    fn complete(&self, _prompt: &str, emit: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String> {
+    fn complete(&self, _config: &ChatConfig, _api_key: &str, _messages: &[ChatMessage], cancel: &AtomicBool, emit: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String> {
         let mut answer = String::new();
-        for chunk in &self.chunks { emit(chunk)?; answer.push_str(chunk); }
+        for chunk in &self.chunks { if cancel.load(Ordering::Relaxed) { return Err("请求已取消".into()); } emit(chunk)?; answer.push_str(chunk); }
+        if answer.trim().is_empty() { return Err("模型返回空回复".into()); }
+        Ok(answer)
+    }
+}
+
+pub struct OpenAiChatProvider;
+
+impl ChatProvider for OpenAiChatProvider {
+    fn complete(&self, config: &ChatConfig, api_key: &str, messages: &[ChatMessage], cancel: &AtomicBool, emit: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<String, String> {
+        let endpoint = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": config.model,
+            "stream": true,
+            "messages": messages.iter().map(|m| serde_json::json!({"role":m.role,"content":m.content})).collect::<Vec<_>>()
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .map_err(|_| "无法初始化 Provider 请求".to_string())?;
+        let mut response = runtime.block_on(async {
+            let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(120)).build()
+                .map_err(|_| "无法初始化 Provider 请求".to_string())?;
+            tokio::select! {
+                _ = wait_cancelled(cancel) => Err("请求已取消".to_string()),
+                result = client.post(endpoint).bearer_auth(api_key).json(&body).send() =>
+                    result.map_err(|_| "Provider 网络请求失败或超时".to_string())
+            }
+        })?;
+        if !response.status().is_success() { return Err(format!("Provider 请求失败（HTTP {}）", response.status().as_u16())); }
+        let mut parser = SseParser::default();
+        let mut answer = String::new();
+        loop {
+            if cancel.load(Ordering::Relaxed) { return Err("请求已取消".into()); }
+            let chunk = runtime.block_on(async {
+                tokio::select! {
+                    _ = wait_cancelled(cancel) => Err("请求已取消".to_string()),
+                    result = response.chunk() => result.map_err(|_| "Provider 流读取失败".to_string())
+                }
+            })?;
+            let Some(chunk) = chunk else { break; };
+            for delta in parser.push(&chunk)? {
+                emit(&delta)?;
+                answer.push_str(&delta);
+            }
+        }
+        parser.finish()?;
         if answer.trim().is_empty() { return Err("模型返回空回复".into()); }
         Ok(answer)
     }
@@ -194,6 +331,8 @@ pub struct ChatRuntime {
     pub config_path: PathBuf,
     pub credentials: Arc<dyn CredentialStore>,
     pub cancellation: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    pub active_chat_session: Arc<Mutex<Option<String>>>,
+    pub connection_test_cancellation: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     pub provider: Arc<dyn ChatProvider>,
 }
 
@@ -210,8 +349,9 @@ pub fn initialize(app: &tauri::AppHandle) -> Result<ChatRuntime, String> {
         Some(ChatConfig::new(saved.base_url, saved.model)?)
     } else { None };
     Ok(ChatRuntime { store: Arc::new(store), config: Arc::new(Mutex::new(config)), config_path,
-        credentials, provider: Arc::new(FakeProvider::new(vec!["Fake reply".into()])),
-        cancellation: Arc::new(Mutex::new(None)) })
+        credentials, provider: Arc::new(OpenAiChatProvider),
+        cancellation: Arc::new(Mutex::new(None)), active_chat_session: Arc::new(Mutex::new(None)),
+        connection_test_cancellation: Arc::new(Mutex::new(None)) })
 }
 
 #[derive(Serialize)]
@@ -246,8 +386,33 @@ pub fn desktop_chat_create_session(runtime: tauri::State<'_, ChatRuntime>) -> Re
 }
 
 #[tauri::command]
+pub fn desktop_chat_sessions(runtime: tauri::State<'_, ChatRuntime>) -> Result<Vec<ChatSession>, String> {
+    runtime.store.sessions()
+}
+
+#[tauri::command]
+pub fn desktop_chat_rename_session(runtime: tauri::State<'_, ChatRuntime>, session_id: String, title: String) -> Result<(), String> {
+    runtime.store.rename_session(&session_id, &title)
+}
+
+#[tauri::command]
+pub fn desktop_chat_delete_session(runtime: tauri::State<'_, ChatRuntime>, session_id: String) -> Result<(), String> {
+    if runtime.active_chat_session.lock().map_err(|_| "聊天状态不可用".to_string())?.as_deref() == Some(session_id.as_str()) {
+        if let Some(cancel) = runtime.cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    runtime.store.delete_session(&session_id)
+}
+
+#[tauri::command]
 pub fn desktop_chat_history(runtime: tauri::State<'_, ChatRuntime>, session_id: String) -> Result<Vec<ChatMessage>, String> {
     runtime.store.messages(&session_id)
+}
+
+#[tauri::command]
+pub fn desktop_chat_history_page(runtime: tauri::State<'_, ChatRuntime>, session_id: String, offset: u32, limit: u32) -> Result<Vec<ChatMessage>, String> {
+    runtime.store.messages_page(&session_id, offset, limit)
 }
 
 #[tauri::command]
@@ -263,15 +428,17 @@ pub async fn desktop_chat_send(app: tauri::AppHandle, runtime: tauri::State<'_, 
     let key = runtime.credentials.get()?.filter(|v| !v.is_empty()).ok_or("请先配置 API Key")?;
     runtime.store.append_message(&session_id, "user", &content)?;
     let cancel = Arc::new(AtomicBool::new(false));
-    *runtime.cancellation.lock().map_err(|_| "聊天状态不可用".to_string())? = Some(cancel.clone());
+    if let Some(previous) = runtime.cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.replace(cancel.clone()) {
+        previous.store(true, Ordering::Relaxed);
+    }
+    *runtime.active_chat_session.lock().map_err(|_| "聊天状态不可用".to_string())? = Some(session_id.clone());
     let provider = runtime.provider.clone();
-    let prompt = format!("{}\n{}", config.model, content);
-    drop(key);
+    let history = runtime.store.messages(&session_id)?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let task_cancel = cancel.clone();
     let worker = std::thread::spawn(move || {
         let mut emit = |delta: &str| { if task_cancel.load(Ordering::Relaxed) { return Err("cancelled".into()); } tx.send(delta.to_string()).map_err(|_| "接收方已关闭".to_string()) };
-        provider.complete(&prompt, &mut emit)
+        provider.complete(&config, &key, &history, &task_cancel, &mut emit)
     });
     let mut answer = String::new();
     loop {
@@ -286,13 +453,44 @@ pub async fn desktop_chat_send(app: tauri::AppHandle, runtime: tauri::State<'_, 
         }
     }
     let result = worker.join().map_err(|_| "聊天 Provider 异常".to_string())?;
-    if cancel.load(Ordering::Relaxed) { let _ = app.emit("desktop_chat_cancelled", serde_json::json!({"session_id":session_id})); return Ok(()); }
+    if cancel.load(Ordering::Relaxed) {
+        clear_cancellation(&runtime, &cancel);
+        let _ = app.emit("desktop_chat_cancelled", serde_json::json!({"session_id":session_id}));
+        return Ok(());
+    }
     if let Err(error) = result {
+        clear_cancellation(&runtime, &cancel);
         let _ = app.emit("desktop_chat_failed", serde_json::json!({"session_id":session_id,"error":error}));
         return Err(error);
     }
     runtime.store.append_message(&session_id, "assistant", &answer)?;
     let _ = app.emit("desktop_chat_completed", serde_json::json!({"session_id":session_id}));
+    clear_cancellation(&runtime, &cancel);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn desktop_chat_test_connection(runtime: tauri::State<'_, ChatRuntime>, input: ChatConfigInput) -> Result<(), String> {
+    let config = ChatConfig::new(input.base_url, input.model)?;
+    let key = input.api_key.filter(|value| !value.is_empty())
+        .or(runtime.credentials.get()?).filter(|value| !value.is_empty()).ok_or("请先配置 API Key")?;
+    let endpoint = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20)).build()
+        .map_err(|_| "无法初始化 Provider 请求".to_string())?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(previous) = runtime.connection_test_cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.replace(cancel.clone()) {
+        previous.store(true, Ordering::Relaxed);
+    }
+    let result = tokio::select! {
+        _ = wait_cancelled(&cancel) => Err("连接测试已取消".to_string()),
+        response = client.post(endpoint).bearer_auth(&key)
+            .json(&serde_json::json!({"model":config.model,"stream":false,"messages":[{"role":"user","content":"Reply with OK."}]})).send() =>
+                response.map_err(|_| "Provider 连接失败或超时".to_string())
+    };
+    clear_connection_test_cancellation(&runtime, &cancel);
+    let result = result?;
+        if !result.status().is_success() { return Err(format!("Provider 连接失败（HTTP {}）", result.status().as_u16())); }
     Ok(())
 }
 
@@ -300,6 +498,24 @@ pub async fn desktop_chat_send(app: tauri::AppHandle, runtime: tauri::State<'_, 
 pub fn desktop_chat_cancel(runtime: tauri::State<'_, ChatRuntime>) -> Result<(), String> {
     if let Some(cancel) = runtime.cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.take() { cancel.store(true, Ordering::Relaxed); }
     Ok(())
+}
+
+#[tauri::command]
+pub fn desktop_chat_cancel_connection_test(runtime: tauri::State<'_, ChatRuntime>) -> Result<(), String> {
+    if let Some(cancel) = runtime.connection_test_cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.take() {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+fn clear_connection_test_cancellation(runtime: &ChatRuntime, request: &Arc<AtomicBool>) {
+    if let Ok(mut active) = runtime.connection_test_cancellation.lock() {
+        if active.as_ref().is_some_and(|current| Arc::ptr_eq(current, request)) { *active = None; }
+    }
+}
+
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
 }
 
 #[cfg(test)]
@@ -334,25 +550,94 @@ mod tests {
     }
 
     #[test]
+    fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
+        let path = std::env::temp_dir().join(format!("desktop-chat-crud-{}.db", uuid::Uuid::new_v4()));
+        let store = ChatStore::open(&path).unwrap();
+        let first = store.create_session("First").unwrap();
+        let second = store.create_session("Second").unwrap();
+        store.append_message(&first, "user", "kept private").unwrap();
+        assert_eq!(store.sessions().unwrap().len(), 2);
+        store.rename_session(&first, "Renamed").unwrap();
+        assert_eq!(store.sessions().unwrap().iter().find(|s| s.id == first).unwrap().title, "Renamed");
+        store.delete_session(&first).unwrap();
+        assert!(store.messages(&first).unwrap().is_empty());
+        assert_eq!(store.sessions().unwrap().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [second.as_str()]);
+        assert!(store.rename_session(&first, "missing").is_err());
+        assert!(store.create_session("bad\ntitle").is_err());
+        assert!(store.create_session(&"x".repeat(121)).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn message_pages_are_ordered_and_bounded() {
+        let path = std::env::temp_dir().join(format!("desktop-chat-pages-{}.db", uuid::Uuid::new_v4()));
+        let store = ChatStore::open(&path).unwrap();
+        let id = store.create_session("Pages").unwrap();
+        for index in 0..4 { store.append_message(&id, "user", &index.to_string()).unwrap(); }
+        let page = store.messages_page(&id, 1, 2).unwrap();
+        assert_eq!(page.iter().map(|message| message.content.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        assert_eq!(store.messages_page(&id, 0, 900).unwrap().len(), 4);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sse_parser_preserves_utf8_and_delta_boundaries_and_rejects_incomplete_stream() {
+        let input = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe4\xbd\xa0\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        let mut parser = SseParser::default();
+        let mut result = Vec::new();
+        for part in input.chunks(7) { result.extend(parser.push(part).unwrap()); }
+        assert_eq!(result, ["你", "hello"]);
+        assert!(parser.finish().is_ok());
+        let mut broken = SseParser::default();
+        assert!(broken.push(b"data: {bad}\n\n").is_err());
+    }
+
+    #[test]
+    fn openai_provider_sends_only_given_session_history_and_streams_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = vec![0; 8192];
+            let count = socket.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer test-key"));
+            assert!(request.contains("current session"));
+            assert!(!request.contains("other session"));
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n";
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let config = ChatConfig::new(format!("http://{address}/v1"), "test-model".into()).unwrap();
+        let history = vec![ChatMessage { id: "1".into(), session_id: "s1".into(), role: "user".into(), content: "current session".into(), created_at: utc_now() }];
+        let mut deltas = Vec::new();
+        let answer = OpenAiChatProvider.complete(&config, "test-key", &history, &AtomicBool::new(false), &mut |delta| { deltas.push(delta.to_string()); Ok(()) }).unwrap();
+        server.join().unwrap();
+        assert_eq!(answer, "Hello");
+        assert_eq!(deltas, ["Hello"]);
+    }
+
+    #[test]
     fn fake_provider_emits_deltas_and_rejects_empty_success() {
         let provider = FakeProvider::new(vec!["Hello".into(), " world".into()]);
         let mut deltas = Vec::new();
-        let answer = provider.complete("test", &mut |delta| { deltas.push(delta.to_string()); Ok(()) }).unwrap();
+        let answer = provider.complete(&ChatConfig::new("https://example.test/v1".into(), "m".into()).unwrap(), "key", &[], &AtomicBool::new(false), &mut |delta| { deltas.push(delta.to_string()); Ok(()) }).unwrap();
         assert_eq!(deltas, ["Hello", " world"]);
         assert_eq!(answer, "Hello world");
-        assert!(FakeProvider::new(Vec::new()).complete("test", &mut |_| Ok(())).is_err());
+        assert!(FakeProvider::new(Vec::new()).complete(&ChatConfig::new("https://example.test/v1".into(), "m".into()).unwrap(), "key", &[], &AtomicBool::new(false), &mut |_| Ok(())).is_err());
     }
 
     #[test]
     fn fake_provider_stops_when_consumer_cancels_and_reports_provider_failure() {
         let mut count = 0;
-        let result = FakeProvider::new(vec!["one".into(), "two".into()]).complete("test", &mut |_| {
+        let result = FakeProvider::new(vec!["one".into(), "two".into()]).complete(&ChatConfig::new("https://example.test/v1".into(), "m".into()).unwrap(), "key", &[], &AtomicBool::new(false), &mut |_| {
             count += 1;
             Err("cancelled".into())
         });
         assert_eq!(result.unwrap_err(), "cancelled");
         assert_eq!(count, 1);
-        assert!(FakeProvider::new(Vec::new()).complete("test", &mut |_| Ok(())).is_err());
+        assert!(FakeProvider::new(Vec::new()).complete(&ChatConfig::new("https://example.test/v1".into(), "m".into()).unwrap(), "key", &[], &AtomicBool::new(false), &mut |_| Ok(())).is_err());
     }
 
     #[test]
@@ -368,5 +653,14 @@ mod tests {
         assert!(!encoded.contains("secret-two"));
         store.delete().unwrap();
         assert_eq!(store.get().unwrap(), None);
+    }
+}
+
+fn clear_cancellation(runtime: &ChatRuntime, request: &Arc<AtomicBool>) {
+    if let Ok(mut active) = runtime.cancellation.lock() {
+        if active.as_ref().is_some_and(|current| Arc::ptr_eq(current, request)) {
+            *active = None;
+            if let Ok(mut session) = runtime.active_chat_session.lock() { *session = None; }
+        }
     }
 }

@@ -91,6 +91,8 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .desktop-chat-sidebar header, .desktop-chat-settings header, .desktop-chat-settings footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .desktop-chat-sidebar h1 { margin: 0; font-size: 18px; }
 .desktop-chat-session { text-align: left; }
+.desktop-chat-session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px; align-items: center; }
+.desktop-chat-session-row .desktop-chat-session { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-chat-session.active { border-color: #227a66; background: #e8f5f0; }
 .desktop-chat-main { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; min-width: 0; max-width: 900px; width: 100%; margin: 0 auto; padding: 24px; }
 .desktop-chat-messages { display: grid; align-content: start; gap: 16px; padding-block: 16px 28px; }

@@ -1,5 +1,11 @@
 # Windows 桌面工程
 
+## 普通聊天 MVP（独立入口）
+
+普通聊天版使用 `desktop-chat` Cargo feature 和 `tauri.chat.conf.json`，与下方既有 WSL 桌面链分开构建。开发启动：在仓库根目录运行 `cd desktop && pnpm dev:chat`；chat-only 构建使用 `pnpm build:chat`。聊天数据位于系统应用数据目录下的 `TomatoAgent/desktop-chat/chat.sqlite3`，模型端点/名称保存在同目录 `model.json`，API Key 只通过 Windows Credential Manager 保存。
+
+聊天版支持多会话创建、切换、重命名、确认删除，当前会话历史分页/恢复，OpenAI Chat Completions 兼容 SSE 流式回复、取消和显式连接测试。请求仅携带所选会话消息，不自动重试；失败或取消时不把部分回复保存成完整 assistant 消息。Fake Provider 只用于原生单元测试。阶段 2 的 Linux 工程测试不等于真实 Provider 验收或 Windows 安装验收；后两者仍按 MVP 计划后续阶段完成。
+
 本工程已完成 Windows 桌面连接/生命周期的既有实现；桌面项目多目录计划阶段二的原生目录选择与路径桥接已实现，Windows 原生窗口人工验收待完成。共享前端在 Tauri 中提供 WSL 连接、原生认证请求桥、会话界面和受控退出；Web 模式保留原入口。项目导航、自动标题及完整产品交付尚未完成。连接、凭据、进程所有权及验收限制见 [桌面连接与生命周期](../docs/Windows桌面连接与生命周期.md)。
 
 ## 已声明依赖与路径

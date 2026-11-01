@@ -46,3 +46,13 @@ test('chat-only Tauri build selects isolated commands and keeps legacy config un
   const legacyConfig = await readFile(new URL('../../desktop/src-tauri/tauri.conf.json', import.meta.url), 'utf8');
   assert.doesNotMatch(legacyConfig, /desktop-chat/);
 });
+
+test('desktop chat exposes session management and explicit real-provider connection test', async () => {
+  const component = await readFile(chatApp, 'utf8');
+  assert.match(component, /desktop_chat_sessions/);
+  assert.match(component, /desktop_chat_rename_session/);
+  assert.match(component, /desktop_chat_delete_session/);
+  assert.match(component, /window\.confirm/);
+  assert.match(component, /desktop_chat_test_connection/);
+  assert.doesNotMatch(component, /Fake Provider/);
+});
