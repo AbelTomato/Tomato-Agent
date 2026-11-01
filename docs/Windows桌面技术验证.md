@@ -65,3 +65,10 @@ NSIS `3.13` 官方工具包已下载、校验并解压，但 `https://github.com
 | 安装后应用（实际启动） | `C:\Users\AbelTomato\AppData\Local\TomatoAgent\task1-installed\tomato-agent-desktop.exe` | `8d78daeb862b103cadfef9e45149c039c1fa479ea3b008ff58a9e56b444fe1c7` |
 
 产物未签名，不承诺消除SmartScreen；安装包与打包缓存exe/安装后exe的指纹分别记录，不假设打包器补丁前后字节相同。版本、架构和环境见前文；MSVC自动发现，未宣称已分别验证所有已安装编译器版本。验收为Windows实机自动化，未要求用户完成额外人工观察；完整产品人工矩阵属于后续切片。此探针仅验证技术可行性，不初始化业务库或调用Provider，完整业务认证及生命周期仍由任务2负责。
+
+## 2026-11-01 Windows 原生聊天版构建与安装验收
+
+- 聊天版前端以 Vite `desktop-chat` mode 构建；Windows x64 Release 使用 `desktop-chat` 与 `tauri/custom-protocol` features 编译。因 Windows 子进程不能从 WSL UNC 工作目录运行前端命令，先在 WSL 生成 `frontend/dist`，再运行 Windows Cargo 与 Tauri NSIS bundle。
+- NSIS 安装器：`C:\Users\AbelTomato\AppData\Local\TomatoAgent\task1-target\release\bundle\nsis\Tomato Agent_0.1.0_x64-setup.exe`，2,713,237 字节，SHA-256 `b839b8dc17b3674c9ca0da2049f9292cadb6a7a9114cb1cadc289b767d18c4d7`。
+- 配套 Release exe：`C:\Users\AbelTomato\AppData\Local\TomatoAgent\task1-target\release\tomato-agent-desktop.exe`，10,530,816 字节，SHA-256 `8139372ebba7a98495f24ea8508818475419f1378187d642cf956819cff8c6ef`。
+- `frontend/tests/desktop-chat-entry.test.mjs` 3/3 通过；用户确认安装后验收通过。安装目录、实机截图及独立 UI 自动化记录未提供，本条不补记这些证据。该验收结论仅针对本聊天版安装包，不覆盖 Provider 真实请求验收。

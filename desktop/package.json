@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "tauri": "tauri",
+    "tauri:chat": "tauri --config src-tauri/tauri.chat.conf.json",
+    "dev:chat": "tauri dev --config src-tauri/tauri.chat.conf.json --features desktop-chat",
+    "build:chat": "tauri build --config src-tauri/tauri.chat.conf.json --features desktop-chat",
     "build": "tauri build",
     "test:native": "cargo test --manifest-path src-tauri/Cargo.toml --locked"
   },

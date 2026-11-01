@@ -6,7 +6,8 @@ import { DesktopConnection } from './components/DesktopConnection';
 import { DesktopChatApp } from './desktop-chat/DesktopChatApp';
 import './style.css';
 
-const desktopChatRoute = new URLSearchParams(window.location.search).get('desktop-chat') === '1';
+const desktopChatRoute = import.meta.env.MODE === 'desktop-chat'
+  || new URLSearchParams(window.location.search).get('desktop-chat') === '1';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

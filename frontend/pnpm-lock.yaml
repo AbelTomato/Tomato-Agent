@@ -11,6 +11,9 @@ importers:
       '@tailwindcss/vite':
         specifier: latest
         version: 4.3.3(vite@8.2.2(jiti@2.7.0))
+      '@tauri-apps/api':
+        specifier: ^2.8.0
+        version: 2.12.4
       lucide-react:
         specifier: latest
         version: 1.40.0(react@19.2.8)
@@ -258,6 +261,9 @@ packages:
     resolution: {integrity: sha512-yYU8cogLeSh/ms2jh8Fj7jaba/EWa7Ja6GoUqYZaraEuCI5YS6ms6ObZgjjedm+jm6XZjdNRWBpPP6Z86oOxcw==}
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
+
+  '@tauri-apps/api@2.12.4':
+    resolution: {integrity: sha512-pVmfis+4zT8H0Qhp3xPZx9Ju7kpzvA6rr/PSJPyuwfvucTQ8sVt61NYU9KMkK703UFlYadFmjKA4HhybOtN0gg==}
 
   '@types/react-dom@19.2.7':
     resolution: {integrity: sha512-I8bPpDLcHBv1qiIiXDCy71Rt8eQDKJP0sMSWJphDdAcdqiJ1sGpZamavoEIRZmYzjia9LuEb2HlYdDpmoENpvQ==}
@@ -827,6 +833,8 @@ snapshots:
       '@tailwindcss/oxide': 4.3.3
       tailwindcss: 4.3.3
       vite: 8.2.2(jiti@2.7.0)
+
+  '@tauri-apps/api@2.12.4': {}
 
   '@types/react-dom@19.2.7(@types/react@19.2.18)':
     dependencies:
