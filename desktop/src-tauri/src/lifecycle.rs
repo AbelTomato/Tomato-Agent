@@ -1,4 +1,4 @@
-use crate::{check_response, distributions, startup_args, validate_handshake, Handshake};
+use super::{check_response, distributions, startup_args, validate_handshake, Handshake};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -231,7 +231,7 @@ pub fn exit_desktop(app: tauri::AppHandle, state: tauri::State<'_, SharedConnect
 }
 
 pub fn acceptance_report(distribution: &str, root: &str, data: &str) -> Result<Value, String> {
-    crate::validate_path(data)?;
+    super::validate_path(data)?;
     let mut first = Connection::default();
     first.acceptance_root = Some(data.into());
     first.connect(distribution, root)?;

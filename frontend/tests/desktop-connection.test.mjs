@@ -27,7 +27,58 @@ function nodes(tree, type) {
 }
 const button = (tree, label) => nodes(tree, 'button').find(node => node.props.children === label);
 
-test('explicit connect, failure without retry, reconnect and active-task close confirmation', async () => {
+test('desktop launch is idle; preferences save without connecting and workspace entry connects on demand', async () => {
+  slots = [];
+  const calls = [];
+  globalThis.window = {
+    setInterval: () => 1, clearInterval() {},
+    __TAURI__: {
+      event: { async listen() { return () => {}; } },
+      core: { async invoke(command, args) {
+        calls.push([command, args]);
+        if (command === 'environment_preferences') return { distribution: 'Ubuntu', backend_path: '/backend' };
+        if (command === 'pick_windows_directory') return null;
+        if (command === 'bridge_windows_directory') return '/mnt/c/Users/Test/Project';
+        if (command === 'save_environment_preferences') return { distribution: args.distribution, backend_path: args.backendPath };
+        if (command === 'distributions') return ['Ubuntu'];
+        if (command === 'connect_service') return { state: 'ready', summary: '已连接 Ubuntu', detail: '' };
+        if (command === 'desktop_request') return { status: 200, body: [] };
+      } },
+    },
+  };
+  let tree = render();
+  effects.forEach(effect => effect());
+  await Promise.resolve(); await Promise.resolve();
+  tree = render();
+  assert.ok(button(tree, '打开工作区'));
+  assert.equal(calls.some(([name]) => ['distributions', 'connect_service', 'desktop_request'].includes(name)), false);
+  button(tree, '设置').props.onClick();
+  tree = render();
+  assert.ok(button(tree, '刷新 WSL 环境'));
+  assert.equal(calls.some(([name]) => name === 'distributions'), false);
+  await button(tree, '刷新 WSL 环境').props.onClick();
+  tree = render();
+  assert.equal(calls.filter(([name]) => name === 'connect_service').length, 0);
+  await button(tree, '选择并检查 Windows 文件夹').props.onClick();
+  assert.equal(calls.some(([name]) => name === 'pick_windows_directory'), true);
+  assert.equal(calls.some(([name]) => name === 'bridge_windows_directory'), false);
+  tree = render();
+  await button(tree, '保存环境设置').props.onClick();
+  assert.equal(calls.filter(([name]) => name === 'save_environment_preferences').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'connect_service').length, 0);
+  tree = render();
+  button(tree, '打开工作区').props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(([name]) => name === 'connect_service').length, 1);
+  assert.equal(calls.filter(([name]) => name === 'desktop_request').length, 0);
+  tree = render();
+  const walk = value => Array.isArray(value) ? value.flatMap(walk) : value?.type ? [value, ...walk(value.props?.children)] : [];
+  assert.equal(walk(tree).some(node => node.type.name === 'ConversationShell'), true);
+  assert.equal(button(tree, '关闭工作区') !== undefined, true);
+  delete globalThis.window;
+});
+
+test('explicit connect failure does not retry and active-task close confirmation remains', async () => {
   slots = [];
   const calls = [];
   let closeRequested;
@@ -38,6 +89,7 @@ test('explicit connect, failure without retry, reconnect and active-task close c
       event: { async listen(_name, callback) { closeRequested = callback; return () => {}; } },
       core: { async invoke(command, args) {
         calls.push([command, args]);
+        if (command === 'environment_preferences') return { distribution: 'Ubuntu', backend_path: '/backend' };
         if (command === 'distributions') return ['Ubuntu'];
         if (command === 'connect_service') {
           if (fail) throw new Error('启动超时');
@@ -48,19 +100,18 @@ test('explicit connect, failure without retry, reconnect and active-task close c
     },
   };
   let tree = render();
+  effects[0]();
+  await Promise.resolve(); await Promise.resolve();
+  tree = render();
   const cleanup = effects[0]();
-  await button(tree, '发现 WSL 发行版').props.onClick();
+  await button(tree, '打开工作区').props.onClick();
   tree = render();
-  nodes(tree, 'input')[0].props.onChange({ target: { value: '/backend' } });
-  tree = render();
-  await button(tree, '连接 / 重连助手服务').props.onClick();
-  tree = render();
-  assert.match(nodes(tree, 'p').map(node => node.props.children).join(' '), /连接失败/);
+  assert.match(nodes(tree, 'summary').map(node => node.props.children).join(' '), /无法连接执行环境/);
   assert.equal(calls.filter(([name]) => name === 'connect_service').length, 1);
   fail = false;
-  await button(tree, '连接 / 重连助手服务').props.onClick();
+  await button(tree, '重试连接').props.onClick();
   tree = render();
-  assert.ok(button(tree, '断开连接'));
+  assert.ok(button(tree, '关闭工作区'));
   closeRequested();
   await Promise.resolve(); await Promise.resolve();
   tree = render();
