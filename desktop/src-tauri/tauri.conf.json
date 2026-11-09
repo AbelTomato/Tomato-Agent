@@ -4,14 +4,24 @@
   "version": "0.1.0",
   "identifier": "dev.tomato.agent",
   "build": {
-    "frontendDist": "../../frontend/dist"
+    "beforeDevCommand": "pnpm --dir ../ui dev -- --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "pnpm --dir ../ui build",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "Tomato Agent — Windows 技术验证", "width": 1100, "height": 780 }],
+    "windows": [{ "label": "main", "title": "Tomato Agent", "width": 1100, "height": 780 }],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
-  "bundle": { "active": true, "targets": ["nsis"] }
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../../backend/dist/tomato-agent-engine.exe": "engine/tomato-agent-engine.exe",
+      "../../docs": "docs/"
+    }
+  }
 }

@@ -1,19 +1,19 @@
 # 分层验证与 CI 说明
 
-仓库统一入口为 `python3 scripts/verify.py`，需在 Linux/WSL 环境运行。后端固定使用 `backend/.venv/bin/python`；前端使用 PATH 中的 Linux Node 与 pnpm。前端版本以 `frontend/package.json` 的 `packageManager`（pnpm 10.34.5）为准。
+仓库统一入口为 `python3 scripts/verify.py`，需在 Linux/WSL 环境运行。后端固定使用 `backend/.venv/bin/python`；桌面 UI 使用 PATH 中的 Linux Node 与 pnpm，源代码和 `package.json` 位于 `desktop/ui`。
 
 | 层级 | 命令示例 | 结论范围 |
 | --- | --- | --- |
 | 快速反馈 | `python3 scripts/verify.py quick --static --backend-test tests/test_assistant_api.py` | Python 语法、TypeScript/Vite 构建及所选测试；尚无专门格式检查器 |
-| 模块回归 | `python3 scripts/verify.py module assistant execution rag writing frontend --timeout 600` | 注册模块测试映射；不等同于全仓测试 |
-| 集成验证 | `python3 scripts/verify.py integration --timeout 600` | 真实 SQLite、Worker 生命周期/恢复、ASGI API 与 Node 前端测试；不等同于真实浏览器端到端 |
-| 外部验收 | `python3 scripts/verify.py external docker --confirm-real-dependencies` | 仅被显式选择的 Docker、OpenShell 或 Provider 环境 |
+| 模块回归 | `python3 scripts/verify.py module assistant execution rag writing ui --timeout 600` | 注册模块测试映射；不等同于全仓测试 |
+| 集成验证 | `python3 scripts/verify.py integration --timeout 600` | 真实 SQLite、Worker 生命周期/恢复、ASGI API 与桌面 UI 测试；不等同于真实 Windows 窗口验收 |
+| 外部验收 | `python3 scripts/verify.py external docker --confirm-real-dependencies` | 仅被显式选择的 Docker 或 OpenShell 环境 |
 
 每次运行在 `verification-artifacts/<run-id>/` 写步骤日志与 `result.json`，记录代码 commit/dirty、命令、开始/结束时间、状态、fake/real 环境及工件路径。当前 `skipped` 仅记录入口主动跳过项，pytest 内部 skip 需查看日志，不能据退出码推断全部场景执行。常规集成的 Provider 为 fake，SQLite 为真实文件；集成 pytest 临时数据位于该次工件目录。RAG 测试内独立快照仍按仓库规则写入 `backend/data/rag/`。
 
 ## GitHub Actions
 
-`.github/workflows/verification.yml` 在 push 和 pull request 时触发，使用 Ubuntu runner、Python 3.12、Node 22 和 pnpm 10.34.5，创建 `backend/.venv` 并安装依赖，运行入口单测、模块回归与集成门禁，最后上传验证工件。模块中的前端步骤包括 TypeScript/Vite 构建。CI 不读取本机 `.env`、本机虚拟环境或 Windows PATH；需要网络访问依赖仓库。后端依赖当前通过 pyproject 范围安装，并非锁定安装。
+`.github/workflows/verification.yml` 在 push 和 pull request 时触发，使用 Ubuntu runner、Python 3.12、Node 22 和 pnpm 10.34.5，创建 `backend/.venv` 并安装依赖，运行入口单测、模块回归与集成门禁，最后上传验证工件。桌面 UI 步骤包括 TypeScript/Vite 构建。CI 不读取本机 `.env`、本机虚拟环境或 Windows PATH；需要网络访问依赖仓库。后端依赖当前通过 pyproject 范围安装，并非锁定安装。
 
 工作流文件提交并 push 后，进入 GitHub 仓库 Actions 页面查看 Verification。首次远端运行前只能称“工作流已配置”，不能称“远端 CI 已通过”。若失败，查看对应步骤与上传的验证日志。当前未配置 `workflow_dispatch`，手动首次触发可通过 push；本地 commit 本身不会触发 Actions。仓库分支保护是否强制该检查，需要另行在 GitHub 设置。
 

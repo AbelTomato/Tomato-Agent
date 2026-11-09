@@ -1,8 +1,8 @@
-import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from app.filesystem_identity import directory_identity, identity_matches
 from app.projects.repository import ProjectRepository
 from app.workspaces.service import WorkspacePathError, WorkspaceService
 
@@ -34,10 +34,13 @@ class ProjectService:
         await self.repository.init()
 
     def _trusted_directory(self, path: Path) -> Path:
+        def is_link(item: Path) -> bool:
+            return item.is_symlink() or (hasattr(item, "is_junction") and item.is_junction())
+
         path = Path(path)
         if not path.is_absolute():
             raise ProjectPathError("Project path must be absolute")
-        if any(part.is_symlink() for part in (path, *path.parents)):
+        if any(is_link(part) for part in (path, *path.parents)):
             raise ProjectPathError("Symbolic links are not allowed")
         try:
             resolved = path.resolve(strict=True)
@@ -45,16 +48,18 @@ class ProjectService:
             raise ProjectPathError("Project directory is unavailable") from exc
         if not resolved.is_dir() or not any(resolved.is_relative_to(root.resolve()) for root in self.allowed_roots):
             raise ProjectPathError("Project path is outside approved roots")
-        if any(root.is_symlink() for allowed in self.allowed_roots for root in (allowed, *allowed.parents)):
+        if any(is_link(root) for allowed in self.allowed_roots for root in (allowed, *allowed.parents)):
             raise ProjectPathError("Approved root contains a symbolic link")
         return resolved
 
     @staticmethod
     def _identity(path: Path):
-        info = path.stat()
-        if not stat.S_ISDIR(info.st_mode):
-            raise ProjectPathError("Project path is not a directory")
-        return info.st_dev, info.st_ino
+        try:
+            return directory_identity(path)
+        except ValueError as exc:
+            raise ProjectPathError("Project path is not a directory") from exc
+        except OSError as exc:
+            raise ProjectPathError("Project path is unavailable") from exc
 
     async def browse(self, path: Path, *, include_hidden: bool = False):
         await self._ensure_initialized()
@@ -66,7 +71,8 @@ class ProjectService:
                     break
                 if not include_hidden and child.name.startswith("."):
                     continue
-                if child.is_symlink() or not child.is_dir():
+                if (child.is_symlink() or
+                        (hasattr(child, "is_junction") and child.is_junction()) or not child.is_dir()):
                     continue
                 entries.append({"name": child.name, "path": str(child), "available": True})
         except PermissionError:
@@ -76,7 +82,8 @@ class ProjectService:
     async def roots(self):
         await self._ensure_initialized()
         return [{"name": root.name or str(root), "path": str(root), "available": True}
-                for root in self.allowed_roots if root.is_dir() and not root.is_symlink()]
+                for root in self.allowed_roots if root.is_dir() and not root.is_symlink()
+                and not (hasattr(root, "is_junction") and root.is_junction())]
 
     async def open(self, path: Path):
         await self._ensure_initialized()
@@ -84,7 +91,7 @@ class ProjectService:
         device, inode = self._identity(root)
         existing = await self.repository.get_for_path(self.environment_id, self.service_instance_id, str(root))
         if existing:
-            if (existing["device"], existing["inode"]) != (device, inode):
+            if not identity_matches(root, existing["device"], existing["inode"]):
                 raise ProjectPathError("Project directory identity changed")
             return existing
         return await self._register(root, device, inode)
@@ -125,7 +132,7 @@ class ProjectService:
         existing = await self.repository.list_directories(project_id)
         for directory in existing:
             if directory["root_path"] == str(root):
-                if (directory["device"], directory["inode"]) != (device, inode):
+                if not identity_matches(root, directory["device"], directory["inode"]):
                     raise ProjectPathError("Project directory identity changed")
                 return directory
         workspace_id = self.workspace_service.repository.find_original(root)
@@ -153,7 +160,7 @@ class ProjectService:
         for directory in directories:
             try:
                 root = self._trusted_directory(Path(directory["root_path"]))
-                directory["available"] = self._identity(root) == (directory["device"], directory["inode"])
+                directory["available"] = identity_matches(root, directory["device"], directory["inode"])
             except (OSError, ValueError, WorkspacePathError):
                 directory["available"] = False
         return directories
@@ -179,14 +186,13 @@ class ProjectService:
         for record in records:
             try:
                 root = self._trusted_directory(Path(record["root_path"]))
-                identity = self._identity(root)
-                record["available"] = identity == (record["device"], record["inode"])
+                record["available"] = identity_matches(root, record["device"], record["inode"])
             except (OSError, ValueError, WorkspacePathError):
                 record["available"] = False
             available.append(record)
         return available
 
-    async def _register(self, root: Path, device: int, inode: int):
+    async def _register(self, root: Path, device: int | str, inode: int | str):
         existing_workspace = self.workspace_service.repository.find_original(root)
         created_workspace = existing_workspace is None
         workspace = (await self.workspace_service.register_original(root, []) if created_workspace else

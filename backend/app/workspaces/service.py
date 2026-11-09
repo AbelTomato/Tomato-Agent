@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from app.filesystem_identity import directory_identity, identity_matches
 from .models import WorkspaceFileListing, WorkspaceRecord
 from .repository import WorkspaceRepository
 
@@ -46,7 +47,9 @@ class WorkspaceService:
 
     @staticmethod
     def _reject_links(path: Path) -> None:
-        if any(component.is_symlink() for component in (path, *path.parents)):
+        if any(component.is_symlink() or
+               (hasattr(component, "is_junction") and component.is_junction())
+               for component in (path, *path.parents)):
             raise WorkspacePathError("Symbolic links are not allowed")
 
     @staticmethod
@@ -61,15 +64,18 @@ class WorkspaceService:
                    Path(part).suffix.lower() in {".pem", ".key", ".p12", ".pfx"}
                    for part in path.parts)
 
-    async def register_original(self, path: Path, pytest_paths: list[str] | None = None) -> WorkspaceRecord:
+    async def register_original(self, path: Path, pytest_paths: list[str] | None = None, *,
+                                selected_by_desktop: bool = False) -> WorkspaceRecord:
         source = Path(path)
         if not source.is_absolute():
             raise ValueError("Original path must be absolute")
+        if source == Path(source.anchor):
+            raise WorkspacePathError("Filesystem roots cannot be authorized as a project")
         self._reject_links(source)
         source = source.resolve()
         if not source.is_dir():
             raise ValueError("Original path must be a directory")
-        if not any(source.is_relative_to(root.resolve()) for root in self.allowed_roots):
+        if not selected_by_desktop and not any(source.is_relative_to(root.resolve()) for root in self.allowed_roots):
             raise WorkspacePathError("Project is outside workspace_allowed_roots")
         for root in self.allowed_roots:
             self._reject_links(root)
@@ -93,18 +99,30 @@ class WorkspaceService:
             targets.append(target.as_posix())
         existing = self.repository.find_original(source)
         if existing:
+            if selected_by_desktop:
+                metadata_path, metadata = self._metadata(existing)
+                metadata["desktop_user_selected"] = True
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             record = await self.get(existing)
             if record.pytest_paths != tuple(targets):
                 raise ValueError("Workspace already registered with different pytest_paths")
             return record
-        identity = source.stat()
+        device, inode = directory_identity(source)
         workspace_id = str(uuid4())
         self.repository.create(workspace_id, {
             "workspace_id": workspace_id, "mode": "original", "status": "active",
-            "repo_path": str(source), "device": identity.st_dev, "inode": identity.st_ino,
+            "repo_path": str(source), "device": device, "inode": inode,
             "pytest_paths": targets, "artifact_refs": [], "events": [],
+            "desktop_user_selected": selected_by_desktop,
         })
         return await self.get(workspace_id)
+
+    def is_desktop_selected(self, workspace_id: str) -> bool:
+        try:
+            _, metadata = self._metadata(workspace_id)
+            return metadata.get("desktop_user_selected") is True and metadata.get("status") == "active"
+        except (KeyError, ValueError, OSError):
+            return False
 
     def root_path(self, workspace_id: str) -> Path:
         _, metadata = self._metadata(workspace_id)
@@ -114,9 +132,8 @@ class WorkspaceService:
             repo = Path(metadata["repo_path"])
             try:
                 self._reject_links(repo)
-                identity = repo.stat()
-                if not repo.is_dir() or (identity.st_dev, identity.st_ino) != (
-                        metadata["device"], metadata["inode"]):
+                if not repo.is_dir() or not identity_matches(
+                        repo, metadata["device"], metadata["inode"]):
                     raise WorkspacePathError("workspace_changed")
             except (OSError, WorkspacePathError) as exc:
                 raise WorkspacePathError("workspace_changed") from exc
@@ -186,7 +203,8 @@ class WorkspaceService:
         for component in (candidate, *candidate.parents):
             if component == repo.parent:
                 break
-            if component.is_symlink():
+            if (component.is_symlink() or
+                    (hasattr(component, "is_junction") and component.is_junction())):
                 raise WorkspacePathError("Symbolic links are not allowed")
         resolved = candidate.resolve()
         if not resolved.is_relative_to(repo.resolve()):
@@ -213,11 +231,14 @@ class WorkspaceService:
         for current, directories, names in os.walk(directory, followlinks=False, onerror=traversal_error):
             directories[:] = sorted(name for name in directories
                 if not self._blocked(Path(current, name).relative_to(repo))
-                and not Path(current, name).is_symlink())
+                and not Path(current, name).is_symlink()
+                and not (hasattr(Path(current, name), "is_junction")
+                         and Path(current, name).is_junction()))
             for name in sorted(names):
                 path = Path(current, name)
                 relative = path.relative_to(repo)
-                if self._blocked(relative) or path.is_symlink():
+                if (self._blocked(relative) or path.is_symlink()
+                        or (hasattr(path, "is_junction") and path.is_junction())):
                     continue
                 checked = self.resolve(workspace_id, relative.as_posix())
                 if checked.is_file():
@@ -240,7 +261,7 @@ class WorkspaceService:
         return data
 
     async def read_file(self, workspace_id: str, relative_path: str, max_bytes: int) -> str:
-        return self._read_bytes(workspace_id, relative_path, max_bytes).decode("utf-8")
+        return self._read_bytes(workspace_id, relative_path, max_bytes).decode("utf-8").replace("\r\n", "\n")
 
     async def write_file(self, workspace_id: str, relative_path: str, content: str) -> None:
         data = content.encode("utf-8")

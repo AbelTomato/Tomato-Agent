@@ -23,7 +23,7 @@ def headers(client="window-1", *, owner=False):
 
 
 @pytest.mark.parametrize("path", ["/health", "/api/sessions", "/api/tasks/unknown",
-                                  "/api/workspaces", "/api/tools", "/docs", "/openapi.json",
+                                  "/api/workspaces", "/api/tools",
                                   "/api/desktop/connection"])
 async def test_all_desktop_routes_reject_missing_credentials(tmp_path, path):
     app, _ = desktop_app(tmp_path)
@@ -45,9 +45,11 @@ async def test_identity_and_credentials_are_checked_before_business_routes(tmp_p
             assert "owner" not in result.text
 
 
-async def test_web_mode_stays_separate(tmp_path):
+async def test_internal_engine_does_not_expose_desktop_attach_outside_desktop_mode(tmp_path):
     app = make_app(tmp_path)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             assert (await client.get("/health")).status_code == 200
             assert (await client.get("/api/desktop/connection")).status_code == 404
+            assert (await client.get("/docs")).status_code == 404
+            assert (await client.get("/openapi.json")).status_code == 404

@@ -6,7 +6,7 @@ import pytest
 
 
 def test_fastapi_app_is_importable():
-    assert app.title == "Tomato Agent Infrastructure"
+    assert app.title == "Tomato Agent Engine"
 
 
 @pytest.mark.asyncio
@@ -23,7 +23,7 @@ async def test_default_tool_registry_exposes_local_knowledge_tools():
 
 
 @pytest.mark.asyncio
-async def test_cors_preflight_allows_local_frontend_origin():
+async def test_internal_engine_does_not_enable_browser_cors():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -38,29 +38,22 @@ async def test_cors_preflight_allows_local_frontend_origin():
             },
         )
 
-    assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
-    assert "POST" in response.headers["access-control-allow-methods"]
+    assert response.status_code in {404, 405}
+    assert "access-control-allow-origin" not in response.headers
 
 
 @pytest.mark.asyncio
-async def test_cors_does_not_allow_unconfigured_origin():
+async def test_internal_engine_hides_interactive_api_documentation():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://127.0.0.1:8000",
     ) as client:
-        response = await client.options(
-            "/api/sessions",
-            headers={
-                "Origin": "http://malicious.example",
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "content-type",
-            },
-        )
+        response = await client.get("/docs")
+        schema = await client.get("/openapi.json")
 
-    assert response.status_code == 400
-    assert "access-control-allow-origin" not in response.headers
+    assert response.status_code == 404
+    assert schema.status_code == 404
 
 
 class FakeLLM:

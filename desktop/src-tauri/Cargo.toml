@@ -3,10 +3,6 @@ name = "tomato-agent-desktop"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-desktop-chat = []
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

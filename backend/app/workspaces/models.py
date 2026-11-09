@@ -12,8 +12,8 @@ class WorkspaceRecord(BaseModel):
     metadata_path: Path
     mode: Literal["managed", "original"] = "managed"
     pytest_paths: tuple[str, ...] = ()
-    device: int | None = None
-    inode: int | None = None
+    device: int | str | None = None
+    inode: int | str | None = None
 
 
 class WorkspaceFileListing(BaseModel):

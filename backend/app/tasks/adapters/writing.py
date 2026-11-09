@@ -52,24 +52,43 @@ class WritingAdapter:
             task = await self.executor.execute_research(task.task_id, expected_version=task.version)
         elif snapshot.stage == "drafting" and task.status == WritingStatus.DRAFTING:
             task = await self.executor.execute_draft(task.task_id, expected_version=task.version)
-        elif snapshot.stage == "saving":
+        save_error_type = None
+        save_error_code = None
+        save_error_step = None
+        save_error_source_exists = None
+        save_error_target_exists = None
+        save_error_target_is_directory = None
+        if snapshot.stage == "saving":
             try:
                 task = await self.service.save(task.task_id,
                     expected_version=snapshot.pending_action.business_version,
                     idempotency_key=snapshot.save_key)
-            except Exception:
+            except Exception as exc:
                 # A failed write response is not proof that the side effect failed.
                 task = await self.service.get_task(task.task_id)
                 known = (task.status == WritingStatus.SAVED and
                          await self.service.repository.has_save_key(task.task_id, snapshot.save_key))
                 unknown_save = not known
+                save_error_type = type(exc).__name__
+                save_error_code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+                save_error_step = getattr(exc, "writing_save_step", None)
+                save_error_source_exists = getattr(exc, "writing_save_source_exists", None)
+                save_error_target_exists = getattr(exc, "writing_save_target_exists", None)
+                save_error_target_is_directory = getattr(exc, "writing_save_target_is_directory", None)
         values = self.outcome(task, unknown_save=unknown_save)
         pending = values.get("pending_action")
         snapshot = snapshot.model_copy(update={"phase": "waiting" if pending else "finished",
                                                "pending_action": pending})
         await port.finish(**values, snapshot=snapshot, domain_run_id=str(task.task_id),
                           stage=snapshot.stage, event_type="task.result",
-                          event_payload={"schema_version": 1, "domain_run_id": str(task.task_id)})
+                          event_payload={"schema_version": 1, "domain_run_id": str(task.task_id),
+                              **({"save_error_type": save_error_type,
+                                  "save_error_code": save_error_code,
+                                  "save_error_step": save_error_step,
+                                  "save_error_source_exists": save_error_source_exists,
+                                  "save_error_target_exists": save_error_target_exists,
+                                  "save_error_target_is_directory": save_error_target_is_directory}
+                                  if save_error_type else {})})
 
     async def observe_recovery(self, run, snapshot):
         if not snapshot.domain_run_id:

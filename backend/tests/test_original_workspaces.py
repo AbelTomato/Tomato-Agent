@@ -6,6 +6,7 @@ import pytest
 
 from app.application import create_app
 from app.settings import Settings
+from app.filesystem_identity import identity_matches
 from app.workspaces.service import WorkspacePathError, WorkspaceService
 
 
@@ -29,7 +30,7 @@ async def test_registration_is_persistent_idempotent_and_does_not_touch_project(
     assert record.mode == "original"
     assert record.repo_path == project
     assert record.pytest_paths == ("tests",)
-    assert (record.device, record.inode) == (project.stat().st_dev, project.stat().st_ino)
+    assert identity_matches(project, record.device, record.inode)
     assert (await register(service, project)).workspace_id == record.workspace_id
     restarted = WorkspaceService(service.root, allowed_roots=service.allowed_roots)
     assert await restarted.get(record.workspace_id) == record
@@ -50,6 +51,8 @@ async def test_registration_denies_unconfigured_outside_and_non_directory_paths(
             await register(service, path)
     with pytest.raises(WorkspacePathError):
         await register(WorkspaceService(service.root), project)
+    with pytest.raises(WorkspacePathError, match="Filesystem roots"):
+        await WorkspaceService(service.root).register_original(Path("/"), selected_by_desktop=True)
     with pytest.raises(ValueError):
         WorkspaceService(service.root, allowed_roots=[Path("/")])
     with pytest.raises(ValueError):
@@ -82,21 +85,46 @@ async def test_workspace_http_registration_without_profile_remains_compatible(tm
         assert response.json()["pytest_paths"] == []
 
 
+async def test_desktop_selected_workspace_requires_desktop_channel_and_is_persisted(tmp_path):
+    from app.desktop.connection import install_desktop
+
+    service, project = environment(tmp_path)
+    config = Settings(_env_file=None, database_path=tmp_path / "agent.db", docs_root=tmp_path,
+        draft_directory=tmp_path / "drafts", code_task_workspace_root=service.root,
+        code_task_artifact_root=tmp_path / "artifacts")
+    app = create_app(config)
+    install_desktop(app, token="a" * 64, instance="b" * 32, owner="owner", stop=lambda: None)
+    base_headers = {"Authorization": "Bearer " + "a" * 64, "X-Tomato-Instance": "b" * 32}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post("/api/desktop/workspaces", headers=base_headers, json={"path": str(project)})
+        assert denied.status_code == 403
+        selected_headers = {**base_headers, "X-Tomato-Client": "desktop-window"}
+        accepted = await client.post("/api/desktop/workspaces", headers=selected_headers,
+            json={"path": str(project)})
+        assert accepted.status_code == 201
+        workspace_id = accepted.json()["workspace_id"]
+        assert app.state.workspace_service.is_desktop_selected(workspace_id)
+        assert (await app.state.workspace_service.get(workspace_id)).repo_path == project
+        assert (await client.get("/api/workspaces", headers=selected_headers)).json()["workspaces"]
+        assert app.state.task_service.assistant.validate_workspace(workspace_id) == project
+
+
 @pytest.mark.parametrize("target", ["-q", "../outside", "/etc", "missing", ".env", "tests/link"])
-async def test_pytest_paths_are_validated_on_registration(tmp_path, target):
+async def test_pytest_paths_are_validated_on_registration(tmp_path, target, create_symlink):
     service, project = environment(tmp_path)
     (project / ".env").write_text("secret")
-    (project / "tests" / "link").symlink_to(project / "app.py")
+    if target == "tests/link":
+        create_symlink(project / "tests" / "link", project / "app.py")
     with pytest.raises((ValueError, WorkspacePathError)):
         await service.register_original(project, [target])
     no_profile = await service.register_original(project, [])
     assert no_profile.pytest_paths == ()
 
 
-async def test_registration_rejects_links_in_root_and_ancestors(tmp_path):
+async def test_registration_rejects_links_in_root_and_ancestors(tmp_path, create_symlink):
     service, project = environment(tmp_path)
     alias = project.parent / "alias"
-    alias.symlink_to(project, target_is_directory=True)
+    create_symlink(alias, project, target_is_directory=True)
     with pytest.raises(WorkspacePathError):
         await register(service, alias)
     with pytest.raises(WorkspacePathError):
@@ -104,21 +132,21 @@ async def test_registration_rejects_links_in_root_and_ancestors(tmp_path):
 
 
 @pytest.mark.parametrize("change", ["missing", "replace", "link", "ancestor_link"])
-async def test_root_identity_is_checked_on_every_access(tmp_path, change):
+async def test_root_identity_is_checked_on_every_access(tmp_path, change, create_symlink):
     service, project = environment(tmp_path)
     record = await register(service, project)
     if change == "ancestor_link":
         parent = project.parent
         saved = parent.with_name("saved-projects")
         parent.rename(saved)
-        parent.symlink_to(saved, target_is_directory=True)
+        create_symlink(parent, saved, target_is_directory=True)
     else:
         saved = project.with_name("saved")
         project.rename(saved)
         if change == "replace":
             project.mkdir()
         elif change == "link":
-            project.symlink_to(saved, target_is_directory=True)
+            create_symlink(project, saved, target_is_directory=True)
     for access in [lambda: service.root_path(record.workspace_id),
                    lambda: service.resolve(record.workspace_id, "app.py")]:
         with pytest.raises(WorkspacePathError, match="workspace_changed"):
@@ -143,7 +171,7 @@ async def test_same_filter_protects_read_write_and_enumeration(tmp_path, path):
     assert path not in await service.list_files(record.workspace_id)
 
 
-async def test_templates_links_limits_and_cleanup_guard(tmp_path):
+async def test_templates_links_limits_and_cleanup_guard(tmp_path, create_symlink):
     service, project = environment(tmp_path, max_files=2)
     record = await register(service, project)
     for name in [".env.example", ".env.sample", ".env.template"]:
@@ -157,7 +185,7 @@ async def test_templates_links_limits_and_cleanup_guard(tmp_path):
         await service.cleanup(record.workspace_id)
     with pytest.raises(ValueError, match="Run"):
         await service.diff(record.workspace_id)
-    (project / "link").symlink_to(project / "app.py")
+    create_symlink(project / "link", project / "app.py")
     with pytest.raises(WorkspacePathError):
         await service.read_file(record.workspace_id, "link", 100)
     (project / "large").write_bytes(b"x" * 100001)

@@ -24,13 +24,13 @@ async def test_workspace_create_copies_input_into_repo_and_lists_files(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_workspace_rejects_absolute_parent_and_symlink_escape(tmp_path):
+async def test_workspace_rejects_absolute_parent_and_symlink_escape(tmp_path, create_symlink):
     source = tmp_path / "source"
     source.mkdir()
     (source / "safe.txt").write_text("safe")
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")
-    (source / "escape.txt").symlink_to(outside)
+    create_symlink(source / "escape.txt", outside)
     service = WorkspaceService(tmp_path / "workspaces")
     workspace = await service.create(source)
 
@@ -94,12 +94,12 @@ async def test_workspace_cleanup_failure_records_event_and_raises(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_workspace_rejects_invalid_ids_metadata_paths_and_linked_writes(tmp_path):
+async def test_workspace_rejects_invalid_ids_metadata_paths_and_linked_writes(tmp_path, create_symlink):
     service = WorkspaceService(tmp_path / "workspaces")
     workspace = await service.create()
     outside = tmp_path / "workspaces-extra"
     outside.mkdir()
-    (workspace.repo_path / "escape").symlink_to(outside, target_is_directory=True)
+    create_symlink(workspace.repo_path / "escape", outside, target_is_directory=True)
     for path in ("escape/new.txt", "../metadata.json", "", "bad\x00name"):
         with pytest.raises(WorkspacePathError):
             await service.write_file(workspace.workspace_id, path, "x")

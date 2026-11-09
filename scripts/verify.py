@@ -15,14 +15,14 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
-FRONTEND = ROOT / "frontend"
+DESKTOP_UI = ROOT / "desktop" / "ui"
 PYTHON = BACKEND / ".venv" / "bin" / "python"
 MODULES = {
     "assistant": ["tests/test_assistant_*.py", "tests/test_provider_attempt_recorder.py"],
     "execution": ["tests/test_execution_*.py", "tests/test_code_execution.py", "tests/test_code_task*.py"],
     "rag": ["tests/test_knowledge_*.py", "tests/test_embeddings.py", "tests/test_retrieval.py"],
     "writing": ["tests/test_writing_*.py", "tests/test_application_writing_flow.py"],
-    "frontend": [],
+    "ui": [],
 }
 INTEGRATION_TESTS = [
     "tests/test_application_lifecycle.py",
@@ -122,23 +122,23 @@ def execute(args: argparse.Namespace) -> int:
     runner = Runner(args.level, args.timeout, Path(args.artifact_root).resolve())
     ok = True
     if args.level == "quick":
-        selected = bool(args.static or args.backend_test or args.frontend_test)
+        selected = bool(args.static or args.backend_test or args.ui_test)
         if not selected:
-            print("select at least one check: --static, --backend-test, --frontend-test", file=sys.stderr)
+            print("select at least one check: --static, --backend-test, --ui-test", file=sys.stderr)
             return 2
         if args.static:
             ok &= runner.run("backend-compile", [str(require_python()), "-m", "compileall", "-q", "app", "tests"], BACKEND)
-            ok &= runner.run("frontend-build", ["pnpm", "build"], FRONTEND)
+            ok &= runner.run("desktop-ui-build", ["pnpm", "build"], DESKTOP_UI)
         if args.backend_test:
             ok &= runner.run("backend-target", pytest_command(args.backend_test), BACKEND)
-        if args.frontend_test:
-            ok &= runner.run("frontend-target", ["node", "--test", *args.frontend_test], FRONTEND)
+        if args.ui_test:
+            ok &= runner.run("desktop-ui-target", ["node", "--test", *args.ui_test], DESKTOP_UI)
     elif args.level == "module":
         for module in args.modules:
-            if module == "frontend":
-                tests = [str(Path(path).relative_to(FRONTEND)) for path in sorted(glob.glob(str(FRONTEND / "tests" / "*.test.mjs")))]
-                ok &= runner.run("module-frontend-tests", ["node", "--test", *tests], FRONTEND)
-                ok &= runner.run("module-frontend-build", ["pnpm", "build"], FRONTEND)
+            if module == "ui":
+                tests = [str(Path(path).relative_to(DESKTOP_UI)) for path in sorted(glob.glob(str(DESKTOP_UI / "tests" / "*.test.mjs")))]
+                ok &= runner.run("module-desktop-ui-tests", ["node", "--test", *tests], DESKTOP_UI)
+                ok &= runner.run("module-desktop-ui-build", ["pnpm", "build"], DESKTOP_UI)
             else:
                 paths = sorted({str(path.relative_to(BACKEND)) for pattern in MODULES[module]
                                 for path in BACKEND.glob(pattern)})
@@ -152,9 +152,9 @@ def execute(args: argparse.Namespace) -> int:
         env["PYTEST_ADDOPTS"] = (env.get("PYTEST_ADDOPTS", "") +
                                  f" --basetemp={runner.directory / 'pytest-temp'}").strip()
         ok &= runner.run("integration-backend", pytest_command(INTEGRATION_TESTS), BACKEND, env=env)
-        frontend_tests = [str(path.relative_to(FRONTEND))
-                          for path in sorted((FRONTEND / "tests").glob("*.test.mjs"))]
-        ok &= runner.run("integration-frontend", ["node", "--test", *frontend_tests], FRONTEND, env=env)
+        ui_tests = [str(path.relative_to(DESKTOP_UI))
+                    for path in sorted((DESKTOP_UI / "tests").glob("*.test.mjs"))]
+        ok &= runner.run("integration-desktop-ui", ["node", "--test", *ui_tests], DESKTOP_UI, env=env)
         ok &= runner.run("integration-ui-api", pytest_command(["tests/test_assistant_api.py"]), BACKEND, env=env)
     elif args.level == "external":
         if args.external_timeout < 1 or args.external_timeout > 600:
@@ -168,15 +168,6 @@ def execute(args: argparse.Namespace) -> int:
         elif args.target == "openshell":
             env["RUN_OPENSHELL_ACCEPTANCE"] = "1"
             command = pytest_command(["tests/test_sandbox_openshell_acceptance.py"])
-        else:
-            if args.provider_max_runs is None or args.provider_max_requests is None:
-                print("provider requires --provider-max-runs and --provider-max-requests", file=sys.stderr)
-                return 2
-            if not 1 <= args.provider_max_runs <= 4 or not 1 <= args.provider_max_requests <= 16:
-                print("provider budget must be between 1-4 runs and 1-16 requests", file=sys.stderr)
-                return 2
-            command = [str(require_python()), "tests/fixtures/runtime_provider_acceptance.py", "--run-real-provider"]
-            command.extend(["--max-runs", str(args.provider_max_runs), "--max-requests", str(args.provider_max_requests)])
         ok &= runner.run(f"external-{args.target}", command, BACKEND, env=env, timeout=args.external_timeout)
     code = runner.finish()
     return code if ok else max(1, code)
@@ -188,16 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
     quick = subparsers.add_parser("quick")
     quick.add_argument("--static", action="store_true")
     quick.add_argument("--backend-test", action="append", default=[])
-    quick.add_argument("--frontend-test", action="append", default=[])
+    quick.add_argument("--ui-test", action="append", default=[])
     module = subparsers.add_parser("module")
     module.add_argument("modules", nargs="+", choices=sorted(MODULES))
     subparsers.add_parser("integration")
     external = subparsers.add_parser("external")
-    external.add_argument("target", choices=["provider", "docker", "openshell"])
+    external.add_argument("target", choices=["docker", "openshell"])
     external.add_argument("--confirm-real-dependencies", action="store_true", required=True)
     external.add_argument("--external-timeout", type=int, default=600)
-    external.add_argument("--provider-max-runs", type=int)
-    external.add_argument("--provider-max-requests", type=int)
     for command in subparsers.choices.values():
         command.add_argument("--timeout", type=int, default=300)
         command.add_argument("--artifact-root", default=str(ROOT / "verification-artifacts"))

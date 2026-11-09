@@ -507,6 +507,8 @@ def test_answer_runner_real_llm_is_opt_in_and_client_factory_is_offline_by_defau
         ]
     )
     monkeypatch.setattr("app.knowledge.answer_evaluation.settings.llm_api_key", "trusted-test-key")
+    monkeypatch.setattr("app.knowledge.answer_evaluation.settings.llm_base_url", "https://api.openai.com/v1")
+    monkeypatch.setattr("app.knowledge.answer_evaluation.settings.llm_model", "gpt-5.6-luna")
     client = create_llm_client(real_args)
     assert client is not None
     assert client.api_key == "trusted-test-key"

@@ -1,5 +1,7 @@
 import asyncio
 
+import os
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -91,17 +93,28 @@ def test_capability_profile_defaults_to_deny_and_rejects_unsafe_values():
         CapabilityProfile(allowed_paths=("/",))
 
 
-def test_capability_profile_allows_only_explicit_server_safe_values():
+def test_capability_profile_allows_only_explicit_server_safe_values(tmp_path):
+    approved = str(tmp_path / "approved")
     profile = CapabilityProfile(
-        allowed_paths=("/srv/approved",),
+        allowed_paths=(approved,),
         timeout_seconds=2.0,
         max_output_chars=500,
     )
     validate_capability_profile(profile)
-    assert profile.allowed_paths == ("/srv/approved",)
+    assert profile.allowed_paths == (approved,)
 
     with pytest.raises(ValidationError):
         CapabilityProfile(allowed_paths=("relative/path",))
+    with pytest.raises(ValidationError):
+        CapabilityProfile(allowed_paths=(("\\\\server\\share\\repo"),))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows absolute paths are host-specific")
+def test_capability_profile_accepts_drive_paths_and_rejects_volume_relative_paths():
+    profile = CapabilityProfile(allowed_paths=(("C:\\Users\\sample\\project"),))
+    assert profile.allowed_paths == (("C:\\Users\\sample\\project"),)
+    with pytest.raises(ValidationError):
+        CapabilityProfile(allowed_paths=(("\\Users\\sample\\project"),))
 
 
 def test_error_mapping_is_stable_and_does_not_expose_internal_details():

@@ -104,7 +104,8 @@ class AssistantService:
 
     def validate_workspace(self, workspace_id):
         root = self.workspaces.root_path(workspace_id)
-        if not any(root.is_relative_to(path.resolve()) for path in self.config.workspace_allowed_roots):
+        if (not self.workspaces.is_desktop_selected(workspace_id)
+                and not any(root.is_relative_to(path.resolve()) for path in self.config.workspace_allowed_roots)):
             raise ValueError("workspace_not_authorized")
         return root
 
@@ -115,6 +116,9 @@ class AssistantService:
             self.validate_workspace(request.workspace_id)
         state = await build_assistant_context(session_id, request.message, request.workspace_id,
             {"sessions": self.sessions, "runs": self.runs})
+        if request.context_messages is not None:
+            state.structured_state["history"] = [item.model_dump(mode="json") for item in request.context_messages]
+            state.structured_state["context_source"] = "desktop_snapshot"
 
         def snapshot_factory(run):
             initial = state.model_copy(update={"task_id": str(run.id)})

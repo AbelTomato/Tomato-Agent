@@ -5,8 +5,12 @@ backend/data/
 verification-artifacts/
 backend/config.local.toml
 data/code-workspaces/
-frontend/node_modules/
-frontend/dist/
+desktop/ui/node_modules/
+desktop/ui/dist/
+backend/dist/
+backend/build/
+desktop/tomato-agent-engine.spec
+desktop/:LOCALAPPDATA/
 .env
 .env.*
 logs/

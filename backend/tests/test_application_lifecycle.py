@@ -6,11 +6,68 @@ import httpx
 import pytest
 
 from app.application import create_app
+from app.engine import ApplicationEngine
 from app.agent.models import CodeTaskRequest
 from app.execution.worker import ExecutionWorker
 from app.execution.models import OperationInput
 from app.settings import Settings
 from test_code_tasks_api import execution_dependencies
+
+
+@pytest.mark.asyncio
+async def test_engine_lifecycle_is_independent_idempotent_and_stops_after_failed_start():
+    calls = []
+
+    class Part:
+        async def init(self):
+            calls.append("init")
+
+        async def initialize(self):
+            calls.append("initialize")
+
+    class Worker(Part):
+        recovery_scan_limit = 10
+
+        async def recover_on_startup(self):
+            calls.append("recover")
+            return []
+
+        async def start(self):
+            calls.append("start")
+
+        async def stop(self):
+            calls.append("stop")
+
+    class Config:
+        effective_task_worker_enabled = True
+
+    class Dependencies:
+        session_repository = Part()
+        project_service = Part()
+        run_repository = Part()
+        knowledge_repository = Part()
+        writing_repository = Part()
+        writing_execution_repository = Part()
+        code_task_service = Part()
+        execution_worker = Worker()
+
+    engine = ApplicationEngine(Dependencies(), Config())
+    await engine.start()
+    await engine.start()
+    assert calls.count("start") == 1
+    await engine.stop()
+    await engine.stop()
+    assert calls.count("stop") == 1
+
+    class FailedWorker(Worker):
+        async def start(self):
+            calls.append("failed-start")
+            raise RuntimeError("worker unavailable")
+
+    Dependencies.execution_worker = FailedWorker()
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        await ApplicationEngine(Dependencies(), Config()).start()
+    assert calls[-2:] == ["failed-start", "stop"]
 
 
 def make_app(tmp_path, **overrides):

@@ -1,4 +1,4 @@
-"""Compatibility entrypoint for ``uvicorn app.main:app`` and legacy imports."""
+"""Compatibility exports retained for internal regression tests."""
 
 from types import SimpleNamespace
 

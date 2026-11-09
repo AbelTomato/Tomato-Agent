@@ -1,4 +1,7 @@
 import json
+import ntpath
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -49,7 +52,7 @@ class CapabilityProfile(_PolicyModel):
     @field_validator("allowed_paths")
     @classmethod
     def absolute_paths_only(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not path.startswith("/") or path == "/" for path in value):
+        if any(not _is_non_root_absolute_path(path) for path in value):
             raise ValueError("capability paths must be non-root absolute paths")
         return value
 
@@ -65,6 +68,18 @@ class CapabilityProfile(_PolicyModel):
         if self.allow_process or self.allow_network:
             raise ValueError("process and network capabilities require explicit sandbox approval")
         return self
+
+
+def _is_non_root_absolute_path(value: str) -> bool:
+    drive, tail = ntpath.splitdrive(value)
+    if drive.startswith("\\\\"):
+        return False
+    if os.name == "nt":
+        return bool(drive and tail.startswith(("/", "\\")) and tail.strip("/\\"))
+    path = Path(value)
+    if path.is_absolute():
+        return path != Path(path.anchor)
+    return False
 
 
 CODE_TASK_TOOLS = frozenset({
@@ -146,7 +161,7 @@ def validate_tool_call(
 def validate_capability_profile(profile: CapabilityProfile) -> None:
     if profile.allow_process or profile.allow_network or profile.credential_names:
         raise _error("permission_denied", "The capability profile is not safely restricted.")
-    if any(not path.startswith("/") or path == "/" for path in profile.allowed_paths):
+    if any(not _is_non_root_absolute_path(path) for path in profile.allowed_paths):
         raise _error("permission_denied", "The capability profile contains an unsafe path.")
 
 

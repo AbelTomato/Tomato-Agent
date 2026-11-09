@@ -17,6 +17,12 @@ class RegisterWorkspaceRequest(BaseModel):
     pytest_paths: list[str] = Field(default_factory=list)
 
 
+class DesktopWorkspaceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1)
+
+
 def _service(request: Request) -> WorkspaceService:
     return request.app.state.workspace_service
 
@@ -44,6 +50,17 @@ def _error(exc: Exception) -> HTTPException:
 async def register_workspace(body: RegisterWorkspaceRequest, request: Request):
     try:
         return await _service(request).register_original(Path(body.path), body.pytest_paths)
+    except (ValueError, KeyError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/api/desktop/workspaces", status_code=201, response_model=WorkspaceRecord)
+async def register_desktop_selected_workspace(body: DesktopWorkspaceSelection, request: Request):
+    if (not getattr(request.app.state, "desktop_connection_installed", False)
+            or not request.headers.get("X-Tomato-Client")):
+        raise HTTPException(403, {"code": "desktop_selection_required"})
+    try:
+        return await _service(request).register_original(Path(body.path), selected_by_desktop=True)
     except (ValueError, KeyError) as exc:
         raise _error(exc) from exc
 

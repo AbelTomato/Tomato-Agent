@@ -1,7 +1,6 @@
 """Fixed WSL entrypoint. No shell, credential argv, or business DB in acceptance mode."""
 
 import asyncio
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,11 @@ import select
 import socket
 import subprocess
 import sys
+import traceback
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 import httpx
 import uvicorn
@@ -20,12 +24,26 @@ from app.settings import Settings
 
 
 def read_input():
-    value = json.loads(sys.stdin.readline(16384))
+    value = json.loads(sys.stdin.readline(65536))
     token = value.get("token", "")
     if len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
         raise ValueError("invalid input")
     if not isinstance(value.get("owner"), str) or not value["owner"]:
         raise ValueError("invalid owner")
+    if value.get("data_dir") is not None:
+        data_dir = Path(value["data_dir"])
+        if not data_dir.is_absolute():
+            raise ValueError("absolute data directory required")
+        value["data_dir"] = str(data_dir)
+        resource_dir = Path(value.get("resource_dir", ""))
+        if not resource_dir.is_absolute():
+            raise ValueError("absolute resource directory required")
+        value["resource_dir"] = str(resource_dir)
+        if value.get("draft_dir") is not None:
+            draft_dir = Path(value["draft_dir"])
+            if not draft_dir.is_absolute():
+                raise ValueError("absolute draft directory required")
+            value["draft_dir"] = str(draft_dir)
     environment_id = value.get("environment_id", "local")
     if not isinstance(environment_id, str) or not environment_id.strip() or len(environment_id) > 128:
         raise ValueError("invalid environment")
@@ -45,6 +63,26 @@ def configuration(value):
                         embedding_api_key="", task_worker_enabled=False,
                         desktop_environment_id=value["environment_id"],
                         desktop_service_instance_id="pending")
+    if value.get("data_dir"):
+        root = Path(value["data_dir"])
+        resource = Path(value["resource_dir"])
+        root.mkdir(parents=True, exist_ok=True)
+        return Settings(
+            _env_file=None, config_file=None, database_path=root / "agent.db",
+            docs_root=resource / "docs",
+            draft_directory=Path(value.get("draft_dir", root / "drafts")),
+            code_task_workspace_root=root / "workspaces",
+            code_task_artifact_root=root / "artifacts",
+            llm_api_key=value.get("llm_api_key", ""),
+            llm_base_url=value.get("llm_base_url", "https://api.openai.com/v1"),
+            llm_model=value.get("llm_model", ""),
+            embedding_api_key=value.get("embedding_api_key", ""),
+            embedding_base_url=value.get("embedding_base_url", "https://api.openai.com/v1"),
+            embedding_model=value.get("embedding_model", ""),
+            embedding_dimensions=value.get("embedding_dimensions", 0),
+            assistant_enabled=True, task_worker_enabled=True,
+            desktop_environment_id=value["environment_id"],
+            desktop_service_instance_id="pending")
     return Settings(desktop_environment_id=value["environment_id"])
 
 
@@ -79,6 +117,8 @@ async def serve(value):
 
 
 def bootstrap(value):
+    if fcntl is None:
+        raise RuntimeError("Windows engine must be launched under the desktop process owner")
     config = configuration(value)
     root = config.database_path.parent
     root.mkdir(parents=True, exist_ok=True)
@@ -128,9 +168,12 @@ def main():
             bootstrap(value)
         else:
             raise ValueError("invalid arguments")
-    except Exception:
+    except Exception as error:
         # No exception repr/traceback: configuration and input can carry secrets.
         print("Desktop service startup failed; check installation and connection identity.", file=sys.stderr)
+        if os.environ.get("TOMATO_AGENT_ENGINE_DEBUG") == "1":
+            print(type(error).__name__, file=sys.stderr)
+            traceback.print_tb(error.__traceback__, file=sys.stderr)
         raise SystemExit(1)
 
 

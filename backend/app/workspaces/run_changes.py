@@ -57,7 +57,7 @@ class RunFileChanges:
         if not resolved.exists():
             return None
         return self.workspaces._read_bytes(
-            workspace_id, path, self.workspaces.max_file_bytes).decode("utf-8")
+            workspace_id, path, self.workspaces.max_file_bytes).decode("utf-8").replace("\r\n", "\n")
 
     async def _rows(self, run_id):
         db = await self._connect()
@@ -119,14 +119,25 @@ class RunFileChanges:
     def _replace(self, workspace_id, path, before, after):
         target = self.workspaces.resolve(workspace_id, path, write=True)
         target.parent.mkdir(parents=True, exist_ok=True)
-        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+        existing = None
+        if target.exists():
+            with target.open("rb") as handle:
+                existing = handle.read(self.workspaces.max_file_bytes + 1)
+            if len(existing) > self.workspaces.max_file_bytes:
+                raise FileChangeConflict("file_too_large")
+        mode = stat.S_IMODE(target.stat().st_mode) if existing is not None else 0o644
+        newline = "\r\n" if existing is not None and b"\r\n" in existing else "\n"
+        disk_content = after.replace("\n", "\r\n") if newline == "\r\n" else after
         fd, temporary = tempfile.mkstemp(prefix=".agent-write-", dir=target.parent)
         try:
             with os.fdopen(fd, "wb") as handle:
-                handle.write(after.encode("utf-8"))
+                handle.write(disk_content.encode("utf-8"))
                 handle.flush()
                 os.fsync(handle.fileno())
-                os.fchmod(handle.fileno(), mode)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), mode)
+                else:
+                    os.chmod(temporary, mode)
             # Re-resolve to reject replaced directories/links immediately before writing.
             checked = self.workspaces.resolve(workspace_id, path, write=True)
             if checked != target or digest(self._current(workspace_id, path)) != digest(before):

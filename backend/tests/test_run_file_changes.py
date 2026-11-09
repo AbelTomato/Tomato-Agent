@@ -2,6 +2,8 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+import os
+import stat
 
 from app.runs.repository import RunRepository
 from app.workspaces.service import WorkspaceService
@@ -94,7 +96,10 @@ async def test_atomic_replace_preserves_mode_and_agent_diff_excludes_external(en
     await changes.observe(run, workspace, "app.py")
     await changes.write_checked(run, workspace, "app.py", "agent\n")
     assert path.stat().st_ino != inode
-    assert path.stat().st_mode & 0o777 == 0o751
+    if os.name == "nt":
+        assert bool(path.stat().st_mode & stat.S_IWRITE)
+    else:
+        assert path.stat().st_mode & 0o777 == 0o751
     path.write_text("external\n")
     assert "+agent" in await changes.diff_for_run(run)
     assert "+external" not in await changes.diff_for_run(run)

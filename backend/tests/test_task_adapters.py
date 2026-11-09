@@ -57,6 +57,9 @@ async def test_writing_background_confirm_draft_save_and_idempotency(tmp_path, r
     await deps.execution_worker.run_once()
     run = await deps.run_repository.get_run(run.id)
     assert run.status == "completed" and Path(run.result["saved_path"]).is_file()
+    saved_bytes = Path(run.result["saved_path"]).read_bytes()
+    assert b"\r\n" not in saved_bytes
+    assert saved_bytes.decode("utf-8") == run.result["draft"]
     assert (await deps.task_service.act(run.id, req)).status == "completed"
     with pytest.raises(RunRepositoryConflict, match="action_request_conflict"):
         await deps.task_service.act(run.id, req.model_copy(update={"payload": {"outline": {}}}))
@@ -112,13 +115,28 @@ async def test_unknown_save_outcome_keeps_waiting_and_rejects_regeneration(tmp_p
     await deps.execution_worker.run_once()
     run = await deps.run_repository.get_run(run.id)
     async def unknown(*args, **kwargs):
-        raise OSError("storage outcome unknown")
+        error = OSError(28, "storage outcome unknown", "private/path.txt")
+        error.writing_save_step = "replace_target"
+        error.writing_save_source_exists = True
+        error.writing_save_target_exists = False
+        error.writing_save_target_is_directory = False
+        raise error
     monkeypatch.setattr(service, "save", unknown)
     await deps.task_service.act(run.id, action(run, "save_draft"))
     await deps.execution_worker.run_once()
     run = await deps.run_repository.get_run(run.id)
     assert run.status == "waiting" and run.pending_action.reason == "save_outcome_unknown"
     assert "confirm_outline" not in run.pending_action.allowed_actions
+    result_event = next(event for event in await deps.run_repository.list_events(run.id)
+                        if event.event_type == "task.result" and
+                        event.payload.get("save_error_type"))
+    assert result_event.payload["save_error_type"] == "OSError"
+    assert result_event.payload["save_error_code"] == 28
+    assert result_event.payload["save_error_step"] == "replace_target"
+    assert result_event.payload["save_error_source_exists"] is True
+    assert result_event.payload["save_error_target_exists"] is False
+    assert result_event.payload["save_error_target_is_directory"] is False
+    assert "private/path.txt" not in str(result_event.payload)
     with pytest.raises(RunRepositoryConflict):
         await deps.task_service.act(run.id, action(run, "confirm_outline", outline={}))
     assert llm.outline_calls == llm.draft_calls == 1

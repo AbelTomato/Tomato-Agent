@@ -14,6 +14,12 @@ class TaskRecoveryObservation(BaseModel):
     allowed_actions: list[Literal["cancel", "inspect_recovery", "continue_recovery"]]
 
 
+class DesktopContextMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=16_384)
+
+
 class UnifiedTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: TaskKind
@@ -21,11 +27,14 @@ class UnifiedTaskRequest(BaseModel):
     client_request_id: str = Field(min_length=1)
     workspace_id: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+    context_messages: list[DesktopContextMessage] | None = Field(default=None, max_length=80)
 
     @model_validator(mode="after")
     def validate_kind(self):
         if not self.message.strip():
             raise ValueError("message cannot be blank")
+        if self.context_messages is not None and self.kind != "assistant":
+            raise ValueError("context snapshot is supported only for assistant")
         if self.kind == "assistant":
             if not self.client_request_id.strip():
                 raise ValueError("client_request_id cannot be blank")
@@ -35,6 +44,8 @@ class UnifiedTaskRequest(BaseModel):
                 raise ValueError("unknown assistant options")
             if "allow_test_execution" in self.options and type(self.options["allow_test_execution"]) is not bool:
                 raise ValueError("allow_test_execution must be boolean")
+            if self.context_messages is not None and sum(len(item.content.encode("utf-8")) for item in self.context_messages) > 65_536:
+                raise ValueError("context snapshot exceeds byte budget")
             return self
         elif self.kind == "code" and not self.workspace_id:
             raise ValueError("workspace is required for code")

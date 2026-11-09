@@ -12,7 +12,7 @@ SPEC.loader.exec_module(verify)
 
 class VerificationEntryTests(unittest.TestCase):
     def test_module_matrix_contains_expected_groups(self):
-        self.assertEqual(set(verify.MODULES), {"assistant", "execution", "rag", "writing", "frontend"})
+        self.assertEqual(set(verify.MODULES), {"assistant", "execution", "rag", "writing", "ui"})
 
     def test_integration_includes_sqlite_worker_and_api_scenarios(self):
         self.assertIn("tests/test_execution_worker.py", verify.INTEGRATION_TESTS)
@@ -23,12 +23,11 @@ class VerificationEntryTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             verify.build_parser().parse_args(["external", "docker"])
 
-    def test_external_requires_budget_for_provider(self):
-        args = verify.build_parser().parse_args([
-            "external", "provider", "--confirm-real-dependencies"
-        ])
-        self.assertIsNone(args.provider_max_runs)
-        self.assertIsNone(args.provider_max_requests)
+    def test_external_provider_browser_flow_is_not_an_active_target(self):
+        with self.assertRaises(SystemExit):
+            verify.build_parser().parse_args([
+                "external", "provider", "--confirm-real-dependencies"
+            ])
 
 
 if __name__ == "__main__":

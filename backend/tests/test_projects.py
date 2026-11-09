@@ -68,7 +68,7 @@ async def test_legacy_single_root_projects_migrate_idempotently(tmp_path):
         "project_id": "legacy-id", "workspace_id": "workspace-id", "display_name": "Legacy",
         "root_path": str(root), "environment_id": "Ubuntu", "service_instance_id": "instance-1",
         "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
-        "device": root.stat().st_dev, "inode": root.stat().st_ino,
+        "device": 1, "inode": 1,
     }
     await service.repository.create(legacy)
     await service.initialize()
@@ -117,12 +117,12 @@ async def test_renamed_migrated_project_keeps_legacy_open_response_in_sync(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_project_paths_names_links_and_missing_directories_are_rejected(tmp_path):
+async def test_project_paths_names_links_and_missing_directories_are_rejected(tmp_path, create_symlink):
     home = tmp_path / "home"
     home.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (home / "escape").symlink_to(outside, target_is_directory=True)
+    create_symlink(home / "escape", outside, target_is_directory=True)
     service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
 
     for name in ("", ".", "..", "../outside", "/tmp/absolute", "nested/name", "nested\\name"):
@@ -223,13 +223,13 @@ async def test_open_reuses_existing_workspace_test_profile(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_project_browser_does_not_follow_links_and_bounds_results(tmp_path, monkeypatch):
+async def test_project_browser_does_not_follow_links_and_bounds_results(tmp_path, monkeypatch, create_symlink):
     home = tmp_path / "home"
     home.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret").mkdir()
-    (home / "escape").symlink_to(outside, target_is_directory=True)
+    create_symlink(home / "escape", outside, target_is_directory=True)
     service = ProjectService(tmp_path / "agent.db", [home], "Ubuntu", "instance-1")
     for index in range(service.MAX_DIRECTORY_ENTRIES + 5):
         (home / f"project-{index:04d}").mkdir()

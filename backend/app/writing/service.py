@@ -145,35 +145,52 @@ class WritingService:
         ):
             raise WritingConflictError("draft save is stale or invalid")
 
-        self.draft_directory.mkdir(parents=True, exist_ok=True)
-        target = self.draft_directory / f"{task.task_id}-v{task.version}.md"
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{task.task_id}-",
-            suffix=".tmp",
-            dir=self.draft_directory,
-        )
+        step = "create_directory"
+        temporary_name = None
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+            self.draft_directory.mkdir(parents=True, exist_ok=True)
+            target = self.draft_directory / f"{task.task_id}-v{task.version}.md"
+            step = "create_temporary_file"
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{task.task_id}-",
+                suffix=".tmp",
+                dir=self.draft_directory,
+            )
+            step = "write_and_sync"
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as temporary:
                 temporary.write(task.draft)
                 temporary.flush()
                 os.fsync(temporary.fileno())
+            step = "check_existing_target"
             if target.exists() and target.read_text(encoding="utf-8") != task.draft:
                 raise WritingConflictError("draft path already contains different content")
+            step = "replace_target"
             os.replace(temporary_name, target)
-        except Exception:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
-            raise
-
-        try:
+            temporary_name = None
+            step = "persist_task"
             return await self.repository.save_task(
                 task_id,
                 expected_version=expected_version,
                 idempotency_key=idempotency_key,
                 saved_path=str(target),
             )
-        except RuntimeError as exc:
-            raise WritingConflictError("draft save changed concurrently") from exc
+        except Exception as exc:
+            try:
+                setattr(exc, "writing_save_step", step)
+                if step == "replace_target":
+                    setattr(exc, "writing_save_source_exists", bool(temporary_name and os.path.exists(temporary_name)))
+                    setattr(exc, "writing_save_target_exists", target.exists())
+                    setattr(exc, "writing_save_target_is_directory", target.is_dir())
+            except (AttributeError, TypeError):
+                pass
+            if temporary_name is not None and os.path.exists(temporary_name):
+                try:
+                    os.unlink(temporary_name)
+                except OSError:
+                    pass
+            if step == "persist_task" and isinstance(exc, RuntimeError):
+                raise WritingConflictError("draft save changed concurrently") from exc
+            raise
 
     async def fail(
         self,

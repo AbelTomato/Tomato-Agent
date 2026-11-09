@@ -255,7 +255,7 @@ async def test_dashscope_reranker_transport_diagnostics_expose_type_without_secr
 
 
 def test_reranker_settings_have_safe_disabled_defaults_and_validate_limits():
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.knowledge_rerank_enabled is False
     assert settings.knowledge_rerank_base_url == ""

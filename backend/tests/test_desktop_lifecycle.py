@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 
@@ -57,3 +59,31 @@ async def test_disconnect_preserves_sqlite_run_and_reconnect_queries_same_run(tm
                 await client.post("/api/desktop/attach")
                 assert (await client.get(f"/api/tasks/{run_id}")).json() == before
                 assert len(await repository.list_for_session(session)) == 1
+
+
+async def test_owner_close_defers_shutdown_until_active_run_finishes(tmp_path):
+    app, stopped = desktop_app(tmp_path)
+    async with app.router.lifespan_context(app):
+        app.state.task_service.enabled = True
+        app.state.task_service.model_available = True
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                     headers=headers(owner=True)) as client:
+            await client.post("/api/desktop/attach")
+            session = (await client.post("/api/sessions", json={})).json()["session_id"]
+            created = await client.post(f"/api/sessions/{session}/tasks", json={
+                "kind": "chat", "message": "hello", "client_request_id": "once"})
+            assert created.status_code == 202
+            run_id = created.json()["run_id"]
+            await app.state.run_repository.update_status(run_id, "running")
+
+            response = await client.post("/api/desktop/close")
+            assert response.json()["shutdown"] is False
+            assert response.json()["shutdown_pending"] is True
+            assert stopped == []
+
+            await app.state.run_repository.update_status(run_id, "completed")
+            for _ in range(20):
+                if stopped:
+                    break
+                await asyncio.sleep(0.1)
+            assert stopped == [True]

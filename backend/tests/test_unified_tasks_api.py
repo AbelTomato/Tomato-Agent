@@ -8,6 +8,47 @@ from test_application_lifecycle import make_app
 from test_writing_full_flow import rag_database_path
 
 
+def test_desktop_context_snapshot_is_bounded_and_assistant_only():
+    from pydantic import ValidationError
+    from app.tasks.models import UnifiedTaskRequest
+
+    request = UnifiedTaskRequest.model_validate({"kind": "assistant", "message": "question",
+        "client_request_id": "id", "context_messages": [
+            {"role": "user", "content": "prior question"},
+            {"role": "assistant", "content": "prior answer"},
+        ]})
+    assert [item.role for item in request.context_messages] == ["user", "assistant"]
+    with pytest.raises(ValidationError, match="context snapshot"):
+        UnifiedTaskRequest.model_validate({"kind": "chat", "message": "question",
+            "client_request_id": "id", "context_messages": [{"role": "user", "content": "prior"}]})
+    with pytest.raises(ValidationError, match="byte budget"):
+        UnifiedTaskRequest.model_validate({"kind": "assistant", "message": "question",
+            "client_request_id": "id", "context_messages": [
+                {"role": "user", "content": "x" * 16_384} for _ in range(5)
+            ]})
+
+
+@pytest.mark.asyncio
+async def test_assistant_run_freezes_desktop_context_messages(tmp_path):
+    app = make_app(tmp_path, assistant_enabled=True, task_worker_enabled=False)
+    async with app.router.lifespan_context(app):
+        app.state.task_service.enabled = True
+        app.state.task_service.model_available = True
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            session = (await client.post("/api/sessions", json={})).json()["session_id"]
+            response = await client.post(f"/api/sessions/{session}/tasks", json={
+                "kind": "assistant", "message": "new question", "client_request_id": "desktop-request",
+                "context_messages": [{"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"}],
+            })
+            assert response.status_code == 202, response.text
+            run_id = UUID(response.json()["run_id"])
+            snapshot = await app.state.execution_repository.get_snapshot(run_id)
+            assert [(message.role, message.content) for message in snapshot.messages[-3:]] == [
+                ("user", "old question"), ("assistant", "old answer"), ("user", "new question")]
+            assert snapshot.harness_state["structured_state"]["context_source"] == "desktop_snapshot"
+
+
 @asynccontextmanager
 async def api(tmp_path):
     app = make_app(tmp_path, workspace_allowed_roots=[tmp_path])
@@ -325,11 +366,7 @@ async def test_code_waiting_has_versioned_recovery_action(tmp_path, monkeypatch)
     ("unknown", "unknown_side_effect", "manual_review", "waiting"),
     ("policy", "policy_mismatch", "reject", "waiting"),
 ])
-async def test_real_recovery_http_response_renders_in_frontend(tmp_path, scenario, reason, decision, status):
-    import json
-    from pathlib import Path
-    import subprocess
-
+async def test_recovery_http_actions_report_versioned_state(tmp_path, scenario, reason, decision, status):
     import aiosqlite
     from app.agent.models import CodeTaskRequest
     from test_execution_recovery import operation, seed_operation
@@ -349,7 +386,6 @@ async def test_real_recovery_http_response_renders_in_frontend(tmp_path, scenari
             app.state.config.code_task_tool_timeout_seconds = 19
         before = await service.run_repository.get_run(run.id)
         payload = (await client.get(f"/api/tasks/{run.id}")).json()
-        responses = []
         for action in ("inspect_recovery", "continue_recovery"):
             response = await client.post(f"/api/tasks/{run.id}/actions", json={
                 "action": action, "action_id": payload["pending_action"]["action_id"],
@@ -367,12 +403,3 @@ async def test_real_recovery_http_response_renders_in_frontend(tmp_path, scenari
                 assert payload["status"] == "waiting"
             else:
                 assert payload["status"] == status
-            responses.append(payload)
-
-        # Feed actual ASGI HTTP JSON through the frontend API client and real React card.
-        frontend = Path(__file__).resolve().parents[2] / "frontend"
-        rendered = subprocess.run(
-            ["node", str(frontend / "tests" / "recovery-http-render.mjs")],
-            input=json.dumps(responses), text=True, capture_output=True, cwd=frontend, check=False,
-        )
-        assert rendered.returncode == 0, rendered.stderr

@@ -15,9 +15,11 @@ from fastapi.responses import JSONResponse
 
 def install_desktop(app: FastAPI, *, token: str, instance: str,
                     owner: str | None, stop: Callable[[], None]) -> None:
+    app.state.desktop_connection_installed = True
     clients: set[str] = set()
     gate = asyncio.Lock()
     closing = False
+    pending_owner_shutdown = False
 
     async def facts():
         async with aiosqlite.connect(app.state.config.database_path) as db:
@@ -48,24 +50,44 @@ def install_desktop(app: FastAPI, *, token: str, instance: str,
 
     @app.post("/api/desktop/attach")
     async def attach(request: Request):
+        nonlocal pending_owner_shutdown
         client = request.headers.get("X-Tomato-Client", "")
         if not client or len(client) > 128:
             return JSONResponse({"detail": {"code": "desktop_client_required"}}, status_code=400)
+        pending_owner_shutdown = False
         clients.add(client)
         return await facts()
 
+    async def shutdown_when_idle():
+        nonlocal closing, pending_owner_shutdown
+        while True:
+            await asyncio.sleep(1)
+            async with gate:
+                if not pending_owner_shutdown:
+                    return
+                result = await facts()
+                if result["active_tasks"] == 0 and not clients:
+                    pending_owner_shutdown = False
+                    closing = True
+                    stop()
+                    return
+
     @app.post("/api/desktop/close")
     async def close(request: Request):
-        nonlocal closing
+        nonlocal closing, pending_owner_shutdown
         client = request.headers.get("X-Tomato-Client", "")
         if client not in clients:
             return JSONResponse({"detail": {"code": "desktop_client_not_attached"}}, status_code=409)
         clients.remove(client)
         result = await facts()
         supplied = request.headers.get("X-Tomato-Owner", "").encode()
-        shutdown = bool(owner and hmac.compare_digest(supplied, owner.encode())
-                        and result["active_tasks"] == 0 and not clients)
+        owner_close = bool(owner and hmac.compare_digest(supplied, owner.encode()) and not clients)
+        shutdown = owner_close and result["active_tasks"] == 0
+        shutdown_pending = owner_close and result["active_tasks"] > 0
         if shutdown:
             closing = True
             stop()
-        return {**result, "shutdown": shutdown}
+        elif shutdown_pending and not pending_owner_shutdown:
+            pending_owner_shutdown = True
+            asyncio.create_task(shutdown_when_idle())
+        return {**result, "shutdown": shutdown, "shutdown_pending": shutdown_pending}

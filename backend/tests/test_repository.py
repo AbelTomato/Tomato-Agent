@@ -115,7 +115,8 @@ async def test_repository_reads_runtime_state_for_recovery(tmp_path: Path):
     remaining_events = await repo.list_events(run_id, after_sequence=first_sequence)
     checkpoint = await repo.get_checkpoint(run_id)
 
-    assert session is not None and session.metadata == {"memory": ["fact"]}
+    assert session is not None
+    assert session.metadata == {"memory": ["fact"], "title": "未命名对话"}
     assert run is not None and run.status == "paused"
     assert run.loop_count == 2 and run.state == {"phase": "waiting_tool"}
     assert [event.sequence for event in events] == [1, 2]

@@ -171,11 +171,11 @@ async def test_code_registry_declares_actual_capabilities_and_is_opt_in(environm
 
 
 @pytest.mark.asyncio
-async def test_symlink_and_file_size_rejected(environment, tmp_path):
+async def test_symlink_and_file_size_rejected(environment, tmp_path, create_symlink):
     registry, context, _, workspace, _, _ = environment
     outside = tmp_path / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
-    (workspace.repo_path / "link").symlink_to(outside)
+    create_symlink(workspace.repo_path / "link", outside)
     assert not (await registry.execute("read_file", {"path": "link"}, context)).success
     assert not (await registry.execute("write_file", {"path": "huge", "content": "x" * 100001}, context)).success
 
