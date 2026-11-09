@@ -84,13 +84,52 @@ try {
     Remove-Item -LiteralPath $override -ErrorAction SilentlyContinue
 }
 
-foreach ($artifact in @(
+$artifacts = @(
     (Join-Path $env:CARGO_TARGET_DIR "release\tomato-agent-desktop.exe"),
     (Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis\Tomato Agent_0.1.0_x64-setup.exe")
-)) {
+)
+foreach ($artifact in $artifacts) {
     if (!(Test-Path -LiteralPath $artifact)) { throw "Expected build artifact not found: $artifact" }
     $item = Get-Item -LiteralPath $artifact
     $hash = Get-FileHash -LiteralPath $artifact -Algorithm SHA256
     Write-Output ("Artifact: {0}; bytes={1}; SHA256={2}" -f $item.FullName, $item.Length, $hash.Hash)
 }
+$installer = Get-Item -LiteralPath $artifacts[1]
+$installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+$gitCommit = (& wsl.exe --distribution $WslDistro --exec git -C $repoRootLinux rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw "Could not determine the source Git commit for the archive manifest." }
+$gitStatus = & wsl.exe --distribution $WslDistro --exec git -C $repoRootLinux status --porcelain
+if ($LASTEXITCODE -ne 0) { throw "Could not determine whether the source worktree is dirty." }
+$archiveRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\installers"
+New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
+$archiveTimestamp = Get-Date
+$archiveDirectory = Join-Path $archiveRoot $archiveTimestamp.ToString("yyyyMMdd-HHmmss")
+if (Test-Path -LiteralPath $archiveDirectory) {
+    throw "Installer archive already exists; refusing to overwrite: $archiveDirectory"
+}
+New-Item -ItemType Directory -Path $archiveDirectory -ErrorAction Stop | Out-Null
+$archivedInstaller = Join-Path $archiveDirectory "TomatoAgent-setup.exe"
+Copy-Item -LiteralPath $installer.FullName -Destination $archivedInstaller -ErrorAction Stop
+
+$manifest = [ordered]@{
+    archivedAtLocal = $archiveTimestamp.ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz")
+    applicationVersion = "0.1.0"
+    gitCommit = $gitCommit
+    gitWorktree = if ($gitStatus) { "dirty" } else { "clean" }
+    target = "windows-x64"
+    buildCommand = "desktop/scripts/windows.ps1 -Action build-chat"
+    installerFile = [ordered]@{
+        name = [IO.Path]::GetFileName($archivedInstaller)
+        sizeBytes = (Get-Item -LiteralPath $archivedInstaller).Length
+        sha256 = $installerHash
+    }
+}
+$manifestPath = Join-Path $archiveDirectory "manifest.json"
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$archivedHash = (Get-FileHash -LiteralPath $archivedInstaller -Algorithm SHA256).Hash
+if ($archivedHash -ne $installerHash) {
+    throw "Archived installer hash does not match the build output: $archiveDirectory"
+}
+Write-Output "Archived installer: $archivedInstaller"
+Write-Output "Archive manifest: $manifestPath"
 exit 0

@@ -15,7 +15,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls", "system-proxy"] }
 tokio = { version = "1", features = ["macros", "time"] }
 keyring = { version = "3", features = ["windows-native"] }
 uuid = { version = "1", features = ["v4"] }

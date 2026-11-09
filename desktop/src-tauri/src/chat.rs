@@ -476,7 +476,7 @@ pub async fn desktop_chat_test_connection(runtime: tauri::State<'_, ChatRuntime>
         .or(runtime.credentials.get()?).filter(|value| !value.is_empty()).ok_or("请先配置 API Key")?;
     let endpoint = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20)).build()
+        .timeout(std::time::Duration::from_secs(120)).build()
         .map_err(|_| "无法初始化 Provider 请求".to_string())?;
     let cancel = Arc::new(AtomicBool::new(false));
     if let Some(previous) = runtime.connection_test_cancellation.lock().map_err(|_| "聊天状态不可用".to_string())?.replace(cancel.clone()) {

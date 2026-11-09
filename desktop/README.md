@@ -48,7 +48,7 @@ Pop-Location
 & .\desktop\scripts\windows.ps1 -Action build-chat
 ```
 
-脚本在当前 WSL 发行版中使用缓存的 pnpm 10.34.5 构建 `frontend/dist`，确认产物更新后，再初始化 Windows x64 MSVC 环境并调用 Windows 本地 Tauri CLI 生成 chat-only Release/NSIS。若工作树不在 `\\wsl.localhost\<发行版>\...` 路径下，可显式传入 `-WslDistro <发行版名>`。脚本不会安装依赖、启动安装器或归档安装包；结束时打印 exe 和安装包的 SHA-256。
+脚本在当前 WSL 发行版中使用缓存的 pnpm 10.34.5 构建 `frontend/dist`，确认产物更新后，再初始化 Windows x64 MSVC 环境并调用 Windows 本地 Tauri CLI 生成 chat-only Release/NSIS。若工作树不在 `\\wsl.localhost\<发行版>\...` 路径下，可显式传入 `-WslDistro <发行版名>`。构建成功后，脚本自动把安装包及 `manifest.json` 归档到 `%LOCALAPPDATA%\TomatoAgent\installers\yyyyMMdd-HHmmss\`；原始构建产物保留，目标目录冲突时拒绝覆盖。归档字段与目录约定见 [Windows 安装包归档约定](../docs/local/windows-installer-archive.md)。
 
 官方 NSIS 插件下载受阻时，手动下载后应核对 CLI 对应版本的官方哈希，缓存路径为 `%LOCALAPPDATA%\tauri\NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll`，不可省略 `additional`。CLI 2.12.3使用插件0.5.3，官方源码SHA-1为 `75197FEE3C6A814FE035788D1C34EAD39349B860`；本次实际文件SHA-256及安装包指纹见技术验证文档。
 
