@@ -4,13 +4,15 @@ import { invoke } from '@tauri-apps/api/core';
 import type { FormEvent } from 'react';
 
 type Message = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; created_at: string };
-type Session = { id: string; title: string; created_at: string };
+type Session = { id: string; title: string; created_at: string; project_id: string | null };
+type Project = { id: string; name: string; root_path: string; available: boolean; created_at: string; updated_at: string };
 type Delta = { session_id: string; delta: string };
 
 export function DesktopChatApp() {
   const [configured, setConfigured] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -56,15 +58,26 @@ export function DesktopChatApp() {
       setError(event.payload.error);
       void invoke<Message[]>('desktop_chat_history', { sessionId: event.payload.session_id }).then(setMessages);
     });
-    void invoke<Session[]>('desktop_chat_sessions').then(async list => {
+    void Promise.all([invoke<Session[]>('desktop_chat_sessions'), invoke<Project[]>('desktop_chat_projects')]).then(async ([list, projectList]) => {
       if (!active) return;
       setSessions(list);
+      setProjects(projectList);
       const id = await invoke<string | null>('desktop_chat_latest_session');
       if (!active || !id) return;
       await selectSession(id);
     }).catch(reason => { if (active) setError(String(reason)); });
     return () => { active = false; void completed.then(stop => stop()); void cancelled.then(stop => stop()); void failed.then(stop => stop()); };
   }, []);
+
+  async function refreshNavigation() {
+    const [list, projectList] = await Promise.all([
+      invoke<Session[]>('desktop_chat_sessions'),
+      invoke<Project[]>('desktop_chat_projects'),
+    ]);
+    setSessions(list);
+    setProjects(projectList);
+    return list;
+  }
 
   async function selectSession(id: string) {
     if (activeSession.current !== id && busy) await invoke('desktop_chat_cancel').catch(() => undefined);
@@ -81,12 +94,48 @@ export function DesktopChatApp() {
     try {
       if (busy) await invoke('desktop_chat_cancel');
       const id = await invoke<string>('desktop_chat_create_session');
-      const list = await invoke<Session[]>('desktop_chat_sessions');
-      setSessions(list);
+      await refreshNavigation();
       activeSession.current = id;
       setSessionId(id);
       setMessages([]);
       setBusy(false);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function createProject() {
+    setError('');
+    try {
+      const rootPath = await invoke<string | null>('desktop_chat_pick_project_directory');
+      if (!rootPath) return;
+      const suggested = rootPath.split(/[\\/]/).filter(Boolean).at(-1) || '新项目';
+      const name = window.prompt('项目名称', suggested);
+      if (name === null) return;
+      await invoke('desktop_chat_create_project', { input: { rootPath, name } });
+      await refreshNavigation();
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function renameProject(project: Project) {
+    const name = window.prompt('项目名称', project.name);
+    if (name === null) return;
+    try {
+      await invoke('desktop_chat_rename_project', { projectId: project.id, name });
+      await refreshNavigation();
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function deleteProject(project: Project) {
+    if (!window.confirm(`删除项目“${project.name}”？会话和磁盘目录会保留。`)) return;
+    try {
+      await invoke('desktop_chat_delete_project', { projectId: project.id });
+      await refreshNavigation();
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function setSessionProject(session: Session, projectId: string) {
+    try {
+      await invoke('desktop_chat_set_session_project', { input: { sessionId: session.id, projectId: projectId || null } });
+      await refreshNavigation();
     } catch (reason) { setError(String(reason)); }
   }
 
@@ -104,8 +153,7 @@ export function DesktopChatApp() {
     try {
       if (activeSession.current === session.id && busy) await invoke('desktop_chat_cancel');
       await invoke('desktop_chat_delete_session', { sessionId: session.id });
-      const list = await invoke<Session[]>('desktop_chat_sessions');
-      setSessions(list);
+      const list = await refreshNavigation();
       if (activeSession.current === session.id) {
         activeSession.current = null;
         setSessionId(null);
@@ -161,12 +209,33 @@ export function DesktopChatApp() {
       <aside className="desktop-chat-sidebar">
         <header><h1>Tomato Agent</h1><button type="button" onClick={() => setSettings(true)} aria-label="模型设置">设置</button></header>
         <button type="button" onClick={() => void createSession()}>新建对话</button>
-        {sessions.length === 0 && <p>尚无对话</p>}
-        {sessions.map(session => <div className="desktop-chat-session-row" key={session.id}>
-          <button type="button" className={`desktop-chat-session${session.id === sessionId ? ' active' : ''}`} onClick={() => void selectSession(session.id)}>{session.title}</button>
-          <button type="button" aria-label={`重命名 ${session.title}`} onClick={() => void renameSession(session)}>重命名</button>
-          <button type="button" aria-label={`删除 ${session.title}`} onClick={() => void deleteSession(session)}>删除</button>
-        </div>)}
+        <button type="button" className="secondary-button" onClick={() => void createProject()}>新建项目</button>
+        {projects.map(project => <section className="desktop-chat-project" key={project.id}>
+          <header title={project.root_path}><div><strong>{project.name}</strong><small>{project.available ? project.root_path : '目录不可用'}</small></div><span>
+            <button type="button" aria-label={`重命名项目 ${project.name}`} onClick={() => void renameProject(project)}>改名</button>
+            <button type="button" aria-label={`删除项目 ${project.name}`} onClick={() => void deleteProject(project)}>删除</button>
+          </span></header>
+          {sessions.filter(session => session.project_id === project.id).map(session => <div className="desktop-chat-session-row" key={session.id}>
+            <button type="button" className={`desktop-chat-session${session.id === sessionId ? ' active' : ''}`} onClick={() => void selectSession(session.id)}>{session.title}</button>
+            <select aria-label={`归类 ${session.title}`} value={session.project_id ?? ''} onChange={event => void setSessionProject(session, event.target.value)}>
+              <option value="">独立会话</option>{projects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+            <button type="button" aria-label={`重命名 ${session.title}`} onClick={() => void renameSession(session)}>重命名</button>
+            <button type="button" aria-label={`删除 ${session.title}`} onClick={() => void deleteSession(session)}>删除</button>
+          </div>)}
+          {!sessions.some(session => session.project_id === project.id) && <p className="desktop-chat-project-empty">暂无归类会话</p>}
+        </section>)}
+        <section className="desktop-chat-project desktop-chat-independent"><h2>独立会话</h2>
+          {sessions.filter(session => !session.project_id).map(session => <div className="desktop-chat-session-row" key={session.id}>
+            <button type="button" className={`desktop-chat-session${session.id === sessionId ? ' active' : ''}`} onClick={() => void selectSession(session.id)}>{session.title}</button>
+            <select aria-label={`归类 ${session.title}`} value={session.project_id ?? ''} onChange={event => void setSessionProject(session, event.target.value)}>
+              <option value="">独立会话</option>{projects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+            <button type="button" aria-label={`重命名 ${session.title}`} onClick={() => void renameSession(session)}>重命名</button>
+            <button type="button" aria-label={`删除 ${session.title}`} onClick={() => void deleteSession(session)}>删除</button>
+          </div>)}
+          {sessions.length === 0 && <p>尚无对话</p>}
+        </section>
       </aside>
       <section className="desktop-chat-main" aria-label="聊天内容">
         <div className="desktop-chat-messages" aria-live="polite">

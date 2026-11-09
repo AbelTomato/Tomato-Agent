@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +51,31 @@ pub struct ChatSession {
     pub id: String,
     pub title: String,
     pub created_at: String,
+    pub project_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatProject {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    pub available: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectInput {
+    pub root_path: String,
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSessionProjectInput {
+    pub session_id: String,
+    pub project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,8 +98,13 @@ impl ChatStore {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
+             CREATE TABLE IF NOT EXISTS projects (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS sessions (
-                 id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL
+                 id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL,
+                 project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
              );
              CREATE TABLE IF NOT EXISTS messages (
                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -81,6 +112,15 @@ impl ChatStore {
                  created_at TEXT NOT NULL
              );",
         ).map_err(|_| "无法初始化聊天数据库".to_string())?;
+        let columns = connection.prepare("PRAGMA table_info(sessions)")
+            .map_err(|_| "无法读取聊天数据库结构".to_string())?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|_| "无法读取聊天数据库结构".to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取聊天数据库结构".to_string())?;
+        if !columns.iter().any(|column| column == "project_id") {
+            connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL", [])
+                .map_err(|_| "无法升级聊天数据库".to_string())?;
+        }
         Ok(Self { connection: Mutex::new(connection) })
     }
 
@@ -95,11 +135,72 @@ impl ChatStore {
 
     pub fn sessions(&self) -> Result<Vec<ChatSession>, String> {
         let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
-        let mut statement = connection.prepare("SELECT id,title,created_at FROM sessions ORDER BY created_at DESC,id DESC")
+        let mut statement = connection.prepare("SELECT id,title,created_at,project_id FROM sessions ORDER BY created_at DESC,id DESC")
             .map_err(|_| "无法读取对话列表".to_string())?;
-        let rows = statement.query_map([], |row| Ok(ChatSession { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)? }))
+        let rows = statement.query_map([], |row| Ok(ChatSession { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)?, project_id: row.get(3)? }))
             .map_err(|_| "无法读取对话列表".to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取对话列表".to_string())
+    }
+
+    pub fn projects(&self) -> Result<Vec<ChatProject>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,root_path,created_at,updated_at FROM projects ORDER BY name COLLATE NOCASE,id",
+        ).map_err(|_| "无法读取项目列表".to_string())?;
+        let rows = statement.query_map([], |row| {
+            let root_path: String = row.get(2)?;
+            Ok(ChatProject { id: row.get(0)?, name: row.get(1)?, available: Path::new(&root_path).is_dir(),
+                root_path, created_at: row.get(3)?, updated_at: row.get(4)? })
+        }).map_err(|_| "无法读取项目列表".to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取项目列表".to_string())
+    }
+
+    pub fn create_project(&self, root_path: &str, name: Option<&str>) -> Result<ChatProject, String> {
+        let root_path = normalize_project_path(root_path)?;
+        if !Path::new(&root_path).is_dir() { return Err("项目目录不可用".into()); }
+        let name = normalize_project_name(name.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
+            Path::new(&root_path).file_name().and_then(|value| value.to_str()).unwrap_or("新项目")
+        }))?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let timestamp = utc_now();
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES(?1,?2,?3,?4,?5)",
+                params![id, name, root_path, timestamp, timestamp])
+            .map_err(|error| -> String {
+                if error.to_string().contains("UNIQUE") { "该目录已经绑定项目".into() }
+                else { "无法创建项目".into() }
+            })?;
+        Ok(ChatProject { id, name, root_path, available: true, created_at: timestamp.clone(), updated_at: timestamp })
+    }
+
+    pub fn rename_project(&self, project_id: &str, name: &str) -> Result<(), String> {
+        let name = normalize_project_name(name)?;
+        let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("UPDATE projects SET name=?1,updated_at=?2 WHERE id=?3", params![name, utc_now(), project_id])
+            .map_err(|_| "无法重命名项目".to_string())?;
+        if changed == 0 { return Err("项目不存在".into()); }
+        Ok(())
+    }
+
+    pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("DELETE FROM projects WHERE id=?1", [project_id])
+            .map_err(|_| "无法删除项目".to_string())?;
+        if changed == 0 { return Err("项目不存在".into()); }
+        Ok(())
+    }
+
+    pub fn set_session_project(&self, session_id: &str, project_id: Option<&str>) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        if let Some(project_id) = project_id {
+            let exists: Option<String> = connection.query_row("SELECT id FROM projects WHERE id=?1", [project_id], |row| row.get(0))
+                .optional().map_err(|_| "无法读取项目".to_string())?;
+            if exists.is_none() { return Err("项目不存在".into()); }
+        }
+        let changed = connection.execute("UPDATE sessions SET project_id=?1 WHERE id=?2", params![project_id, session_id])
+            .map_err(|_| "无法更新对话项目".to_string())?;
+        if changed == 0 { return Err("对话不存在".into()); }
+        Ok(())
     }
 
     pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
@@ -159,6 +260,28 @@ fn normalize_title(title: &str) -> Result<String, String> {
         return Err("对话标题无效".into());
     }
     Ok(title.to_string())
+}
+
+fn normalize_project_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().any(char::is_control) || name.chars().count() > 120 {
+        return Err("项目名称无效".into());
+    }
+    Ok(name.to_string())
+}
+
+fn normalize_project_path(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+        || value.split(['/', '\\']).any(|part| part == "..") {
+        return Err("项目目录路径无效".into());
+    }
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err("项目目录必须是绝对路径".into());
+    }
+    std::fs::canonicalize(path).map(|path| path.to_string_lossy().into_owned())
+        .map_err(|_| "项目目录不可用".into())
 }
 
 #[derive(Default)]
@@ -363,6 +486,41 @@ pub fn desktop_chat_status(runtime: tauri::State<'_, ChatRuntime>) -> ChatStatus
 }
 
 #[tauri::command]
+pub async fn desktop_chat_pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_folder()
+            .map(|path| path.into_path().map_err(|_| "所选目录不是本地文件系统路径".to_string()))
+            .transpose()
+            .map(|path| path.map(|value| value.to_string_lossy().into_owned()))
+    }).await.map_err(|_| "目录选择器执行失败".to_string())?
+}
+
+#[tauri::command]
+pub fn desktop_chat_projects(runtime: tauri::State<'_, ChatRuntime>) -> Result<Vec<ChatProject>, String> {
+    runtime.store.projects()
+}
+
+#[tauri::command]
+pub fn desktop_chat_create_project(runtime: tauri::State<'_, ChatRuntime>, input: CreateProjectInput) -> Result<ChatProject, String> {
+    runtime.store.create_project(&input.root_path, input.name.as_deref())
+}
+
+#[tauri::command]
+pub fn desktop_chat_rename_project(runtime: tauri::State<'_, ChatRuntime>, project_id: String, name: String) -> Result<(), String> {
+    runtime.store.rename_project(&project_id, &name)
+}
+
+#[tauri::command]
+pub fn desktop_chat_delete_project(runtime: tauri::State<'_, ChatRuntime>, project_id: String) -> Result<(), String> {
+    runtime.store.delete_project(&project_id)
+}
+
+#[tauri::command]
+pub fn desktop_chat_set_session_project(runtime: tauri::State<'_, ChatRuntime>, input: SetSessionProjectInput) -> Result<(), String> {
+    runtime.store.set_session_project(&input.session_id, input.project_id.as_deref())
+}
+
+#[tauri::command]
 pub fn desktop_chat_configure(runtime: tauri::State<'_, ChatRuntime>, input: ChatConfigInput) -> Result<ChatConfig, String> {
     let config = ChatConfig::new(input.base_url, input.model)?;
     if let Some(key) = input.api_key.filter(|v| !v.is_empty()) { runtime.credentials.set(&key)?; }
@@ -546,6 +704,45 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "hello");
         assert!(messages[0].created_at.ends_with('Z'));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn projects_group_sessions_without_deleting_history_or_directories() {
+        let root = std::env::temp_dir().join(format!("desktop-chat-project-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("chat.sqlite3");
+        let store = ChatStore::open(&db).unwrap();
+        let session = store.create_session("Conversation").unwrap();
+        let project = store.create_project(root.to_str().unwrap(), Some("Workspace")).unwrap();
+        assert!(store.create_project(root.to_str().unwrap(), Some("Duplicate")).is_err());
+        assert!(store.create_project("relative/path", Some("Invalid")).is_err());
+        assert!(store.set_session_project(&session, Some("missing-project")).is_err());
+        store.append_message(&session, "user", "Keep me").unwrap();
+        assert_eq!(store.projects().unwrap()[0].root_path, std::fs::canonicalize(&root).unwrap().to_string_lossy());
+        store.set_session_project(&session, Some(&project.id)).unwrap();
+        assert_eq!(store.sessions().unwrap()[0].project_id.as_deref(), Some(project.id.as_str()));
+        store.rename_project(&project.id, "Renamed").unwrap();
+        store.delete_project(&project.id).unwrap();
+        assert!(store.sessions().unwrap()[0].project_id.is_none());
+        assert_eq!(store.messages(&session).unwrap().len(), 1);
+        assert!(root.is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_sessions_are_migrated_without_project_assignment() {
+        let path = std::env::temp_dir().join(format!("desktop-chat-legacy-{}.db", uuid::Uuid::new_v4()));
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL)", []).unwrap();
+            connection.execute("INSERT INTO sessions VALUES ('legacy', 'Legacy', '2026-01-01T00:00:00Z')", []).unwrap();
+        }
+        let store = ChatStore::open(&path).unwrap();
+        let session = store.sessions().unwrap();
+        assert_eq!(session.len(), 1);
+        assert!(session[0].project_id.is_none());
+        assert!(store.projects().unwrap().is_empty());
         let _ = std::fs::remove_file(path);
     }
 

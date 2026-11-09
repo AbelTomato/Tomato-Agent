@@ -17,8 +17,15 @@ fn main() {
     use tauri::Manager;
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             chat::desktop_chat_status,
+            chat::desktop_chat_pick_project_directory,
+            chat::desktop_chat_projects,
+            chat::desktop_chat_create_project,
+            chat::desktop_chat_rename_project,
+            chat::desktop_chat_delete_project,
+            chat::desktop_chat_set_session_project,
             chat::desktop_chat_configure,
             chat::desktop_chat_delete_credential,
             chat::desktop_chat_create_session,

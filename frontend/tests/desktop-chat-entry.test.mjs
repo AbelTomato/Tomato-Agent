@@ -17,7 +17,7 @@ test('desktop chat development route selects an isolated empty chat shell', asyn
   assert.match(component, /desktop_chat_send/);
   assert.match(component, /desktop_chat_history/);
   assert.match(component, /desktop_chat_cancel/);
-  assert.doesNotMatch(component, /DesktopConnection|ConversationShell|Project|Workspace/i);
+  assert.doesNotMatch(component, /DesktopConnection|ConversationShell|Workspace/i);
 });
 
 test('native chat command namespace is independent and has no startup side effects', async () => {
@@ -55,4 +55,14 @@ test('desktop chat exposes session management and explicit real-provider connect
   assert.match(component, /window\.confirm/);
   assert.match(component, /desktop_chat_test_connection/);
   assert.doesNotMatch(component, /Fake Provider/);
+});
+
+test('desktop chat exposes project directory grouping without file-access coupling', async () => {
+  const component = await readFile(chatApp, 'utf8');
+  assert.match(component, /desktop_chat_pick_project_directory/);
+  assert.match(component, /desktop_chat_create_project/);
+  assert.match(component, /desktop_chat_set_session_project/);
+  assert.match(component, /desktop_chat_delete_project/);
+  assert.match(component, /独立会话/);
+  assert.doesNotMatch(component, /desktop_chat_send.*rootPath|workspace|read_file|wsl/i);
 });

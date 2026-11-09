@@ -90,9 +90,19 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .desktop-chat-sidebar { display: grid; align-content: start; gap: 12px; padding: 16px; background: #fff; border-right: 1px solid #d8dfe4; }
 .desktop-chat-sidebar header, .desktop-chat-settings header, .desktop-chat-settings footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .desktop-chat-sidebar h1 { margin: 0; font-size: 18px; }
+.desktop-chat-project { display: grid; gap: 6px; min-width: 0; padding-top: 10px; border-top: 1px solid #e2e8ec; }
+.desktop-chat-project > header { align-items: flex-start; padding: 0; border: 0; }
+.desktop-chat-project > header > div { display: grid; gap: 3px; min-width: 0; }
+.desktop-chat-project > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-chat-project > header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #687783; font-size: 11px; }
+.desktop-chat-project > header > span { display: flex; flex: none; gap: 4px; }
+.desktop-chat-project > header button, .desktop-chat-session-row button[aria-label^="重命名"], .desktop-chat-session-row button[aria-label^="删除"] { padding: 4px 6px; font-size: 11px; }
+.desktop-chat-independent h2 { margin: 0; font-size: 13px; color: #526171; }
+.desktop-chat-project-empty { margin: 0; color: #687783; font-size: 12px; }
 .desktop-chat-session { text-align: left; }
-.desktop-chat-session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px; align-items: center; }
+.desktop-chat-session-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(88px, auto) auto auto; gap: 4px; align-items: center; }
 .desktop-chat-session-row .desktop-chat-session { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-chat-session-row select { min-width: 0; padding: 4px 6px; font-size: 11px; }
 .desktop-chat-session.active { border-color: #227a66; background: #e8f5f0; }
 .desktop-chat-main { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; min-width: 0; max-width: 900px; width: 100%; margin: 0 auto; padding: 24px; }
 .desktop-chat-messages { display: grid; align-content: start; gap: 16px; padding-block: 16px 28px; }
