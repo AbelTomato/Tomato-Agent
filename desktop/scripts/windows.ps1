@@ -5,6 +5,12 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+# WSL-launched PowerShell may omit PATHEXT, causing native commands to launch
+# through file associations without a usable exit code.
+if (($env:PATHEXT -split ';') -notcontains '.EXE') {
+    $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;$env:PATHEXT"
+}
+
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 $env:Path = (Join-Path $env:USERPROFILE ".cargo\bin") + ";" + $userPath + ";" + $machinePath

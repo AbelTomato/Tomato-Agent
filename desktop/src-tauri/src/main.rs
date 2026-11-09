@@ -29,6 +29,7 @@ fn main() {
             chat::desktop_chat_configure,
             chat::desktop_chat_delete_credential,
             chat::desktop_chat_create_session,
+            chat::desktop_chat_select_session,
             chat::desktop_chat_sessions,
             chat::desktop_chat_rename_session,
             chat::desktop_chat_delete_session,

@@ -6,9 +6,9 @@
 
 Windows 用户配置、数据备份、网络错误和卸载说明见[Windows 普通聊天使用说明](../docs/Windows普通聊天使用说明.md)。
 
-聊天版支持多会话创建、切换、重命名、确认删除，当前会话历史分页/恢复，以及类似 Codex Projects 的本地项目归类：项目绑定一个本地目录，会话可移入或移出项目，删除项目不会删除会话或磁盘目录。OpenAI Chat Completions 兼容 SSE 流式回复、取消和显式连接测试也已支持。请求仅携带所选会话消息，不自动重试；失败或取消时不把部分回复保存成完整 assistant 消息。聊天运行时在 Tauri/Rust 进程内运行，不依赖 Python sidecar 或 WSL；SQLite 使用 bundled 库，API Key 由 Windows Credential Manager 保存。项目目录当前只用于会话整理，不授予文件访问权限。阶段 2 的工程测试和 Linux chat-mode 构建不等于阶段 3 的 Windows x64 安装资源启动验收，也不等于真实 Provider 验收；这些证据按 MVP 计划分别记录。
+聊天版支持多会话创建、切换、重命名、确认删除，当前会话选择与历史恢复、历史分页接口，以及类似 Codex Projects 的本地项目归类：项目绑定一个本地目录，会话可移入或移出项目，删除项目不会删除会话或磁盘目录。OpenAI Chat Completions 兼容 SSE 流式回复、取消和显式连接测试也已支持。请求仅携带所选会话消息，不自动重试；失败或取消时不把部分回复保存成完整 assistant 消息。聊天运行时在 Tauri/Rust 进程内运行，不依赖 Python sidecar 或 WSL；SQLite 使用 bundled 库，API Key 由 Windows Credential Manager 保存。项目目录当前只用于会话整理，不授予文件访问权限。阶段 2 的工程测试和 Linux chat-mode 构建不等于阶段 3 的 Windows x64 安装资源启动验收，也不等于真实 Provider 验收；这些证据按 MVP 计划分别记录。
 
-本工程已完成 Windows 桌面连接/生命周期的既有实现；桌面项目多目录计划阶段二的原生目录选择与路径桥接已实现，Windows 原生窗口人工验收待完成。共享前端在 Tauri 中提供 WSL 连接、原生认证请求桥、会话界面和受控退出；Web 模式保留原入口。项目导航、自动标题及完整产品交付尚未完成。连接、凭据、进程所有权及验收限制见 [桌面连接与生命周期](../docs/Windows桌面连接与生命周期.md)。
+本工程已完成 Windows 桌面连接/生命周期的既有实现；桌面项目多目录计划阶段二的原生目录选择与路径桥接已实现，Windows 原生窗口人工验收待完成。共享前端在 Tauri 中提供 WSL 连接、原生认证请求桥、会话界面和受控退出；Web 模式保留原入口。既有 WSL 工作区的项目导航、自动标题及完整产品交付尚未完成；上方 chat-only 项目归类有独立实现与验收。连接、凭据、进程所有权及验收限制见 [桌面连接与生命周期](../docs/Windows桌面连接与生命周期.md)。
 
 ## 已声明依赖与路径
 
@@ -40,7 +40,7 @@ npm.cmd exec --yes --package=pnpm@10.34.5 -- pnpm add --save-exact @tauri-apps/c
 Pop-Location
 ```
 
-`scripts/windows.ps1` 封装相同命令；若系统拒绝 UNC 未签名脚本，执行上面的明确命令，不更改执行策略。
+`scripts/windows.ps1` 封装相同命令，并在从 WSL 启动时补齐缺失的 Windows 可执行扩展名识别变量；若系统拒绝 UNC 未签名脚本，执行上面的明确命令，不更改执行策略。
 
 普通聊天版 Windows Release/NSIS 使用整合脚本，从仓库根目录执行：
 

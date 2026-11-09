@@ -52,7 +52,8 @@ test('desktop chat exposes session management and explicit real-provider connect
   assert.match(component, /desktop_chat_sessions/);
   assert.match(component, /desktop_chat_rename_session/);
   assert.match(component, /desktop_chat_delete_session/);
-  assert.match(component, /window\.confirm/);
+  assert.match(component, /确认删除/);
+  assert.doesNotMatch(component, /window\.(prompt|confirm)/);
   assert.match(component, /desktop_chat_test_connection/);
   assert.doesNotMatch(component, /Fake Provider/);
 });

@@ -98,6 +98,8 @@ impl ChatStore {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
+             BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS chat_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS projects (
                  id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE,
                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -121,16 +123,37 @@ impl ChatStore {
             connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL", [])
                 .map_err(|_| "无法升级聊天数据库".to_string())?;
         }
+        connection.execute_batch("COMMIT;").map_err(|_| "无法完成聊天数据库升级".to_string())?;
         Ok(Self { connection: Mutex::new(connection) })
     }
 
     pub fn create_session(&self, title: &str) -> Result<String, String> {
+        self.create_session_in_project(title, None)
+    }
+
+    pub fn create_session_in_project(&self, title: &str, project_id: Option<&str>) -> Result<String, String> {
         let title = normalize_title(title)?;
         let id = uuid::Uuid::new_v4().to_string();
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .execute("INSERT INTO sessions(id,title,created_at) VALUES(?1,?2,?3)",
-                params![id, title, utc_now()]).map_err(|_| "无法创建对话".to_string())?;
+        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection.transaction().map_err(|_| "无法创建对话".to_string())?;
+        if let Some(project_id) = project_id {
+            if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)", [project_id], |row| row.get::<_, bool>(0))
+                .map_err(|_| "无法读取项目".to_string())? { return Err("项目不存在".into()); }
+        }
+        transaction.execute("INSERT INTO sessions(id,title,created_at,project_id) VALUES(?1,?2,?3,?4)",
+            params![id, title, utc_now(), project_id]).map_err(|_| "无法创建对话".to_string())?;
+        transaction.execute("INSERT OR REPLACE INTO chat_preferences(key,value) VALUES('current_session',?1)", [&id])
+            .map_err(|_| "无法保存当前对话".to_string())?;
+        transaction.commit().map_err(|_| "无法创建对话".to_string())?;
         Ok(id)
+    }
+
+    pub fn select_session(&self, session_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let changed = connection.execute("INSERT OR REPLACE INTO chat_preferences(key,value) SELECT 'current_session',id FROM sessions WHERE id=?1", [session_id])
+            .map_err(|_| "无法保存当前对话".to_string())?;
+        if changed == 0 { return Err("对话不存在".into()); }
+        Ok(())
     }
 
     pub fn sessions(&self) -> Result<Vec<ChatSession>, String> {
@@ -249,7 +272,7 @@ impl ChatStore {
 
     pub fn latest_session(&self) -> Result<Option<String>, String> {
         self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT id FROM sessions ORDER BY created_at DESC,id DESC LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT id FROM sessions ORDER BY (id=(SELECT value FROM chat_preferences WHERE key='current_session')) IS TRUE DESC,created_at DESC,id DESC LIMIT 1", [], |row| row.get(0))
             .optional().map_err(|_| "无法恢复最近对话".to_string())
     }
 }
@@ -271,7 +294,6 @@ fn normalize_project_name(name: &str) -> Result<String, String> {
 }
 
 fn normalize_project_path(value: &str) -> Result<String, String> {
-    let value = value.trim();
     if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
         || value.split(['/', '\\']).any(|part| part == "..") {
         return Err("项目目录路径无效".into());
@@ -280,8 +302,18 @@ fn normalize_project_path(value: &str) -> Result<String, String> {
     if !path.is_absolute() {
         return Err("项目目录必须是绝对路径".into());
     }
-    std::fs::canonicalize(path).map(|path| path.to_string_lossy().into_owned())
-        .map_err(|_| "项目目录不可用".into())
+    #[cfg(windows)]
+    {
+        let local = value.strip_prefix(r"\\?\").unwrap_or(value);
+        let bytes = local.as_bytes();
+        if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || !matches!(bytes[2], b'\\' | b'/') {
+            return Err("请选择本地盘符目录；不支持网络目录".into());
+        }
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| "项目目录不可用".to_string())?;
+    if !canonical.is_dir() { return Err("项目路径必须是目录".into()); }
+    let canonical = canonical.to_str().ok_or("项目目录路径无法编码")?;
+    Ok(canonical.strip_prefix(r"\\?\").unwrap_or(canonical).to_string())
 }
 
 #[derive(Default)]
@@ -488,10 +520,11 @@ pub fn desktop_chat_status(runtime: tauri::State<'_, ChatRuntime>) -> ChatStatus
 #[tauri::command]
 pub async fn desktop_chat_pick_project_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file().blocking_pick_folder()
+        let selected = app.dialog().file().blocking_pick_folder()
             .map(|path| path.into_path().map_err(|_| "所选目录不是本地文件系统路径".to_string()))
-            .transpose()
-            .map(|path| path.map(|value| value.to_string_lossy().into_owned()))
+            .transpose()?;
+        selected.map(|path| path.into_os_string().into_string()
+            .map_err(|_| "项目目录路径无法编码".to_string())).transpose()
     }).await.map_err(|_| "目录选择器执行失败".to_string())?
 }
 
@@ -539,8 +572,16 @@ pub fn desktop_chat_delete_credential(runtime: tauri::State<'_, ChatRuntime>) ->
 }
 
 #[tauri::command]
-pub fn desktop_chat_create_session(runtime: tauri::State<'_, ChatRuntime>) -> Result<String, String> {
-    runtime.store.create_session("新对话")
+pub fn desktop_chat_create_session(runtime: tauri::State<'_, ChatRuntime>, project_id: Option<String>) -> Result<String, String> {
+    match project_id {
+        Some(id) => runtime.store.create_session_in_project("新对话", Some(&id)),
+        None => runtime.store.create_session("新对话"),
+    }
+}
+
+#[tauri::command]
+pub fn desktop_chat_select_session(runtime: tauri::State<'_, ChatRuntime>, session_id: String) -> Result<(), String> {
+    runtime.store.select_session(&session_id)
 }
 
 #[tauri::command]
@@ -719,7 +760,7 @@ mod tests {
         assert!(store.create_project("relative/path", Some("Invalid")).is_err());
         assert!(store.set_session_project(&session, Some("missing-project")).is_err());
         store.append_message(&session, "user", "Keep me").unwrap();
-        assert_eq!(store.projects().unwrap()[0].root_path, std::fs::canonicalize(&root).unwrap().to_string_lossy());
+        assert_eq!(store.projects().unwrap()[0].root_path, normalize_project_path(root.to_str().unwrap()).unwrap());
         store.set_session_project(&session, Some(&project.id)).unwrap();
         assert_eq!(store.sessions().unwrap()[0].project_id.as_deref(), Some(project.id.as_str()));
         store.rename_project(&project.id, "Renamed").unwrap();
@@ -737,13 +778,81 @@ mod tests {
             let connection = Connection::open(&path).unwrap();
             connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL)", []).unwrap();
             connection.execute("INSERT INTO sessions VALUES ('legacy', 'Legacy', '2026-01-01T00:00:00Z')", []).unwrap();
+            connection.execute_batch("CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+                INSERT INTO messages VALUES ('old-message','legacy','user','old history','2026-01-01T00:00:00Z');").unwrap();
         }
-        let store = ChatStore::open(&path).unwrap();
-        let session = store.sessions().unwrap();
-        assert_eq!(session.len(), 1);
-        assert!(session[0].project_id.is_none());
-        assert!(store.projects().unwrap().is_empty());
+        for _ in 0..2 {
+            let store = ChatStore::open(&path).unwrap();
+            let session = store.sessions().unwrap();
+            assert_eq!(session.len(), 1);
+            assert!(session[0].project_id.is_none());
+            assert!(store.projects().unwrap().is_empty());
+            assert_eq!(store.messages("legacy").unwrap()[0].content, "old history");
+        }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn projects_selection_and_history_survive_repeated_reopen_and_directory_removal() {
+        let root = std::env::temp_dir().join(format!("desktop-chat-reopen-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("项目 with spaces");
+        std::fs::create_dir_all(&directory).unwrap();
+        let db = root.join("chat.sqlite3");
+        let (project_id, selected_id, other_id);
+        {
+            let store = ChatStore::open(&db).unwrap();
+            let project = store.create_project(directory.to_str().unwrap(), None).unwrap();
+            project_id = project.id;
+            assert_eq!(project.name, "项目 with spaces");
+            selected_id = store.create_session_in_project("Selected", Some(&project_id)).unwrap();
+            store.append_message(&selected_id, "user", "persistent message").unwrap();
+            other_id = store.create_session("Independent").unwrap();
+            store.select_session(&selected_id).unwrap();
+            assert!(store.select_session("missing").is_err());
+            assert!(store.create_session_in_project("Invalid", Some("missing")).is_err());
+            assert_eq!(store.sessions().unwrap().len(), 2);
+        }
+        for _ in 0..2 {
+            let store = ChatStore::open(&db).unwrap();
+            assert_eq!(store.latest_session().unwrap(), Some(selected_id.clone()));
+            assert_eq!(store.messages(&selected_id).unwrap()[0].content, "persistent message");
+            assert_eq!(store.sessions().unwrap().iter().find(|s| s.id == selected_id).unwrap().project_id.as_deref(), Some(project_id.as_str()));
+            assert!(store.projects().unwrap()[0].available);
+        }
+        std::fs::remove_dir(&directory).unwrap();
+        {
+            let store = ChatStore::open(&db).unwrap();
+            assert!(!store.projects().unwrap()[0].available);
+            store.set_session_project(&selected_id, None).unwrap();
+            assert!(store.sessions().unwrap().iter().find(|s| s.id == selected_id).unwrap().project_id.is_none());
+            store.set_session_project(&selected_id, Some(&project_id)).unwrap();
+            store.delete_project(&project_id).unwrap();
+            assert_eq!(store.messages(&selected_id).unwrap().len(), 1);
+            store.delete_session(&selected_id).unwrap();
+            assert_eq!(store.latest_session().unwrap(), Some(other_id));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_paths_reject_files_missing_relative_and_parent_paths() {
+        let root = std::env::temp_dir().join(format!("desktop-chat-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("file.txt");
+        std::fs::write(&file, "keep").unwrap();
+        for value in ["", "relative/path", "bad\npath", file.to_str().unwrap(), root.join("missing").to_str().unwrap(), root.join("..").to_str().unwrap()] {
+            assert!(normalize_project_path(value).is_err(), "accepted invalid path: {value}");
+        }
+        #[cfg(windows)]
+        {
+            assert!(normalize_project_path(r"\\localhost\C$\Windows").is_err());
+            let db = root.join("chat.sqlite3");
+            let store = ChatStore::open(&db).unwrap();
+            store.create_project(root.to_str().unwrap(), None).unwrap();
+            assert!(store.create_project(&root.to_str().unwrap().to_uppercase(), None).is_err());
+            drop(store);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
