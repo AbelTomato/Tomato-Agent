@@ -42,6 +42,17 @@ def test_bootstrap_singleton_identity_reconnect_and_owned_shutdown(tmp_path):
             assert second["port"] == first["port"]
             assert second["service_instance_id"] == first["service_instance_id"]
             assert client.get("/health", headers={"Authorization": "wrong"}).status_code == 401
+            memory_status = client.get("/api/memory/status", headers={"Authorization": ""})
+            assert memory_status.status_code == 401
+            memory_status = client.get("/api/memory/status", headers=headers)
+            assert memory_status.status_code == 200
+            assert memory_status.json() == {
+                "protocol_version": 1,
+                "enabled": False,
+                "ready": True,
+                    "state": "disabled",
+                "generation": 0,
+            }
             assert client.post("/api/desktop/attach").status_code == 200
             session = client.post("/api/sessions", json={}).json()["session_id"]
             assert client.get(f"/api/sessions/{session}/messages").status_code == 200
@@ -72,13 +83,33 @@ def test_managed_engine_configuration_uses_explicit_data_and_resource_directorie
     value = {"environment_id": "windows-local", "data_dir": str(data),
              "resource_dir": str(resources), "draft_dir": str(drafts),
              "llm_api_key": "ephemeral-secret",
-             "llm_base_url": "https://provider.invalid/v1", "llm_model": "model"}
+             "llm_base_url": "https://provider.invalid/v1", "llm_model": "model",
+             "memory_enabled": True, "memory_auto_mode": "automatic"}
     config = configuration(value)
     assert config.database_path == data / "agent.db"
     assert config.docs_root == resources / "docs"
     assert config.draft_directory == drafts
     assert config.llm_api_key == "ephemeral-secret"
     assert config.effective_task_worker_enabled
+    assert config.memory_enabled
+    assert config.memory_auto_mode == "automatic"
+
+
+def test_memory_settings_input_is_validated_and_disabled_by_default():
+    from app.desktop.bootstrap import read_input
+
+    from io import StringIO
+    original_stdin = sys.stdin
+    try:
+        sys.stdin = StringIO(json.dumps({"token": "a" * 64, "owner": "owner"}) + "\n")
+        assert read_input()["memory_enabled"] is False
+        sys.stdin = StringIO(json.dumps({"token": "a" * 64, "owner": "owner",
+                                        "memory_enabled": False,
+                                        "memory_auto_mode": "automatic"}) + "\n")
+        with pytest.raises(ValueError, match="memory mode requires"):
+            read_input()
+    finally:
+        sys.stdin = original_stdin
 
 
 def test_managed_engine_rejects_relative_draft_directory(tmp_path):

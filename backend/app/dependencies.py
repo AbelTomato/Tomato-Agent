@@ -41,6 +41,10 @@ from app.writing.service import WritingService
 from app.workspaces.service import WorkspaceService
 from app.execution.repository import ExecutionRepository
 from app.execution.worker import ExecutionWorker
+from app.memory.repository import MemoryRepository
+from app.memory.extraction import MemoryExtractor
+from app.memory.worker import MemoryWorker
+from app.layered_memory import LayeredMemoryRepository, LayeredMemoryService, LayeredMemoryWorker
 
 
 class UnconfiguredLLM:
@@ -68,6 +72,13 @@ class AppDependencies:
     execution_repository: ExecutionRepository
     execution_worker: ExecutionWorker
     task_service: object
+    memory_repository: MemoryRepository
+    memory_extractor: MemoryExtractor | None
+    memory_embedding_client: EmbeddingClient | None
+    memory_worker: MemoryWorker | None
+    layered_memory_repository: LayeredMemoryRepository
+    layered_memory_service: LayeredMemoryService
+    layered_memory_worker: LayeredMemoryWorker | None
 
 
 def create_llm_client(config: Settings) -> LLMClient:
@@ -103,12 +114,39 @@ def create_knowledge_service(
 
 def build_app_dependencies(config: Settings) -> AppDependencies:
     session_repository = SessionRepository(config.database_path)
+    memory_repository = MemoryRepository(config.database_path)
+    layered_memory_repository = LayeredMemoryRepository(config.database_path)
     run_repository = RunRepository(config.database_path)
     knowledge_repository = KnowledgeRepository(config.database_path)
     writing_repository = WritingRepository(config.database_path)
     writing_execution_repository = WritingExecutionRepository(config.database_path)
     llm_client = create_llm_client(config)
+    memory_extractor = (
+        MemoryExtractor(llm_client, timeout_seconds=min(config.llm_timeout_seconds, 60.0))
+        if config.memory_enabled and config.llm_api_key.strip()
+        else None
+    )
     embedding_client = create_embedding_client(config)
+    memory_embedding_model = (
+        f"{config.embedding_base_url.rstrip('/')}|{config.embedding_model}|{config.embedding_dimensions}"
+        if embedding_client is not None else ""
+    )
+    # Legacy fact storage remains available for reads, explicit writes, and deletion
+    # reconciliation. New automatic memory runs through the layered pipeline below.
+    memory_worker = MemoryWorker(memory_repository, None, mode="off") if config.memory_enabled else None
+    layered_memory_worker = (
+        LayeredMemoryWorker(
+            layered_memory_repository, llm_client,
+            embedding_client if config.memory_enabled else None,
+            memory_embedding_model if config.memory_enabled else "",
+            poll_interval_seconds=max(1.0, config.memory_worker_poll_interval_seconds),
+        ) if config.memory_enabled and config.llm_api_key.strip() else None
+    )
+    layered_memory_service = LayeredMemoryService(
+        layered_memory_repository, layered_memory_worker,
+        embedding_client if config.memory_enabled else None,
+        memory_embedding_model if config.memory_enabled else "",
+    )
     tool_registry = ToolRegistry(
         [
             Calculator(),
@@ -228,7 +266,9 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         assistant=AssistantService(run_repository, code_task_service.execution_repository, session_repository,
             workspace_service, artifact_service, knowledge_service, llm_client, config,
             termination_verifier=docker_termination_verifier,
-            settlement_termination_verifier=settlement_termination_verifier),
+            settlement_termination_verifier=settlement_termination_verifier,
+            memory_repository=memory_repository, memory_embedding_client=embedding_client,
+            layered_memory_service=layered_memory_service, project_service=project_service),
         config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
             "runtime": config.runtime_config.model_dump(mode="json"),
             "writing": {"retrieval_mode": config.writing_retrieval_mode,
@@ -285,6 +325,13 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         execution_repository=code_task_service.execution_repository,
         execution_worker=execution_worker,
         task_service=task_service,
+        memory_repository=memory_repository,
+        memory_extractor=memory_extractor,
+        memory_embedding_client=embedding_client,
+        memory_worker=memory_worker,
+        layered_memory_repository=layered_memory_repository,
+        layered_memory_service=layered_memory_service,
+        layered_memory_worker=layered_memory_worker,
     )
 
 

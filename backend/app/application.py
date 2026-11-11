@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, Request
 
+from app.api.memory import router as memory_router
+from app.api.layered_memory import router as layered_memory_router
 from app.api.knowledge import router as knowledge_router
 from app.api.sessions import router as sessions_router
 from app.api.writing import router as writing_router
@@ -57,6 +59,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
     app.state.code_task_strategy = dependencies.code_task_service.strategy
     app.state.code_task_test_tool = dependencies.code_task_service.test_tool
     app.include_router(health_router)
+    app.include_router(memory_router)
+    app.include_router(layered_memory_router)
     app.include_router(sessions_router)
     app.include_router(knowledge_router)
     app.include_router(writing_router)

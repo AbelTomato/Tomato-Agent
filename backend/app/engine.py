@@ -13,6 +13,8 @@ class ApplicationEngine:
         dependencies = self.dependencies
         for component, method in (
             (dependencies.session_repository, "init"),
+            (dependencies.memory_repository, "init"),
+            (getattr(dependencies, "layered_memory_repository", None), "init"),
             (dependencies.project_service, "initialize"),
             (dependencies.run_repository, "init"),
             (dependencies.knowledge_repository, "init"),
@@ -20,6 +22,8 @@ class ApplicationEngine:
             (dependencies.writing_execution_repository, "init"),
             (dependencies.code_task_service, "initialize"),
         ):
+            if component is None:
+                continue
             await getattr(component, method)()
         worker = dependencies.execution_worker
         try:
@@ -29,8 +33,20 @@ class ApplicationEngine:
                     if len(recovered) < worker.recovery_scan_limit:
                         break
                 await worker.start()
+            memory_worker = dependencies.memory_worker
+            if memory_worker is not None:
+                await memory_worker.start()
+            layered_memory_worker = getattr(dependencies, "layered_memory_worker", None)
+            if layered_memory_worker is not None:
+                await layered_memory_worker.start()
         except BaseException:
             await worker.stop()
+            memory_worker = dependencies.memory_worker
+            if memory_worker is not None:
+                await memory_worker.stop()
+            layered_memory_worker = getattr(dependencies, "layered_memory_worker", None)
+            if layered_memory_worker is not None:
+                await layered_memory_worker.stop()
             raise
         self._started = True
 
@@ -40,4 +56,14 @@ class ApplicationEngine:
         try:
             await self.dependencies.execution_worker.stop()
         finally:
-            self._started = False
+            try:
+                memory_worker = self.dependencies.memory_worker
+                if memory_worker is not None:
+                    await memory_worker.stop()
+            finally:
+                try:
+                    layered_memory_worker = getattr(self.dependencies, "layered_memory_worker", None)
+                    if layered_memory_worker is not None:
+                        await layered_memory_worker.stop()
+                finally:
+                    self._started = False

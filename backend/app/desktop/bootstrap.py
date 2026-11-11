@@ -48,6 +48,14 @@ def read_input():
     if not isinstance(environment_id, str) or not environment_id.strip() or len(environment_id) > 128:
         raise ValueError("invalid environment")
     value["environment_id"] = environment_id
+    memory_enabled = value.get("memory_enabled", False)
+    memory_auto_mode = value.get("memory_auto_mode", "off")
+    if type(memory_enabled) is not bool or memory_auto_mode not in {"off", "automatic", "review"}:
+        raise ValueError("invalid memory settings")
+    if not memory_enabled and memory_auto_mode != "off":
+        raise ValueError("memory mode requires memory to be enabled")
+    value["memory_enabled"] = memory_enabled
+    value["memory_auto_mode"] = memory_auto_mode
     return value
 
 
@@ -81,9 +89,15 @@ def configuration(value):
             embedding_model=value.get("embedding_model", ""),
             embedding_dimensions=value.get("embedding_dimensions", 0),
             assistant_enabled=True, task_worker_enabled=True,
+            memory_enabled=value["memory_enabled"],
+            memory_auto_mode=value["memory_auto_mode"],
             desktop_environment_id=value["environment_id"],
             desktop_service_instance_id="pending")
-    return Settings(desktop_environment_id=value["environment_id"])
+    return Settings(
+        desktop_environment_id=value["environment_id"],
+        memory_enabled=value["memory_enabled"],
+        memory_auto_mode=value["memory_auto_mode"],
+    )
 
 
 async def serve(value):

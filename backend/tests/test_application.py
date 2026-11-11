@@ -26,6 +26,7 @@ async def test_create_app_uses_supplied_settings_and_registers_routers(tmp_path)
     paths = set(app.openapi()["paths"])
 
     assert "/health" in paths
+    assert "/api/memory/status" in paths
     assert "/api/sessions" in paths
     assert "/api/knowledge/capabilities" in paths
     assert "/api/sessions/{session_id}/writing-tasks" in paths
@@ -76,6 +77,27 @@ def test_create_app_keeps_writing_research_deterministic_when_online_pipeline_en
     assert app.state.dependencies.writing_research_service.pipeline is None
     assert app.state.dependencies.knowledge_service.embedding_model == "test-embedding"
     assert app.state.dependencies.writing_research_service.embedding_model == "test-embedding"
+
+
+def test_memory_embedding_worker_is_available_without_chat_llm_credentials(tmp_path):
+    app = create_app(Settings(
+        _env_file=None,
+        database_path=tmp_path / "memory-index.db",
+        docs_root=tmp_path,
+        memory_enabled=True,
+        memory_auto_mode="off",
+        llm_api_key="",
+        embedding_api_key="embedding-key",
+        embedding_model="test-embedding",
+        embedding_dimensions=3,
+    ))
+
+    worker = app.state.memory_worker
+    assert worker is not None
+    assert worker.extractor is None
+    assert worker.projection_builder is None
+    assert worker.embedding_client is app.state.memory_embedding_client
+    assert worker.embedding_model.endswith("|test-embedding|3")
 
 
 @pytest.mark.asyncio

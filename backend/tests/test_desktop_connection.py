@@ -24,7 +24,7 @@ def headers(client="window-1", *, owner=False):
 
 @pytest.mark.parametrize("path", ["/health", "/api/sessions", "/api/tasks/unknown",
                                   "/api/workspaces", "/api/tools",
-                                  "/api/desktop/connection"])
+                                  "/api/desktop/connection", "/api/memory/status"])
 async def test_all_desktop_routes_reject_missing_credentials(tmp_path, path):
     app, _ = desktop_app(tmp_path)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -41,6 +41,15 @@ async def test_identity_and_credentials_are_checked_before_business_routes(tmp_p
             result = await client.get("/api/desktop/connection", headers=headers())
             assert result.status_code == 200
             assert result.json()["service_instance_id"] == "b" * 32
+            memory = await client.get("/api/memory/status", headers=headers())
+            assert memory.status_code == 200
+            assert memory.json() == {
+                "protocol_version": 1,
+                "enabled": False,
+                "ready": True,
+                "state": "ready",
+                "generation": 0,
+            }
             assert "a" * 64 not in result.text
             assert "owner" not in result.text
 

@@ -37,8 +37,9 @@ class Provider:
 
 
 @asynccontextmanager
-async def assistant_api(tmp_path, responses=(), enabled=True):
-    app = make_app(tmp_path, assistant_enabled=enabled, workspace_allowed_roots=[tmp_path])
+async def assistant_api(tmp_path, responses=(), enabled=True, memory_enabled=False):
+    app = make_app(tmp_path, assistant_enabled=enabled, workspace_allowed_roots=[tmp_path],
+                   memory_enabled=memory_enabled)
     async with app.router.lifespan_context(app):
         app.state.task_service.enabled = True
         app.state.task_service.model_available = True

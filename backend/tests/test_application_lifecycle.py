@@ -43,6 +43,8 @@ async def test_engine_lifecycle_is_independent_idempotent_and_stops_after_failed
 
     class Dependencies:
         session_repository = Part()
+        memory_repository = Part()
+        layered_memory_repository = Part()
         project_service = Part()
         run_repository = Part()
         knowledge_repository = Part()
@@ -50,6 +52,8 @@ async def test_engine_lifecycle_is_independent_idempotent_and_stops_after_failed
         writing_execution_repository = Part()
         code_task_service = Part()
         execution_worker = Worker()
+        memory_worker = None
+        layered_memory_worker = None
 
     engine = ApplicationEngine(Dependencies(), Config())
     await engine.start()
