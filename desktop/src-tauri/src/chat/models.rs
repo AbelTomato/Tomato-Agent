@@ -80,6 +80,31 @@ pub struct SendInput {
     pub content: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryReference {
+    pub item_id: String,
+    pub version: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryChatContext {
+    pub assistant_message_id: String,
+    pub session_id: String,
+    pub generation: u64,
+    pub retrieval_mode: String,
+    pub items: Vec<MemoryReference>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryContextInput {
+    pub prompt: String,
+    pub generation: u64,
+    pub retrieval_mode: String,
+    pub items: Vec<MemoryReference>,
+}
+
 pub(super) fn utc_now() -> String {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -115,4 +140,15 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 pub struct HistoryPage {
     pub messages: Vec<ChatMessage>,
     pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MemorySourceDeletion {
+    pub request_id: String,
+    pub source_system: String,
+    pub source_installation_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub source_revision: i64,
+    pub status: String,
 }

@@ -19,6 +19,22 @@ pub struct AgentTaskInput {
     pub kind: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryItemIdInput { pub item_id: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCorrectInput { pub item_id: String, pub expected_version: u32, pub content: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCandidateIdInput { pub candidate_id: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryGenerationInput { pub expected_generation: u64 }
+
 fn default_task_kind() -> String { "assistant".into() }
 
 fn local_draft_directory(local_app_data: &Path, identifier: &str) -> PathBuf {
@@ -39,7 +55,7 @@ pub struct EngineIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_draft_directory, AgentTaskInput, EngineIdentity};
+    use super::{local_draft_directory, AgentTaskInput, EngineIdentity, EngineManager};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -75,6 +91,69 @@ mod tests {
         .unwrap();
         assert!(!identity.owned);
     }
+
+    #[test]
+    fn pending_source_deletions_gate_memory_recall_before_engine_access() {
+        let path = std::env::temp_dir().join(format!("memory-gate-{}.db", uuid::Uuid::new_v4()));
+        let store = crate::chat::ChatStore::open(&path).unwrap();
+        let session = store.create_session("Memory gate").unwrap();
+        store.append_message(&session, "user", "private source").unwrap();
+        store.set_memory_enabled(true).unwrap();
+        store.delete_session(&session).unwrap();
+        let engine = EngineManager::new().unwrap();
+        let result = engine.memory_request(&store, "POST", "/api/memory/recall", None);
+        assert_eq!(result.unwrap_err(), "记忆撤销尚未同步，暂时停用记忆读取");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_item_forget_is_persistent_and_gates_memory_reads_until_acknowledged() {
+        let path = std::env::temp_dir().join(format!("memory-forget-gate-{}.db", uuid::Uuid::new_v4()));
+        let item_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = crate::chat::ChatStore::open(&path).unwrap();
+            store.set_memory_enabled(true).unwrap();
+            let request_id = store.enqueue_memory_item_forget(&item_id, 3).unwrap();
+            assert_eq!(store.enqueue_memory_item_forget(&item_id, 3).unwrap(), request_id);
+            assert_eq!(store.pending_memory_item_forgets().unwrap(), vec![(item_id.clone(), request_id, 3)]);
+            assert_eq!(store.ensure_memory_reads_allowed().unwrap_err(), "记忆撤销尚未同步，暂时停用记忆读取");
+        }
+        let store = crate::chat::ChatStore::open(&path).unwrap();
+        let pending = store.pending_memory_item_forgets().unwrap();
+        assert_eq!(pending.len(), 1);
+        store.acknowledge_memory_item_forget(&pending[0].1).unwrap();
+        assert!(store.ensure_memory_reads_allowed().is_ok());
+        assert_eq!(store.pending_memory_mutation_count().unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_clear_is_persistent_and_blocks_reads_until_acknowledged() {
+        let path = std::env::temp_dir().join(format!("memory-clear-gate-{}.db", uuid::Uuid::new_v4()));
+        let store = crate::chat::ChatStore::open(&path).unwrap();
+        store.set_memory_enabled(true).unwrap();
+        let request_id = store.enqueue_memory_clear("windows-local", 12).unwrap();
+        assert_eq!(store.enqueue_memory_clear("windows-local", 12).unwrap(), request_id);
+        assert_eq!(store.pending_memory_clear().unwrap(), Some(("windows-local".into(), request_id.clone(), 12)));
+        assert!(store.ensure_memory_reads_allowed().is_err());
+        store.acknowledge_memory_clear(&request_id).unwrap();
+        assert!(store.ensure_memory_reads_allowed().is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_memory_mutations_block_source_ingestion_until_acknowledged() {
+        let path = std::env::temp_dir().join(format!("memory-mutation-ingestion-gate-{}.db", uuid::Uuid::new_v4()));
+        let store = crate::chat::ChatStore::open(&path).unwrap();
+        store.set_memory_enabled(true).unwrap();
+        assert!(super::memory_ingestion_allowed(&store).unwrap());
+        store.enqueue_memory_clear("windows-local", 2).unwrap();
+        assert!(!super::memory_ingestion_allowed(&store).unwrap());
+        let (_, request_id, _) = store.pending_memory_clear().unwrap().unwrap();
+        store.acknowledge_memory_clear(&request_id).unwrap();
+        assert!(super::memory_ingestion_allowed(&store).unwrap());
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 struct Process {
@@ -83,6 +162,7 @@ struct Process {
     token: String,
     owner: String,
     client: String,
+    memory_enabled: bool,
 }
 
 pub struct EngineManager {
@@ -788,6 +868,18 @@ impl EngineManager {
         config: &super::chat::ChatConfig,
         key: &str,
     ) -> Result<EngineIdentity, String> {
+        let memory_enabled = self.process.lock().map_err(|_| "助手引擎状态不可用")?
+            .as_ref().map(|process| process.memory_enabled).unwrap_or(false);
+        self.start_with_memory(app, config, key, memory_enabled)
+    }
+
+    pub fn start_with_memory(
+        &self,
+        app: &tauri::AppHandle,
+        config: &super::chat::ChatConfig,
+        key: &str,
+        memory_enabled: bool,
+    ) -> Result<EngineIdentity, String> {
         let mut state = self.process.lock().map_err(|_| "助手引擎状态不可用")?;
         if let Some(process) = state.as_mut() {
             if process
@@ -796,6 +888,9 @@ impl EngineManager {
                 .map_err(|_| "无法读取助手引擎状态")?
                 .is_none()
             {
+                if process.memory_enabled != memory_enabled {
+                    return Err("助手引擎记忆设置需要重启引擎".into());
+                }
                 return Ok(process.identity.clone());
             }
             *state = None;
@@ -839,7 +934,9 @@ impl EngineManager {
         let input = serde_json::json!({
             "token": token, "owner": owner, "environment_id": "windows-local",
             "data_dir": app_data, "draft_dir": draft_directory, "resource_dir": resource,
-            "llm_api_key": key, "llm_base_url": config.base_url, "llm_model": config.model
+            "llm_api_key": key, "llm_base_url": config.base_url, "llm_model": config.model,
+            "memory_enabled": memory_enabled,
+            "memory_auto_mode": if memory_enabled { "automatic" } else { "off" }
         });
         let write_result = child
             .stdin
@@ -915,6 +1012,7 @@ impl EngineManager {
             token,
             owner,
             client: client_id,
+            memory_enabled,
         });
         Ok(identity)
     }
@@ -941,6 +1039,9 @@ impl EngineManager {
             .bearer_auth(token)
             .header("X-Tomato-Instance", instance)
             .header("X-Tomato-Client", client);
+        if path == "/api/memory/recall" || path.starts_with("/api/memory/recall?") {
+            request = request.timeout(Duration::from_millis(1500));
+        }
         if let Some(owner) = owner {
             request = request.header("X-Tomato-Owner", owner);
         }
@@ -973,6 +1074,24 @@ impl EngineManager {
             path,
             body,
         )
+    }
+
+    pub fn memory_request(
+        &self,
+        store: &super::chat::ChatStore,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        let is_memory_read = path == "/api/memory/recall" || path.starts_with("/api/memory/recall?")
+            || path == "/api/layered-memory/context"
+            || (method.eq_ignore_ascii_case("GET")
+                && (path == "/api/layered-memory/profile" || path == "/api/layered-memory/episodes"))
+            || (method.eq_ignore_ascii_case("GET") && path.starts_with("/api/memory/items/"));
+        if is_memory_read {
+            store.ensure_memory_reads_allowed()?;
+        }
+        self.request(method, path, body)
     }
 
     pub fn identity(&self) -> Result<Option<EngineIdentity>, String> {
@@ -1020,7 +1139,307 @@ impl EngineManager {
     }
 }
 
-fn start_for_chat(
+pub fn flush_memory_source_deletions(
+    engine: &EngineManager,
+    store: &super::chat::ChatStore,
+) -> usize {
+    let Ok(pending) = store.pending_memory_source_deletions(100) else {
+        return usize::MAX;
+    };
+    for deletion in pending {
+        let response = engine.request(
+            "POST",
+            &format!("/api/memory/sources/delete?request_id={}", deletion.request_id),
+            Some(serde_json::json!({
+                "source_system": deletion.source_system,
+                "source_installation_id": deletion.source_installation_id,
+                "session_id": deletion.session_id,
+                "message_id": deletion.message_id,
+                "source_revision": deletion.source_revision
+            })),
+        );
+        if response.is_err() || store.acknowledge_memory_source_deletion(&deletion.request_id).is_err() {
+            break;
+        }
+    }
+    store
+        .pending_memory_source_deletions(500)
+        .map(|items| items.len())
+        .unwrap_or(usize::MAX)
+}
+
+pub fn flush_memory_source_ingestions(
+    engine: &EngineManager,
+    store: &super::chat::ChatStore,
+) -> usize {
+    let Ok(pending) = store.pending_memory_source_ingestions(100) else {
+        return usize::MAX;
+    };
+    for (request_id, payload) in pending {
+        let response = engine.request(
+            "POST",
+            &format!("/api/memory/sources/ingest?request_id={request_id}"),
+            Some(payload),
+        );
+        if response.is_err() || store.acknowledge_memory_source_ingestion(&request_id).is_err() {
+            break;
+        }
+    }
+    store.pending_memory_source_ingestions(500)
+        .map(|items| items.len())
+        .unwrap_or(usize::MAX)
+}
+
+pub fn flush_memory_mutations(engine: &EngineManager, store: &super::chat::ChatStore) -> usize {
+    let mut pending = 0usize;
+    if let Ok(items) = store.pending_memory_item_forgets() {
+        for (item_id, request_id, expected_version) in items {
+            let Ok(item_id) = uuid::Uuid::parse_str(&item_id) else { pending += 1; continue; };
+            let response = engine.memory_request(store, "POST",
+                &format!("/api/memory/items/{item_id}/forget?request_id={request_id}"),
+                Some(serde_json::json!({"expected_version": expected_version})));
+            if response.is_ok() { let _ = store.acknowledge_memory_item_forget(&request_id); }
+            else { pending += 1; }
+        }
+    }
+    if let Ok(Some((scope_id, request_id, expected_generation))) = store.pending_memory_clear() {
+        let response = engine.memory_request(store, "POST",
+            &format!("/api/memory/clear?request_id={request_id}"),
+            Some(serde_json::json!({"scope":"personal","scope_id":scope_id,
+                "expected_generation":expected_generation})));
+        if response.is_ok() { let _ = store.acknowledge_memory_clear(&request_id); }
+        else { pending += 1; }
+    }
+    pending
+}
+
+fn memory_ingestion_allowed(store: &super::chat::ChatStore) -> Result<bool, String> {
+    Ok(store.memory_enabled()? && store.pending_memory_mutation_count()? == 0)
+}
+
+fn checked_memory_id(value: &str) -> Result<String, String> {
+    uuid::Uuid::parse_str(value).map(|id| id.to_string()).map_err(|_| "记忆标识无效".into())
+}
+
+fn ensure_memory_engine(app: &tauri::AppHandle, engine: &EngineManager,
+                        chat: &super::chat::ChatRuntime) -> Result<(), String> {
+    start_for_chat(app, engine, chat)
+}
+
+#[tauri::command]
+pub async fn desktop_memory_items(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, offset: Option<u32>) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        let offset = offset.unwrap_or(0).min(100_000);
+        engine.memory_request(&chat.store, "GET",
+            &format!("/api/memory/items?scope=personal&scope_id=windows-local&limit=100&offset={offset}"), None)
+    }).await.map_err(|_| "读取记忆列表失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_status(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "GET", "/api/memory/status", None)
+    }).await.map_err(|_| "读取记忆状态失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_export(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "GET", "/api/memory/export", None)
+    }).await.map_err(|_| "导出记忆失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_chat_memory_contexts(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, session_id: String) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let contexts = chat.store.memory_chat_contexts(&session_id)?;
+        if contexts.is_empty() { return Ok(serde_json::json!({"contexts":[]})); }
+        ensure_memory_engine(&app, &engine, &chat)?;
+        let mut rendered = Vec::with_capacity(contexts.len());
+        for context in contexts {
+            let mut items = Vec::with_capacity(context.items.len());
+            let mut unavailable_count = 0usize;
+            for reference in &context.items {
+                let detail = engine.memory_request(&chat.store, "GET",
+                    &format!("/api/memory/items/{}/versions/{}", reference.item_id, reference.version), None);
+                match detail {
+                    Ok(value) => {
+                        if let Some(item) = value.get("body") { items.push(item.clone()); }
+                        else { unavailable_count += 1; }
+                    }
+                    Err(error) if error == "memory_version_not_found" => unavailable_count += 1,
+                    Err(error) => return Err(error),
+                }
+            }
+            rendered.push(serde_json::json!({
+                "assistant_message_id":context.assistant_message_id,
+                "generation":context.generation,
+                "retrieval_mode":context.retrieval_mode,
+                "items":items,
+                "unavailable_count":unavailable_count,
+            }));
+        }
+        Ok(serde_json::json!({"contexts":rendered}))
+    }).await.map_err(|_| "读取本轮记忆来源失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_candidates(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "GET", "/api/memory/candidates", None)
+    }).await.map_err(|_| "读取记忆候选失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_item(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryItemIdInput) -> Result<Value, String> {
+    let item_id = checked_memory_id(&input.item_id)?;
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "GET", &format!("/api/memory/items/{item_id}"), None)
+    }).await.map_err(|_| "读取记忆详情失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_correct(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryCorrectInput) -> Result<Value, String> {
+    if input.content.trim().is_empty() || input.content.chars().count() > 4000 || input.expected_version == 0 {
+        return Err("记忆内容或版本无效".into());
+    }
+    let item_id = checked_memory_id(&input.item_id)?;
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "PATCH",
+            &format!("/api/memory/items/{item_id}?request_id={}", uuid::Uuid::new_v4()),
+            Some(serde_json::json!({"content":input.content.trim(),"expected_version":input.expected_version,
+                "reason":"user_correction"})))
+    }).await.map_err(|_| "纠正记忆失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_forget(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryItemIdInput,
+    expected_version: u32) -> Result<Value, String> {
+    let item_id = checked_memory_id(&input.item_id)?;
+    let chat = chat.inner().clone();
+    {
+        let generation = chat.generation.lock().map_err(|_| "聊天状态不可用")?;
+        if generation.is_some() {
+            return Err("请等待当前回复完成后再忘记记忆".into());
+        }
+        chat.store.enqueue_memory_item_forget(&item_id, i64::from(expected_version))?;
+    }
+    let engine = engine.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        if ensure_memory_engine(&app, &engine, &chat).is_err() {
+            return Ok::<_, String>(serde_json::json!({"item_id":item_id,"status":"pending_sync"}));
+        }
+        let pending = flush_memory_mutations(&engine, &chat.store);
+        Ok::<_, String>(serde_json::json!({"item_id":item_id,
+            "status":if pending == 0 {"forgotten"} else {"pending_sync"}}))
+    }).await.map_err(|_| "忘记记忆失败".to_string())??;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn desktop_memory_clear(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryGenerationInput) -> Result<Value, String> {
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    let _request_id = {
+        let generation = chat.generation.lock().map_err(|_| "聊天状态不可用")?;
+        if generation.is_some() {
+            return Err("请等待当前回复完成后再清空记忆".into());
+        }
+        chat.store.enqueue_memory_clear("windows-local", input.expected_generation as i64)?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        if ensure_memory_engine(&app, &engine, &chat).is_err() {
+            return Ok::<_, String>(serde_json::json!({"status":"pending_sync"}));
+        }
+        let pending = flush_memory_mutations(&engine, &chat.store);
+        Ok(serde_json::json!({"status":if pending == 0 {"cleared"} else {"pending_sync"}}))
+    }).await.map_err(|_| "清空记忆失败".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_memory_candidate_decision(app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryCandidateIdInput,
+    action: String) -> Result<Value, String> {
+    if !matches!(action.as_str(), "accept" | "reject") { return Err("候选操作无效".into()); }
+    let candidate_id = checked_memory_id(&input.candidate_id)?;
+    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_memory_engine(&app, &engine, &chat)?;
+        engine.memory_request(&chat.store, "POST",
+            &format!("/api/memory/candidates/{candidate_id}/decision"),
+            Some(serde_json::json!({"action":action})))
+    }).await.map_err(|_| "处理记忆候选失败".to_string())?
+}
+
+#[tauri::command]
+pub fn desktop_memory_sync_status(
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "enabled": chat.store.memory_enabled()?,
+        "pending_deletions": chat.store.has_pending_memory_source_deletions()?,
+        "pending_count": chat.store.pending_memory_source_deletions(500)?.len(),
+        "pending_ingestions": chat.store.pending_memory_source_ingestions(500)?.len(),
+        "pending_mutations": chat.store.pending_memory_mutation_count()?
+    }))
+}
+
+#[tauri::command]
+pub fn desktop_memory_set_enabled(
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    if chat.generation.lock().map_err(|_| "聊天状态不可用")?.is_some() {
+        return Err("请等待当前回复完成后再修改记忆设置".into());
+    }
+    let current = chat.store.memory_enabled()?;
+    if current != enabled {
+        if engine.identity()?.is_some() {
+            let status = engine.request("GET", "/api/desktop/connection", None)?;
+            let active_tasks = status.pointer("/body/active_tasks").and_then(Value::as_u64).unwrap_or(0);
+            if active_tasks > 0 {
+                return Err("助手任务运行期间不能切换记忆设置".into());
+            }
+        }
+        engine.stop()?;
+        chat.store.set_memory_enabled(enabled)?;
+    }
+    Ok(serde_json::json!({"enabled": enabled}))
+}
+
+pub(crate) fn start_for_chat(
     app: &tauri::AppHandle,
     engine: &EngineManager,
     chat: &super::chat::ChatRuntime,
@@ -1029,7 +1448,13 @@ fn start_for_chat(
         .ok_or("请先配置模型")?;
     let key = chat.credentials.get()?.filter(|value| !value.is_empty())
         .ok_or("请先配置 API Key")?;
-    engine.start(app, &config, &key).map(|_| ())
+    engine.start_with_memory(app, &config, &key, chat.store.memory_enabled()?)?;
+    let _ = flush_memory_source_deletions(engine, &chat.store);
+    let _ = flush_memory_mutations(engine, &chat.store);
+    if memory_ingestion_allowed(&chat.store)? {
+        let _ = flush_memory_source_ingestions(engine, &chat.store);
+    }
+    Ok(())
 }
 
 fn ensure_engine_session(
@@ -1085,7 +1510,12 @@ pub async fn desktop_agent_start(
             .get()?
             .filter(|value| !value.is_empty())
             .ok_or("请先配置 API Key")?;
-        engine.start(&app, &config, &key)
+        let identity = engine.start_with_memory(&app, &config, &key, chat.store.memory_enabled()?)?;
+        let _ = flush_memory_source_deletions(&engine, &chat.store);
+        if chat.store.memory_enabled()? {
+            let _ = flush_memory_source_ingestions(&engine, &chat.store);
+        }
+        Ok(identity)
     })
     .await
     .map_err(|_| "助手引擎启动异常".to_string())?

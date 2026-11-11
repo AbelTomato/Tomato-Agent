@@ -30,7 +30,7 @@ function nodes(tree, match = () => true) {
   return [...(match(tree) ? [tree] : []), ...[tree.props?.children].flat(Infinity).flatMap(child => nodes(child, match))];
 }
 const ofType = (tree, type) => nodes(tree, node => node.type === type);
-const textOf = tree => typeof tree === 'string' ? tree : Array.isArray(tree) ? tree.map(textOf).join('') : tree?.props ? textOf(tree.props.children) : '';
+const textOf = tree => typeof tree === 'string' || typeof tree === 'number' ? String(tree) : Array.isArray(tree) ? tree.map(textOf).join('') : tree?.props ? textOf(tree.props.children) : '';
 const button = (tree, label) => ofType(tree, 'button').find(node => textOf(node) === label || node.props['aria-label'] === label);
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function render() { cursor = 0; effects = []; const tree = DesktopChatApp(); effects.forEach(effect => effect()); return tree; }
@@ -95,6 +95,34 @@ test('late history cannot overwrite a newly selected chat', async () => {
   assert.match(textOf(tree), /current s2/); assert.doesNotMatch(textOf(tree), /stale s1/); assert.equal(nav(tree).sessionId, 's2');
   assert.equal(calls.filter(([name]) => name === 'desktop_chat_select_session').at(-1)[1].sessionId, 's2');
 });
+test('memory usage and source render under the matching assistant reply after history reload', async () => {
+  const reply = { id: 'assistant-1', session_id: 's1', role: 'assistant', content: '按中文偏好回答', created_at: '2026-11-10T00:00:00Z' };
+  let tree = await setup({
+    desktop_chat_history: () => [reply],
+    desktop_chat_memory_contexts: () => ({ body: { contexts: [{ assistant_message_id: reply.id, generation: 4, retrieval_mode: 'keyword',
+      items: [{ item_id: 'memory-1', version: 2, kind: 'preference', topic_key: 'response.language', content: '默认使用简体中文',
+        sources: [{ session_id: 'source-session', message_id: 'source-message', source_revision: 1, excerpt: '记住我喜欢中文回答' }] }], unavailable_count: 1 }] } }),
+  });
+  tree = render();
+  assert.match(textOf(tree), /本轮使用的长期记忆 · 1/);
+  assert.match(textOf(tree), /默认使用简体中文/);
+  assert.match(textOf(tree), /记住我喜欢中文回答/);
+  assert.match(textOf(tree), /另有 1 条记忆已被忘记或来源已删除/);
+  assert.deepEqual(calls.find(([name]) => name === 'desktop_chat_memory_contexts')[1], { sessionId: 's1' });
+});
+test('memory fallback notice remains visible when the source outbox reports pending afterward', async () => {
+  let tree = await setup();
+  listeners.desktop_memory_recall_status({ payload: { session_id: 's1', status: 'failed', error: 'memory engine unavailable' } });
+  listeners.desktop_memory_ingest_status({ payload: { session_id: 's1', status: 'pending' } });
+  tree = render();
+  assert.match(textOf(tree), /本轮未使用记忆/);
+  assert.doesNotMatch(textOf(tree), /本轮对话来源待同步/);
+  const textarea = ofType(tree, 'textarea').find(node => node.props['aria-label'] === '消息');
+  textarea.props.onChange({ target: { value: 'next turn' } }); tree = render();
+  const composer = ofType(tree, 'form').find(node => node.props.className === 'desktop-chat-composer');
+  await composer.props.onSubmit(event); tree = render();
+  assert.doesNotMatch(textOf(tree), /本轮未使用记忆/);
+});
 test('new project chat is atomic and repeated clicks are ignored while pending', async () => {
   let finish;
   let tree = await setup({ desktop_chat_create_session: () => new Promise(resolve => { finish = resolve; }) });
@@ -115,11 +143,107 @@ test('renaming a project submits edited name and restores navigation', async () 
 });
 test('deleting current chat confirms message deletion and switches to remaining history', async () => {
   let deleted = false;
-  let tree = await setup({ desktop_chat_delete_session: () => { deleted = true; }, desktop_chat_sessions: () => deleted ? [s2] : [s1, s2] });
+  let tree = await setup({ desktop_chat_delete_session: () => { deleted = true; return { pending_memory_sync: 1 }; }, desktop_chat_sessions: () => deleted ? [s2] : [s1, s2] });
   nav(tree).onDeleteSession(s1); tree = render(); assert.match(textOf(dialog(tree)), /全部消息.*无法撤销/);
   await dialog(tree).props.onSubmit(event); tree = render();
   assert.deepEqual(calls.find(([name]) => name === 'desktop_chat_delete_session')[1], { sessionId: 's1' });
   assert.equal(nav(tree).sessionId, 's2'); assert.match(textOf(tree), /history s2/);
+  assert.match(textOf(tree), /记忆来源删除将在引擎连接后同步/);
+});
+
+test('memory setting loads persisted state and applies changes through the desktop command', async () => {
+  let tree = await setup({ desktop_memory_sync_status: () => ({ enabled: false, pending_deletions: false, pending_count: 0 }),
+    desktop_memory_set_enabled: ({ enabled }) => ({ enabled }) });
+  nav(tree).onSettings(); await flush(); tree = render();
+  const checkbox = ofType(tree, 'input').find(node => node.props.type === 'checkbox');
+  assert.ok(checkbox);
+  assert.equal(checkbox.props.checked, false);
+  checkbox.props.onChange({ target: { checked: true } }); await flush(); tree = render();
+  assert.deepEqual(calls.find(([name]) => name === 'desktop_memory_set_enabled')[1], { enabled: true });
+  assert.equal(ofType(tree, 'input').find(node => node.props.type === 'checkbox').props.checked, true);
+  assert.match(textOf(tree), /新对话内容会提交给当前模型/);
+});
+
+test('memory manager loads items and sources, applies versioned correction, and reviews candidates', async () => {
+  const item = { item_id: 'item-1', kind: 'preference', scope: 'personal', scope_id: 'windows-local', topic_key: 'response.language',
+    status: 'active', confirmation: 'explicit', version: 2, content: '请用中文回答', updated_at: '2026-11-10T00:00:00Z' };
+  const candidate = { candidate_id: 'candidate-1', kind: 'habit', topic_key: 'work.schedule', content: '通常在上午写代码', confidence: 0.8,
+    reason: 'needs_review', created_at: '2026-11-10T00:00:00Z', sources: [] };
+  let corrected = false, decided = false;
+  let tree = await setup({
+    desktop_memory_sync_status: () => ({ enabled: true, pending_deletions: false, pending_count: 0, pending_ingestions: 0, pending_mutations: 0 }),
+    desktop_memory_items: () => ({ body: { items: [{ ...item, content: corrected ? '优先使用简体中文' : item.content }] } }),
+    desktop_memory_candidates: () => ({ body: { candidates: decided ? [] : [candidate] } }),
+    desktop_memory_status: () => ({ body: { generation: 8, ready: true, state: 'ready' } }),
+    desktop_memory_item: () => ({ body: { ...item, content: corrected ? '优先使用简体中文' : item.content,
+      sources: [{ source_system: 'tomato-desktop', session_id: 's1', message_id: 'm1', message_at: null, excerpt: '记住我喜欢中文回答', status: 'active' }] } }),
+    desktop_memory_correct: ({ input }) => { corrected = true; assert.deepEqual(input, { itemId: 'item-1', expectedVersion: 2, content: '优先使用简体中文' }); },
+    desktop_memory_candidate_decision: ({ input, action }) => { decided = true; assert.deepEqual(input, { candidateId: 'candidate-1' }); assert.equal(action, 'accept'); },
+  });
+  nav(tree).onSettings(); await flush(); tree = render();
+  button(tree, '管理已保存的记忆').props.onClick(); await flush(); tree = render();
+  assert.match(textOf(tree), /请用中文回答/);
+  ofType(tree, 'button').find(node => textOf(node).startsWith('请用中文回答')).props.onClick(); await flush(); tree = render();
+  assert.match(textOf(tree), /记住我喜欢中文回答/);
+  const textarea = ofType(tree, 'textarea').find(node => node.props.maxLength === 4000);
+  textarea.props.onChange({ target: { value: '优先使用简体中文' } }); tree = render();
+  button(tree, '保存更正').props.onClick(); await flush(); tree = render();
+  assert.equal(corrected, true); assert.match(textOf(tree), /记忆已更正/);
+  ofType(tree, 'button').find(node => textOf(node).startsWith('待确认')).props.onClick(); tree = render();
+  assert.match(textOf(tree), /通常在上午写代码/);
+  button(tree, '接受').props.onClick(); await flush(); tree = render();
+  assert.equal(decided, true); assert.match(textOf(tree), /已接受这条候选记忆/);
+});
+
+test('forget reports pending sync and clear requires a second confirmation with current generation', async () => {
+  const item = { item_id: 'item-2', kind: 'background', scope: 'personal', scope_id: 'windows-local', topic_key: 'work.role',
+    status: 'active', confirmation: 'explicit', version: 1, content: '我是软件工程师', updated_at: '2026-11-10T00:00:00Z' };
+  let forgetResult, clearResult, clears = 0, forgotten = false;
+  let tree = await setup({
+    desktop_memory_sync_status: () => ({ enabled: true, pending_deletions: false, pending_count: 0, pending_ingestions: 0, pending_mutations: 0 }),
+    desktop_memory_items: () => ({ body: { items: [item] } }), desktop_memory_candidates: () => ({ body: { candidates: [] } }),
+    desktop_memory_status: () => ({ body: { generation: 21, ready: true, state: 'ready' } }),
+    desktop_memory_item: () => { if (forgotten) throw new Error('memory_not_found'); return { body: { ...item, sources: [] } }; },
+    desktop_memory_forget: ({ input, expectedVersion }) => { assert.deepEqual(input, { itemId: 'item-2' }); assert.equal(expectedVersion, 1); forgotten = true; return (forgetResult = { status: 'pending_sync' }); },
+    desktop_memory_clear: ({ input }) => { assert.deepEqual(input, { expectedGeneration: 21 }); clears += 1; return (clearResult = { status: 'pending_sync' }); },
+  });
+  nav(tree).onSettings(); await flush(); tree = render(); button(tree, '管理已保存的记忆').props.onClick(); await flush(); tree = render();
+  ofType(tree, 'button').find(node => textOf(node).startsWith('我是软件工程师')).props.onClick(); await flush(); tree = render();
+  button(tree, '忘记这条记忆').props.onClick(); await flush(); tree = render();
+  assert.equal(forgetResult.status, 'pending_sync'); assert.match(textOf(tree), /删除待引擎恢复后同步/); assert.doesNotMatch(textOf(tree), /memory_not_found/);
+  ofType(tree, 'button').find(node => textOf(node).startsWith('已保存')).props.onClick(); tree = render();
+  button(tree, '清空全部个人记忆').props.onClick(); tree = render(); assert.equal(clears, 0);
+  button(tree, '再次点击确认清空全部个人记忆').props.onClick(); await flush(); tree = render();
+  assert.equal(clearResult.status, 'pending_sync'); assert.equal(clears, 1); assert.match(textOf(tree), /清空待引擎恢复后同步/);
+});
+
+test('memory export invokes the scoped export command and downloads JSON explicitly', async () => {
+  const previousCreateObjectURL = URL.createObjectURL;
+  const previousRevokeObjectURL = URL.revokeObjectURL;
+  const previousDocument = globalThis.document;
+  const downloads = [];
+  URL.createObjectURL = blob => { downloads.push({ blob }); return 'blob:memory-export'; };
+  URL.revokeObjectURL = value => downloads.push({ revoked: value });
+  globalThis.document = { createElement: tag => ({ tag, click() { downloads.push({ href: this.href, name: this.download }); } }) };
+  try {
+    let tree = await setup({
+      desktop_memory_sync_status: () => ({ enabled: true, pending_deletions: false, pending_count: 0, pending_ingestions: 0, pending_mutations: 0 }),
+      desktop_memory_items: () => ({ body: { items: [{ item_id: 'one', content: '中文偏好' }] } }),
+      desktop_memory_candidates: () => ({ body: { candidates: [] } }),
+      desktop_memory_status: () => ({ body: { generation: 1, ready: true, state: 'ready' } }),
+      desktop_memory_export: () => ({ body: { scope: 'personal', scope_id: 'windows-local', items: [{ item_id: 'one', content: '中文偏好' }] } }),
+    });
+    nav(tree).onSettings(); await flush(); tree = render(); button(tree, '管理已保存的记忆').props.onClick(); await flush(); tree = render();
+    button(tree, '导出个人记忆 JSON').props.onClick(); await flush(); tree = render();
+    assert.ok(calls.some(([name]) => name === 'desktop_memory_export'));
+    assert.equal(downloads[1].href, 'blob:memory-export');
+    assert.match(downloads[1].name, /^tomato-agent-memory-\d{4}-\d{2}-\d{2}\.json$/);
+    assert.match(textOf(tree), /已导出个人记忆 JSON/);
+  } finally {
+    URL.createObjectURL = previousCreateObjectURL;
+    URL.revokeObjectURL = previousRevokeObjectURL;
+    globalThis.document = previousDocument;
+  }
 });
 
 test('late events from an earlier generation cannot alter the current conversation', async () => {

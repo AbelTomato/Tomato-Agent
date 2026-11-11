@@ -37,6 +37,16 @@ impl ChatRuntime {
         input: SendInput,
         emit: impl Fn(&str, serde_json::Value),
     ) -> Result<(), String> {
+        self.send_with_memory_hooks(input, emit, |_| Ok(None), |_, _, _| Ok(()))
+    }
+
+    pub fn send_with_memory_hooks(
+        &self,
+        input: SendInput,
+        emit: impl Fn(&str, serde_json::Value),
+        mut after_user_message: impl FnMut(&ChatMessage) -> Result<Option<MemoryContextInput>, String>,
+        mut after_completed_turn: impl FnMut(&ChatMessage, &ChatMessage, Option<&MemoryContextInput>) -> Result<(), String>,
+    ) -> Result<(), String> {
         let SendInput {
             session_id,
             content,
@@ -72,16 +82,47 @@ impl ChatRuntime {
                 cancel: cancel.clone(),
             });
         }
+        let mut completed_assistant_message_id = None;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.store.append_message(&session_id, "user", &content)?;
-            let history = self.store.request_context(&session_id, 96 * 1024)?;
+            let user_message = self.store.append_message(&session_id, "user", &content)?;
+            let memory_context = match after_user_message(&user_message) {
+                Ok(context) => context,
+                Err(error) => {
+                    emit("desktop_memory_recall_status", serde_json::json!({
+                        "session_id": session_id,
+                        "message_id": user_message.id,
+                        "status": "failed",
+                        "error": error,
+                    }));
+                    None
+                }
+            };
+            let mut history = self.store.request_context(&session_id, 96 * 1024)?;
+            if let Some(memory) = memory_context.as_ref().filter(|memory| !memory.prompt.trim().is_empty()) {
+                history.insert(0, ChatMessage {
+                    id: format!("memory-context-{}", user_message.id),
+                    session_id: session_id.clone(),
+                    role: "system".into(),
+                    content: memory.prompt.clone(),
+                    created_at: user_message.created_at.clone(),
+                });
+            }
             let answer = self.provider.complete(&config, &key, &history, &cancel, &mut |delta| {
                 if cancel.load(Ordering::Relaxed) { return Err("请求已取消".into()); }
                 emit("desktop_chat_delta", serde_json::json!({"session_id":session_id,"request_id":request_id,"delta":delta}));
                 Ok(())
             })?;
             if cancel.load(Ordering::Relaxed) { return Err("请求已取消".into()); }
-            self.store.append_message(&session_id, "assistant", &answer)?;
+            let assistant_message = self.store.append_message(&session_id, "assistant", &answer)?;
+            completed_assistant_message_id = Some(assistant_message.id.clone());
+            if let Err(error) = after_completed_turn(&user_message, &assistant_message, memory_context.as_ref()) {
+                emit("desktop_memory_ingest_status", serde_json::json!({
+                    "session_id": session_id,
+                    "message_id": user_message.id,
+                    "status": "pending",
+                    "error": error,
+                }));
+            }
             Ok(())
         })).unwrap_or_else(|_| Err("聊天 Provider 异常".into()));
         let cancelled = cancel.load(Ordering::Relaxed);
@@ -101,10 +142,13 @@ impl ChatRuntime {
         } else {
             "desktop_chat_failed"
         };
-        emit(
-            event,
-            serde_json::json!({"session_id":session_id,"request_id":request_id,"error":result.as_ref().err()}),
-        );
+        let payload = serde_json::json!({
+            "session_id":session_id,
+            "request_id":request_id,
+            "assistant_message_id": if result.is_ok() { completed_assistant_message_id } else { None },
+            "error":result.as_ref().err(),
+        });
+        emit(event, payload);
         if cancelled {
             Ok(())
         } else {

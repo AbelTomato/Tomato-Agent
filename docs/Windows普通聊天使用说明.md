@@ -26,6 +26,8 @@ API Key 保存在 Windows Credential Manager；端点和模型名称保存在桌
 - `%LOCALAPPDATA%\TomatoAgent\drafts\dev.tomato.agent\`：桌面写作流程保存的草稿。
 - Windows Credential Manager：Provider API Key。
 
+长期记忆默认关闭；开启后的记忆范围、来源、管理操作和聊天/引擎数据成对备份恢复方式见[个人记忆使用与备份恢复](个人记忆使用与备份恢复.md)。
+
 备份前先完全退出应用。若要保留任务历史和恢复状态，应同时备份聊天及引擎数据。文件备份不包含 API Key；更换 Windows 账户或设备后需重新填写。
 
 ## 网络与任务异常

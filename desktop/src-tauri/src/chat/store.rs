@@ -28,9 +28,57 @@ impl ChatStore {
                  role TEXT NOT NULL CHECK(role IN ('user', 'assistant')), content TEXT NOT NULL,
                  created_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS memory_chat_contexts (
+                 assistant_message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 generation INTEGER NOT NULL,
+                 retrieval_mode TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_chat_context_items (
+                 assistant_message_id TEXT NOT NULL REFERENCES memory_chat_contexts(assistant_message_id) ON DELETE CASCADE,
+                 item_id TEXT NOT NULL,
+                 version INTEGER NOT NULL,
+                 PRIMARY KEY(assistant_message_id,item_id,version)
+             );
              CREATE TABLE IF NOT EXISTS engine_sessions (
                  desktop_session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
                  engine_session_id TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE IF NOT EXISTS memory_source_deletions (
+                 request_id TEXT PRIMARY KEY,
+                 source_system TEXT NOT NULL,
+                 source_installation_id TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 message_id TEXT NOT NULL,
+                 source_revision INTEGER NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','synced')),
+                 created_at TEXT NOT NULL,
+                 UNIQUE(source_system, source_installation_id, session_id, message_id, source_revision)
+             );
+             CREATE TABLE IF NOT EXISTS memory_source_ingestions (
+                 request_id TEXT PRIMARY KEY,
+                 source_system TEXT NOT NULL,
+                 source_installation_id TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 message_id TEXT NOT NULL,
+                 source_revision INTEGER NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','synced','cancelled')),
+                 created_at TEXT NOT NULL,
+                 UNIQUE(source_system, source_installation_id, session_id, message_id, source_revision)
+             );
+             CREATE TABLE IF NOT EXISTS memory_item_tombstones (
+                 item_id TEXT PRIMARY KEY,
+                 request_id TEXT NOT NULL UNIQUE,
+                 expected_version INTEGER NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_clear_tombstones (
+                 scope_id TEXT PRIMARY KEY,
+                 request_id TEXT NOT NULL UNIQUE,
+                 expected_generation INTEGER NOT NULL,
+                 created_at TEXT NOT NULL
              );",
         ).map_err(|_| "无法初始化聊天数据库".to_string())?;
         let columns = connection
@@ -44,6 +92,14 @@ impl ChatStore {
             connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL", [])
                 .map_err(|_| "无法升级聊天数据库".to_string())?;
         }
+        connection.execute(
+            "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('memory_installation_id',?1)",
+            [uuid::Uuid::new_v4().to_string()],
+        ).map_err(|_| "无法初始化记忆来源身份".to_string())?;
+        connection.execute(
+            "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('memory_enabled','0')",
+            [],
+        ).map_err(|_| "无法初始化记忆设置".to_string())?;
         connection
             .execute_batch("COMMIT;")
             .map_err(|_| "无法完成聊天数据库升级".to_string())?;
@@ -276,16 +332,293 @@ impl ChatStore {
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        let changed = self
-            .connection
-            .lock()
-            .map_err(|_| "聊天数据库不可用".to_string())?
-            .execute("DELETE FROM sessions WHERE id=?1", [session_id])
+        let installation_id = self.memory_installation_id()?;
+        self.delete_session_with_memory_sources(session_id, "tomato-desktop", &installation_id)
+    }
+
+    pub fn memory_enabled(&self) -> Result<bool, String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT value FROM chat_preferences WHERE key='memory_enabled'", [], |row| row.get::<_, String>(0))
+            .map(|value| value == "1")
+            .map_err(|_| "无法读取记忆设置".to_string())
+    }
+
+    pub fn set_memory_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection.transaction().map_err(|_| "无法保存记忆设置".to_string())?;
+        transaction.execute("UPDATE chat_preferences SET value=?1 WHERE key='memory_enabled'",
+            [if enabled { "1" } else { "0" }])
+            .map_err(|_| "无法保存记忆设置".to_string())?;
+        if !enabled {
+            transaction.execute(
+                "UPDATE memory_source_ingestions SET status='cancelled',payload_json='{}' WHERE status='pending'",
+                [],
+            ).map_err(|_| "无法清除待处理记忆来源".to_string())?;
+        }
+        transaction.commit().map_err(|_| "无法保存记忆设置".to_string())?;
+        Ok(())
+    }
+
+    pub fn memory_installation_id(&self) -> Result<String, String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT value FROM chat_preferences WHERE key='memory_installation_id'", [], |row| row.get(0))
+            .map_err(|_| "无法读取记忆来源身份".to_string())
+    }
+
+    pub fn delete_session_with_memory_sources(
+        &self,
+        session_id: &str,
+        source_system: &str,
+        installation_id: &str,
+    ) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection.transaction().map_err(|_| "无法删除对话".to_string())?;
+        let messages = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM messages WHERE session_id=?1")
+                .map_err(|_| "无法读取待删除来源".to_string())?;
+            let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))
+                .map_err(|_| "无法读取待删除来源".to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待删除来源".to_string())?
+        };
+        for message_id in &messages {
+            transaction.execute(
+                "UPDATE memory_source_ingestions SET status='cancelled',payload_json='{}' WHERE source_system=?1 AND source_installation_id=?2 AND session_id=?3 AND message_id=?4 AND status='pending'",
+                params![source_system, installation_id, session_id, message_id],
+            ).map_err(|_| "无法清除待同步记忆来源".to_string())?;
+        }
+        let changed = transaction.execute("DELETE FROM sessions WHERE id=?1", [session_id])
             .map_err(|_| "无法删除对话".to_string())?;
         if changed == 0 {
             return Err("对话不存在".into());
         }
+        for message_id in messages {
+            let memory_enabled: bool = transaction.query_row(
+                "SELECT value='1' FROM chat_preferences WHERE key='memory_enabled'",
+                [], |row| row.get(0),
+            ).map_err(|_| "无法读取记忆设置".to_string())?;
+            let was_ingested: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_source_ingestions WHERE source_system=?1 AND source_installation_id=?2 AND session_id=?3 AND message_id=?4 AND status='synced')",
+                params![source_system, installation_id, session_id, message_id], |row| row.get(0),
+            ).map_err(|_| "无法读取记忆来源状态".to_string())?;
+            if !memory_enabled && !was_ingested {
+                continue;
+            }
+            let request_id = uuid::Uuid::new_v4().to_string();
+            transaction.execute(
+                "INSERT OR IGNORE INTO memory_source_deletions(request_id,source_system,source_installation_id,session_id,message_id,source_revision,status,created_at) VALUES(?1,?2,?3,?4,?5,1,'pending',?6)",
+                params![request_id, source_system, installation_id, session_id, message_id, utc_now()],
+            ).map_err(|_| "无法保存记忆来源删除记录".to_string())?;
+        }
+        transaction.commit().map_err(|_| "无法完成对话删除".to_string())?;
         Ok(())
+    }
+
+    pub fn pending_memory_source_deletions(&self, limit: u32) -> Result<Vec<MemorySourceDeletion>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT request_id,source_system,source_installation_id,session_id,message_id,source_revision,status FROM memory_source_deletions WHERE status='pending' ORDER BY created_at,request_id LIMIT ?1",
+        ).map_err(|_| "无法读取待同步记忆来源".to_string())?;
+        let rows = statement.query_map([limit.clamp(1, 500)], |row| Ok(MemorySourceDeletion {
+            request_id: row.get(0)?, source_system: row.get(1)?, source_installation_id: row.get(2)?,
+            session_id: row.get(3)?, message_id: row.get(4)?, source_revision: row.get(5)?, status: row.get(6)?,
+        })).map_err(|_| "无法读取待同步记忆来源".to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待同步记忆来源".to_string())
+    }
+
+    pub fn acknowledge_memory_source_deletion(&self, request_id: &str) -> Result<(), String> {
+        let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("UPDATE memory_source_deletions SET status='synced' WHERE request_id=?1 AND status='pending'", [request_id])
+            .map_err(|_| "无法确认记忆来源删除".to_string())?;
+        if changed == 0 { return Err("待同步记忆来源不存在".into()); }
+        Ok(())
+    }
+
+    pub fn enqueue_memory_source_ingestion(&self, payload: &serde_json::Value) -> Result<String, String> {
+        let source_system = payload["source_system"].as_str().ok_or("记忆来源系统无效")?;
+        let installation_id = payload["source_installation_id"].as_str().ok_or("记忆安装身份无效")?;
+        let session_id = payload["session_id"].as_str().ok_or("记忆会话标识无效")?;
+        let message = payload["messages"].as_array().and_then(|items| items.first())
+            .ok_or("记忆来源消息缺失")?;
+        if message["role"] != "user" || message["content"].as_str().is_none_or(|text| text.chars().count() > 6000) {
+            return Err("记忆来源消息超出自动提取范围".into());
+        }
+        let message_id = message["message_id"].as_str().ok_or("记忆来源消息标识无效")?;
+        let revision = message["revision"].as_i64().unwrap_or(1);
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let serialized = serde_json::to_string(payload).map_err(|_| "无法编码记忆来源")?;
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用")?;
+        connection.execute(
+            "INSERT OR IGNORE INTO memory_source_ingestions(request_id,source_system,source_installation_id,session_id,message_id,source_revision,payload_json,status,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',?8)",
+            params![request_id, source_system, installation_id, session_id, message_id, revision, serialized, utc_now()],
+        ).map_err(|_| "无法登记记忆来源待处理任务")?;
+        connection.query_row(
+            "SELECT request_id FROM memory_source_ingestions WHERE source_system=?1 AND source_installation_id=?2 AND session_id=?3 AND message_id=?4 AND source_revision=?5",
+            params![source_system, installation_id, session_id, message_id, revision], |row| row.get(0),
+        ).map_err(|_| "无法读取记忆来源待处理任务".into())
+    }
+
+    pub fn pending_memory_source_ingestions(&self, limit: u32) -> Result<Vec<(String, serde_json::Value)>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用")?;
+        let mut statement = connection.prepare(
+            "SELECT request_id,payload_json FROM memory_source_ingestions WHERE status='pending' ORDER BY created_at,request_id LIMIT ?1",
+        ).map_err(|_| "无法读取记忆来源待处理任务")?;
+        let rows = statement.query_map([limit.clamp(1, 500)], |row| {
+            let request_id: String = row.get(0)?;
+            let payload: String = row.get(1)?;
+            Ok((request_id, payload))
+        }).map_err(|_| "无法读取记忆来源待处理任务")?;
+        rows.map(|row| {
+            let (request_id, payload) = row.map_err(|_| "无法读取记忆来源待处理任务")?;
+            let payload = serde_json::from_str(&payload).map_err(|_| "记忆来源待处理数据损坏")?;
+            Ok((request_id, payload))
+        }).collect()
+    }
+
+    pub fn acknowledge_memory_source_ingestion(&self, request_id: &str) -> Result<(), String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用")?
+            .execute("UPDATE memory_source_ingestions SET status='synced' WHERE request_id=?1", [request_id])
+            .map_err(|_| "无法确认记忆来源同步")?;
+        Ok(())
+    }
+
+    pub fn has_pending_memory_source_deletions(&self) -> Result<bool, String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT EXISTS(SELECT 1 FROM memory_source_deletions WHERE status='pending')", [], |row| row.get(0))
+            .map_err(|_| "无法检查记忆来源同步状态".to_string())
+    }
+
+    pub fn ensure_memory_reads_allowed(&self) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let pending: bool = connection.query_row(
+            concat!("SELECT EXISTS(SELECT 1 FROM memory_source_deletions WHERE status='pending') OR ",
+                "EXISTS(SELECT 1 FROM memory_item_tombstones) OR EXISTS(SELECT 1 FROM memory_clear_tombstones)"),
+            [], |row| row.get(0),
+        ).map_err(|_| "无法检查记忆撤销状态".to_string())?;
+        if pending {
+            return Err("记忆撤销尚未同步，暂时停用记忆读取".into());
+        }
+        Ok(())
+    }
+
+    pub fn enqueue_memory_item_forget(&self, item_id: &str, expected_version: i64) -> Result<String, String> {
+        if item_id.is_empty() || expected_version < 1 { return Err("记忆版本无效".into()); }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(concat!("INSERT INTO memory_item_tombstones(item_id,request_id,expected_version,created_at) VALUES(?1,?2,?3,?4) ",
+                "ON CONFLICT(item_id) DO UPDATE SET request_id=excluded.request_id,expected_version=excluded.expected_version,created_at=excluded.created_at ",
+                "WHERE memory_item_tombstones.expected_version<>excluded.expected_version"),
+                rusqlite::params![item_id, request_id, expected_version, utc_now()])
+            .map_err(|_| "无法保存待同步的记忆撤销".to_string())?;
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(concat!("DELETE FROM memory_chat_contexts WHERE assistant_message_id IN (",
+                "SELECT assistant_message_id FROM memory_chat_context_items WHERE item_id=?1)"), [item_id])
+            .map_err(|_| "无法清理已撤销记忆的使用记录".to_string())?;
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT request_id FROM memory_item_tombstones WHERE item_id=?1", [item_id], |row| row.get(0))
+            .map_err(|_| "无法读取待同步的记忆撤销".to_string())
+    }
+
+    pub fn pending_memory_item_forgets(&self) -> Result<Vec<(String, String, i64)>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let mut statement = connection.prepare("SELECT item_id,request_id,expected_version FROM memory_item_tombstones ORDER BY created_at")
+            .map_err(|_| "无法读取待同步的记忆撤销".to_string())?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|_| "无法读取待同步的记忆撤销".to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待同步的记忆撤销".to_string());
+        rows
+    }
+
+    pub fn acknowledge_memory_item_forget(&self, request_id: &str) -> Result<(), String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("DELETE FROM memory_item_tombstones WHERE request_id=?1", [request_id])
+            .map(|_| ()).map_err(|_| "无法确认记忆撤销同步".to_string())
+    }
+
+    pub fn enqueue_memory_clear(&self, scope_id: &str, expected_generation: i64) -> Result<String, String> {
+        if scope_id.is_empty() || expected_generation < 0 { return Err("记忆空间版本无效".into()); }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(concat!("INSERT INTO memory_clear_tombstones(scope_id,request_id,expected_generation,created_at) VALUES(?1,?2,?3,?4) ",
+                "ON CONFLICT(scope_id) DO UPDATE SET request_id=excluded.request_id,expected_generation=excluded.expected_generation,created_at=excluded.created_at ",
+                "WHERE memory_clear_tombstones.expected_generation<>excluded.expected_generation"),
+                rusqlite::params![scope_id, request_id, expected_generation, utc_now()])
+            .map_err(|_| "无法保存待同步的记忆清空".to_string())?;
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("DELETE FROM memory_chat_contexts", [])
+            .map_err(|_| "无法清理已清空记忆的使用记录".to_string())?;
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT request_id FROM memory_clear_tombstones WHERE scope_id=?1", [scope_id], |row| row.get(0))
+            .map_err(|_| "无法读取待同步的记忆清空".to_string())
+    }
+
+    pub fn pending_memory_clear(&self) -> Result<Option<(String, String, i64)>, String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT scope_id,request_id,expected_generation FROM memory_clear_tombstones LIMIT 1", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional().map_err(|_| "无法读取待同步的记忆清空".to_string())
+    }
+
+    pub fn acknowledge_memory_clear(&self, request_id: &str) -> Result<(), String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .execute("DELETE FROM memory_clear_tombstones WHERE request_id=?1", [request_id])
+            .map(|_| ()).map_err(|_| "无法确认记忆清空同步".to_string())
+    }
+
+    pub fn pending_memory_mutation_count(&self) -> Result<usize, String> {
+        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row("SELECT (SELECT count(*) FROM memory_item_tombstones)+(SELECT count(*) FROM memory_clear_tombstones)", [],
+                |row| row.get::<_, i64>(0))
+            .map(|count| count.max(0) as usize).map_err(|_| "无法读取待同步的记忆变更".to_string())
+    }
+
+    pub fn record_memory_chat_context(&self, context: &MemoryChatContext) -> Result<(), String> {
+        if context.assistant_message_id.is_empty() || context.session_id.is_empty()
+            || context.generation > i64::MAX as u64 || context.items.len() > 16
+            || !matches!(context.retrieval_mode.as_str(), "keyword" | "hybrid") {
+            return Err("记忆使用引用无效".into());
+        }
+        for item in &context.items {
+            uuid::Uuid::parse_str(&item.item_id).map_err(|_| "记忆使用引用无效")?;
+            if item.version == 0 { return Err("记忆使用引用无效".into()); }
+        }
+        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection.transaction().map_err(|_| "无法记录记忆使用引用".to_string())?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO memory_chat_contexts(assistant_message_id,session_id,generation,retrieval_mode,created_at) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![context.assistant_message_id, context.session_id, context.generation as i64, context.retrieval_mode, utc_now()],
+        ).map_err(|_| "无法记录记忆使用引用".to_string())?;
+        for item in &context.items {
+            transaction.execute(
+                "INSERT OR IGNORE INTO memory_chat_context_items(assistant_message_id,item_id,version) VALUES(?1,?2,?3)",
+                rusqlite::params![context.assistant_message_id, item.item_id, item.version],
+            ).map_err(|_| "无法记录记忆使用引用".to_string())?;
+        }
+        transaction.commit().map_err(|_| "无法记录记忆使用引用".to_string())
+    }
+
+    pub fn memory_chat_contexts(&self, session_id: &str) -> Result<Vec<MemoryChatContext>, String> {
+        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT assistant_message_id,session_id,generation,retrieval_mode FROM memory_chat_contexts WHERE session_id=?1 ORDER BY created_at"
+        ).map_err(|_| "无法读取记忆使用记录".to_string())?;
+        let rows = statement.query_map([session_id], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?,
+        ))).map_err(|_| "无法读取记忆使用记录".to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取记忆使用记录".to_string())?;
+        let mut result = Vec::with_capacity(rows.len());
+        for (assistant_message_id, session_id, generation, retrieval_mode) in rows {
+            let mut items_statement = connection.prepare(
+                "SELECT item_id,version FROM memory_chat_context_items WHERE assistant_message_id=?1 ORDER BY item_id,version"
+            ).map_err(|_| "无法读取记忆使用记录".to_string())?;
+            let items = items_statement.query_map([&assistant_message_id], |row| Ok(MemoryReference {
+                item_id: row.get(0)?, version: row.get(1)?,
+            })).map_err(|_| "无法读取记忆使用记录".to_string())?
+                .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取记忆使用记录".to_string())?;
+            result.push(MemoryChatContext { assistant_message_id, session_id,
+                generation: generation.max(0) as u64, retrieval_mode, items });
+        }
+        Ok(result)
     }
 
     pub fn append_message(

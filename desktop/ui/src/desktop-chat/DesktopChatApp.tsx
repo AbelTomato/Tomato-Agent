@@ -13,6 +13,12 @@ type AgentTask = { run_id: string; session_id: string; kind: string; status: str
   result: { answer?: string; draft?: string; outline?: Record<string, unknown>; citations?: unknown[]; artifacts?: unknown[] } | null; error: { code?: string } | null;
   pending_action: PendingAction | null; capabilities: string[]; events?: TaskEvent[] };
 type EngineWorkspace = { workspace_id: string; repo_path?: string; available?: boolean };
+type MemorySyncStatus = { enabled: boolean; pending_deletions: boolean; pending_count: number; pending_ingestions: number; pending_mutations?: number };
+type MemorySource = { source_system: string; session_id: string; message_id: string; source_revision: number; message_at: string | null; excerpt: string | null; status: string; evidence_role?: string };
+type MemoryItem = { item_id: string; kind: string; scope: string; scope_id: string; topic_key: string; status: string; confirmation: string; version: number; content: string; updated_at: string };
+type MemoryCandidate = { candidate_id: string; kind: string; topic_key: string; content: string; confidence: number; reason: string; created_at: string; sources: MemorySource[] };
+type MemoryStatus = { generation: number; ready: boolean; state: string };
+type MemoryTurnUse = { assistant_message_id: string; generation: number; retrieval_mode: string; unavailable_count: number; items: (MemoryItem & { sources: MemorySource[] })[] };
 type EditDialog = { kind: 'create-project'; rootPath: string } | { kind: 'rename-project'; project: Project }
   | { kind: 'delete-project'; project: Project } | { kind: 'rename-session'; session: Session }
   | { kind: 'delete-session'; session: Session };
@@ -33,6 +39,19 @@ export function DesktopChatApp() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [settings, setSettings] = useState(false);
+  const [memoryEnabled, setMemoryEnabled] = useState(false);
+  const [memorySyncPending, setMemorySyncPending] = useState(false);
+  const [memoryManager, setMemoryManager] = useState(false);
+  const [memoryTab, setMemoryTab] = useState<'items' | 'candidates'>('items');
+  const [memoryItems, setMemoryItems] = useState<MemoryItem[]>([]);
+  const [memoryCandidates, setMemoryCandidates] = useState<MemoryCandidate[]>([]);
+  const [memoryDetail, setMemoryDetail] = useState<(MemoryItem & { sources?: MemorySource[] }) | null>(null);
+  const [memoryEdit, setMemoryEdit] = useState('');
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState('');
+  const [clearArmed, setClearArmed] = useState(false);
+  const [memoryGeneration, setMemoryGeneration] = useState(0);
+  const [memoryContexts, setMemoryContexts] = useState<Record<string, MemoryTurnUse>>({});
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
   const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -42,6 +61,7 @@ export function DesktopChatApp() {
   const [dialogError, setDialogError] = useState('');
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState('');
+  const memoryRecallFailed = useRef(false);
   const mutationPending = useRef(false);
   const navigationRevision = useRef(0);
   const historyRevision = useRef(0);
@@ -51,6 +71,24 @@ export function DesktopChatApp() {
   const [hasOlder, setHasOlder] = useState(false);
   const activeTaskKey = agentTasks.filter(task => ['queued', 'running', 'waiting'].includes(task.status)).map(task => task.run_id).join(',');
   const syncedTaskReplies = useRef(new Set<string>());
+
+  useEffect(() => {
+    const updateViewport = () => {
+      const scale = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 1;
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      if (typeof document === 'undefined' || typeof width !== 'number' || typeof height !== 'number') return;
+      document.documentElement.style.setProperty('--tauri-viewport-width', `${width / scale}px`);
+      document.documentElement.style.setProperty('--tauri-viewport-height', `${height / scale}px`);
+    };
+    updateViewport();
+    window.addEventListener?.('resize', updateViewport);
+    window.visualViewport?.addEventListener('resize', updateViewport);
+    return () => {
+      window.removeEventListener?.('resize', updateViewport);
+      window.visualViewport?.removeEventListener('resize', updateViewport);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -66,13 +104,46 @@ export function DesktopChatApp() {
         return [...current, { id: 'streaming', session_id: event.payload.session_id, role: 'assistant', content: event.payload.delta, created_at: new Date().toISOString() }];
       });
     });
-    return () => { active = false; void unlisten.then(stop => stop()); };
+    const intentStatus = listen<{ session_id: string; message_id: string; status: string; error?: string }>('desktop_memory_intent_status', event => {
+      if (event.payload.session_id !== activeSession.current) return;
+      if (event.payload.status === 'saved') setNotice('已保存这条记忆');
+      else if (event.payload.status === 'candidate') setNotice('这条记忆需要确认后才会生效');
+      else if (event.payload.status === 'failed') setError(event.payload.error || '记忆保存失败');
+    });
+    const ingestStatus = listen<{ session_id: string; status: string; error?: string }>('desktop_memory_ingest_status', event => {
+      if (event.payload.session_id !== activeSession.current) return;
+      if (event.payload.status === 'pending' || event.payload.error) {
+        setMemorySyncPending(true);
+        if (!memoryRecallFailed.current) setNotice('本轮对话来源待同步');
+      }
+    });
+    const recallStatus = listen<{ session_id: string; status: string; used_item_ids?: string[]; error?: string }>('desktop_memory_recall_status', event => {
+      if (event.payload.session_id !== activeSession.current) return;
+      if (event.payload.status === 'failed' && event.payload.error?.includes('未保存')) setError(event.payload.error);
+      else if (event.payload.status === 'failed') {
+        memoryRecallFailed.current = true;
+        setNotice('本轮未使用记忆');
+      } else if (event.payload.used_item_ids?.length) {
+        memoryRecallFailed.current = false;
+        setNotice(`本轮使用 ${event.payload.used_item_ids.length} 条记忆`);
+      }
+    });
+    return () => {
+      active = false;
+      void unlisten.then(stop => stop());
+      void intentStatus.then(stop => stop());
+      void ingestStatus.then(stop => stop());
+      void recallStatus.then(stop => stop());
+    };
   }, [sessionId]);
 
   useEffect(() => {
     let active = true;
     const completed = listen<{ session_id: string; request_id: string }>('desktop_chat_completed', event => {
-      if (event.payload.session_id === activeSession.current && event.payload.request_id === activeGeneration.current) setBusy(false);
+      if (event.payload.session_id === activeSession.current && event.payload.request_id === activeGeneration.current) {
+        setBusy(false);
+        void refreshHistory(event.payload.session_id).catch(reason => setError(String(reason)));
+      }
     });
     const cancelled = listen<{ session_id: string; request_id: string }>('desktop_chat_cancelled', event => {
       if (event.payload.session_id !== activeSession.current || event.payload.request_id !== activeGeneration.current) return;
@@ -110,9 +181,26 @@ export function DesktopChatApp() {
     const revision = ++historyRevision.current;
     try {
       const history = await invoke<Message[]>('desktop_chat_history', { sessionId: id });
-      if (activeSession.current === id && historyRevision.current === revision) { setMessages(history); setHasOlder(history.length >= 100); }
+      if (activeSession.current === id && historyRevision.current === revision) {
+        setMessages(history); setHasOlder(history.length >= 100);
+        try {
+          const response = await invoke<{ body: { contexts: MemoryTurnUse[] } }>('desktop_chat_memory_contexts', { sessionId: id });
+          if (activeSession.current === id && historyRevision.current === revision) {
+            setMemoryContexts(Object.fromEntries(response.body.contexts.map(context => [context.assistant_message_id, context])));
+          }
+        } catch {
+          if (activeSession.current === id && historyRevision.current === revision) setMemoryContexts({});
+        }
+      }
     } catch (reason) {
       if (activeSession.current === id && historyRevision.current === revision) throw reason;
+    }
+  }
+
+  async function refreshMemoryContexts(id: string, revision = historyRevision.current) {
+    const response = await invoke<{ body: { contexts: MemoryTurnUse[] } }>('desktop_chat_memory_contexts', { sessionId: id });
+    if (activeSession.current === id && historyRevision.current === revision) {
+      setMemoryContexts(Object.fromEntries(response.body.contexts.map(context => [context.assistant_message_id, context])));
     }
   }
 
@@ -146,6 +234,7 @@ export function DesktopChatApp() {
     setBusy(false);
     setError('');
     setMessages([]);
+    setMemoryContexts({});
     setAgentTasks([]);
     setSelectedWorkspace('');
     try {
@@ -168,6 +257,7 @@ export function DesktopChatApp() {
       activeSession.current = id;
       setSessionId(id);
       setMessages([]);
+      setMemoryContexts({});
       setAgentTasks([]);
       setBusy(false);
     } catch (reason) { setError(String(reason)); }
@@ -218,7 +308,8 @@ export function DesktopChatApp() {
           await invoke('desktop_chat_rename_session', { sessionId: dialog.session.id, title: dialogValue }); break;
         case 'delete-session':
           if (activeSession.current === dialog.session.id && busy) await invoke('desktop_chat_cancel');
-          await invoke('desktop_chat_delete_session', { sessionId: dialog.session.id });
+          const deletion = await invoke<{ pending_memory_sync: number }>('desktop_chat_delete_session', { sessionId: dialog.session.id });
+          if (deletion.pending_memory_sync > 0) { setMemorySyncPending(true); setNotice('对话已删除，记忆来源删除将在引擎连接后同步'); }
           if (activeSession.current === dialog.session.id) {
             ++navigationRevision.current; ++historyRevision.current;
             activeSession.current = null; setSessionId(null); setMessages([]); setBusy(false);
@@ -240,7 +331,8 @@ export function DesktopChatApp() {
     const requestId = crypto.randomUUID();
     activeGeneration.current = requestId;
     activeSendSession.current = requestSession;
-    setInput(''); setError(''); setBusy(true);
+    if (mode === 'chat') memoryRecallFailed.current = false;
+    setInput(''); setError(''); setNotice(''); setBusy(true);
     try {
       if (mode !== 'chat') {
         const task = await invoke<AgentTask>('desktop_agent_submit_task', {
@@ -323,6 +415,7 @@ export function DesktopChatApp() {
       if (activeSession.current !== id || historyRevision.current !== revision) return;
       setMessages(current => [...page.messages, ...current.filter(message => !page.messages.some(older => older.id === message.id))]);
       setHasOlder(page.has_more);
+      await refreshMemoryContexts(id, revision).catch(() => undefined);
     } catch (reason) { if (activeSession.current === id) setError(String(reason)); }
   }
 
@@ -332,6 +425,124 @@ export function DesktopChatApp() {
       await invoke('desktop_chat_configure', { input: { baseUrl, model, apiKey: apiKey || null } });
       setApiKey(''); setConfigured(true); setSettings(false);
     } catch (reason) { setError(String(reason)); }
+  }
+
+  async function openSettings() {
+    setError('');
+    try {
+      const memory = await invoke<MemorySyncStatus>('desktop_memory_sync_status');
+      setMemoryEnabled(memory.enabled);
+      setMemorySyncPending(memory.pending_deletions || memory.pending_ingestions > 0 || (memory.pending_mutations ?? 0) > 0);
+    } catch (reason) { setError(String(reason)); }
+    setSettings(true);
+  }
+
+  async function updateMemoryEnabled(enabled: boolean) {
+    setError('');
+    try {
+      const result = await invoke<{ enabled: boolean }>('desktop_memory_set_enabled', { enabled });
+      setMemoryEnabled(result.enabled);
+      const memory = await invoke<MemorySyncStatus>('desktop_memory_sync_status');
+      setMemorySyncPending(memory.pending_deletions || memory.pending_ingestions > 0 || (memory.pending_mutations ?? 0) > 0);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function refreshMemoryManager(refreshDetail = true) {
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      const sync = await invoke<MemorySyncStatus>('desktop_memory_sync_status');
+      setMemorySyncPending(sync.pending_deletions || sync.pending_ingestions > 0 || (sync.pending_mutations ?? 0) > 0);
+      const [items, candidates, status] = await Promise.all([
+        invoke<{ body: { items: MemoryItem[] } }>('desktop_memory_items', { offset: 0 }),
+        invoke<{ body: { candidates: MemoryCandidate[] } }>('desktop_memory_candidates'),
+        invoke<{ body: MemoryStatus }>('desktop_memory_status'),
+      ]);
+      setMemoryItems(items.body.items);
+      setMemoryCandidates(candidates.body.candidates);
+      setMemoryGeneration(status.body.generation);
+      if (refreshDetail && memoryDetail) {
+        const detail = await invoke<{ body: MemoryItem & { sources: MemorySource[] } }>('desktop_memory_item', { input: { itemId: memoryDetail.item_id } });
+        setMemoryDetail(detail.body);
+        setMemoryEdit(detail.body.content);
+      }
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function openMemoryManager() {
+    setMemoryDetail(null); setMemoryEdit(''); setMemoryTab('items'); setMemoryManager(true); setSettings(false);
+    await refreshMemoryManager();
+  }
+
+  async function openMemoryItem(item: MemoryItem) {
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      const detail = await invoke<{ body: MemoryItem & { sources: MemorySource[] } }>('desktop_memory_item', { input: { itemId: item.item_id } });
+      setMemoryDetail(detail.body); setMemoryEdit(detail.body.content);
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function saveMemoryCorrection() {
+    if (!memoryDetail || !memoryEdit.trim()) return;
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      await invoke('desktop_memory_correct', { input: { itemId: memoryDetail.item_id, expectedVersion: memoryDetail.version, content: memoryEdit.trim() } });
+      setNotice('记忆已更正'); setMemoryDetail(null); await refreshMemoryManager();
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function forgetMemoryItem() {
+    if (!memoryDetail) return;
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      const result = await invoke<{ status: string }>('desktop_memory_forget', { input: { itemId: memoryDetail.item_id }, expectedVersion: memoryDetail.version });
+      setMemoryDetail(null); setMemoryEdit('');
+      if (result.status === 'pending_sync') { setMemorySyncPending(true); setNotice('记忆已在本机停用，删除待引擎恢复后同步'); }
+      else setNotice('已忘记这条记忆');
+      await refreshMemoryManager(false);
+      if (activeSession.current) await refreshHistory(activeSession.current);
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function decideMemoryCandidate(candidate: MemoryCandidate, action: 'accept' | 'reject') {
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      await invoke('desktop_memory_candidate_decision', { input: { candidateId: candidate.candidate_id }, action });
+      setNotice(action === 'accept' ? '已接受这条候选记忆' : '已拒绝这条候选记忆');
+      await refreshMemoryManager();
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function clearAllMemory() {
+    if (!clearArmed) { setClearArmed(true); return; }
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      const result = await invoke<{ status: string }>('desktop_memory_clear', { input: { expectedGeneration: memoryGeneration } });
+      setMemoryDetail(null); setClearArmed(false);
+      if (result.status === 'pending_sync') { setMemorySyncPending(true); setNotice('记忆已在本机停用，清空待引擎恢复后同步'); }
+      else setNotice('已清空个人记忆');
+      await refreshMemoryManager(false);
+      if (activeSession.current) await refreshHistory(activeSession.current);
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
+  }
+
+  async function exportMemory() {
+    setMemoryLoading(true); setMemoryError('');
+    try {
+      const response = await invoke<{ body: { scope: string; scope_id: string; items: MemoryItem[] } }>('desktop_memory_export');
+      const payload = JSON.stringify({ ...response.body, exported_at: new Date().toISOString() }, null, 2);
+      const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = `tomato-agent-memory-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click(); URL.revokeObjectURL(url);
+      setNotice('已导出个人记忆 JSON');
+    } catch (reason) { setMemoryError(String(reason)); }
+    finally { setMemoryLoading(false); }
   }
 
   async function testConnection() {
@@ -344,7 +555,7 @@ export function DesktopChatApp() {
   return (
     <main className="desktop-chat-shell" aria-label="普通聊天">
       <ProjectNavigation sessions={sessions} projects={projects} sessionId={sessionId} disabled={initializing || working || dialog !== null}
-        onSettings={() => setSettings(true)} onNewSession={projectId => void createSession(projectId)}
+        onSettings={() => void openSettings()} onNewSession={projectId => void createSession(projectId)}
         onNewProject={() => void createProject()} onSelectSession={id => void selectSession(id)}
         onRenameSession={session => openDialog({ kind: 'rename-session', session }, session.title)}
         onDeleteSession={session => openDialog({ kind: 'delete-session', session })}
@@ -356,7 +567,22 @@ export function DesktopChatApp() {
         <div className="desktop-chat-messages" aria-live="polite">
           {hasOlder && <button type="button" disabled={busy} onClick={() => void loadOlder()}>加载更早消息</button>}
           {messages.length === 0 && <div className="desktop-chat-empty"><h2>开始一段对话</h2><p>{configured ? '发送消息开始聊天' : '模型尚未配置'}</p></div>}
-          {messages.map(message => <article className={`desktop-chat-message ${message.role}`} key={message.id}><strong>{message.role === 'user' ? '你' : 'Tomato Agent'}</strong><p>{message.content}</p></article>)}
+          {messages.map(message => {
+            const memoryUse = memoryContexts[message.id];
+            return <article className={`desktop-chat-message ${message.role}`} key={message.id}>
+              <strong>{message.role === 'user' ? '你' : 'Tomato Agent'}</strong><p>{message.content}</p>
+              {message.role === 'assistant' && memoryUse && <section className="desktop-chat-memory-use" aria-label="本轮使用的长期记忆">
+                <strong>本轮使用的长期记忆 · {memoryUse.items.length}</strong>
+                {memoryUse.items.map(item => <div className="desktop-chat-memory-use-item" key={`${item.item_id}:${item.version}`}>
+                  <p>{item.content}</p><small>{memoryKindLabel(item.kind)} · {item.topic_key} · 版本 {item.version}</small>
+                  {item.sources?.map(source => <blockquote key={`${source.session_id}:${source.message_id}:${source.source_revision}`}>
+                    {source.excerpt || '来源原文未保留'}<small>{source.message_at ? new Date(source.message_at).toLocaleString() : '时间未记录'} · 消息 {source.message_id}</small>
+                  </blockquote>)}
+                </div>)}
+                {memoryUse.unavailable_count > 0 && <small>另有 {memoryUse.unavailable_count} 条记忆已被忘记或来源已删除，内容不再显示。</small>}
+              </section>}
+            </article>;
+          })}
           {agentTasks.map(task => {
             const clarification = task.pending_action?.action_type === 'clarification';
             const choices = Array.isArray(task.pending_action?.display_data.choices)
@@ -446,8 +672,47 @@ export function DesktopChatApp() {
         <label>模型名称<input required value={model} onChange={event => setModel(event.target.value)} /></label>
         <label>API Key<input type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} /></label>
         <p>API Key 保存在 Windows 凭据库中。</p>
+        <label className="desktop-memory-setting"><input type="checkbox" checked={memoryEnabled} disabled={busy}
+          onChange={event => void updateMemoryEnabled(event.target.checked)} />启用长期记忆</label>
+        <button type="button" className="secondary-button" onClick={() => void openMemoryManager()}>管理已保存的记忆</button>
+        <p>启用后，新对话内容会提交给当前模型，用于提取可管理的个人记忆。</p>
+        {memorySyncPending && <p role="status">有记忆来源删除待同步，完成同步前不会读取相关记忆。</p>}
         <footer>{testingConnection ? <button type="button" onClick={() => void invoke('desktop_chat_cancel_connection_test')}>取消测试</button> : <button type="button" onClick={() => void testConnection()}>测试连接</button>}<button type="button" onClick={() => void invoke('desktop_chat_delete_credential').then(() => setConfigured(false)).catch(reason => setError(String(reason)))}>删除凭据</button><button type="submit">保存设置</button></footer>
       </form></div>}
+      {memoryManager && <div className="desktop-chat-backdrop" role="presentation"><section className="desktop-chat-settings desktop-memory-manager" role="dialog" aria-modal="true" aria-labelledby="memory-manager-title">
+        <header><h2 id="memory-manager-title">长期记忆</h2><button type="button" aria-label="关闭记忆管理" onClick={() => { setMemoryManager(false); setMemoryDetail(null); }}>关闭</button></header>
+        {memorySyncPending && <p className="desktop-memory-pending" role="status">有记忆变更待同步；同步完成前会暂停记忆读取。</p>}
+        <nav className="desktop-memory-tabs" aria-label="记忆视图"><button type="button" aria-pressed={memoryTab === 'items'} onClick={() => { setMemoryTab('items'); setMemoryDetail(null); }}>已保存 · {memoryItems.length}</button><button type="button" aria-pressed={memoryTab === 'candidates'} onClick={() => { setMemoryTab('candidates'); setMemoryDetail(null); }}>待确认 · {memoryCandidates.length}</button></nav>
+        {memoryError && <p role="alert" className="desktop-chat-error">{memoryError}</p>}
+        {memoryLoading && <p role="status">正在同步记忆状态…</p>}
+        {memoryDetail ? <div className="desktop-memory-detail">
+          <button type="button" className="desktop-memory-back" onClick={() => setMemoryDetail(null)}>返回记忆列表</button>
+          <p className="desktop-memory-meta">{memoryKindLabel(memoryDetail.kind)} · {memoryDetail.topic_key} · 版本 {memoryDetail.version}</p>
+          <label>记忆内容<textarea rows={4} maxLength={4000} value={memoryEdit} disabled={memoryLoading} onChange={event => setMemoryEdit(event.target.value)} /></label>
+          <section aria-label="记忆来源"><h3>来源</h3>{memoryDetail.sources?.length ? memoryDetail.sources.map(source => <article className="desktop-memory-source" key={`${source.session_id}:${source.message_id}`}>
+            <p>{source.message_at ? new Date(source.message_at).toLocaleString() : '时间未记录'} · {source.status === 'active' ? '有效来源' : '来源已失效'}</p><blockquote>{source.excerpt || '未保留原文摘录'}</blockquote><small>会话 {source.session_id} · 消息 {source.message_id}</small>
+          </article>) : <p>没有可用来源</p>}</section>
+          <footer><button type="button" className="secondary-button" disabled={memoryLoading || !memoryEdit.trim() || memoryEdit.trim() === memoryDetail.content} onClick={() => void saveMemoryCorrection()}>保存更正</button><button type="button" className="danger-button" disabled={memoryLoading} onClick={() => void forgetMemoryItem()}>忘记这条记忆</button></footer>
+        </div> : memoryTab === 'items' ? <div className="desktop-memory-list">
+          {memoryItems.length ? memoryItems.map(item => <button type="button" className="desktop-memory-row" key={item.item_id} onClick={() => void openMemoryItem(item)}>
+            <strong>{item.content}</strong><span>{memoryKindLabel(item.kind)} · {item.topic_key} · 更新于 {new Date(item.updated_at).toLocaleDateString()}</span>
+          </button>) : !memoryLoading && <p>还没有保存的记忆</p>}
+          <button type="button" className="danger-button" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void clearAllMemory()}>{clearArmed ? '再次点击确认清空全部个人记忆' : '清空全部个人记忆'}</button>
+          {clearArmed && <button type="button" className="secondary-button" onClick={() => setClearArmed(false)}>取消清空</button>}
+          <button type="button" className="secondary-button" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void exportMemory()}>导出个人记忆 JSON</button>
+        </div> : <div className="desktop-memory-list">
+          {memoryCandidates.length ? memoryCandidates.map(candidate => <article className="desktop-memory-candidate" key={candidate.candidate_id}>
+            <p className="desktop-memory-meta">{memoryKindLabel(candidate.kind)} · {candidate.topic_key} · 置信度 {Math.round(candidate.confidence * 100)}%</p><p>{candidate.content}</p>
+            {candidate.sources?.map(source => source.excerpt && <blockquote key={`${source.session_id}:${source.message_id}`}>{source.excerpt}</blockquote>)}
+            <footer><button type="button" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'accept')}>接受</button><button type="button" className="secondary-button" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'reject')}>拒绝</button></footer>
+          </article>) : !memoryLoading && <p>没有待确认的记忆</p>}
+        </div>}
+        <footer><button type="button" className="secondary-button" disabled={memoryLoading} onClick={() => void refreshMemoryManager()}>刷新</button></footer>
+      </section></div>}
     </main>
   );
+}
+
+function memoryKindLabel(kind: string) {
+  return ({ preference: '偏好', habit: '习惯', background: '长期背景', episodic: '近期事件' } as Record<string, string>)[kind] ?? kind;
 }

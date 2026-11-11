@@ -229,6 +229,9 @@ fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
     store
         .append_message(&first, "user", "kept private")
         .unwrap();
+    let installation_id = store.memory_installation_id().unwrap();
+    assert!(!store.memory_enabled().unwrap());
+    store.set_memory_enabled(true).unwrap();
     assert_eq!(store.sessions().unwrap().len(), 2);
     store.rename_session(&first, "Renamed").unwrap();
     assert_eq!(
@@ -243,6 +246,20 @@ fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
     );
     store.delete_session(&first).unwrap();
     assert!(store.messages(&first).unwrap().is_empty());
+    assert!(store.has_pending_memory_source_deletions().unwrap());
+    let pending = store.pending_memory_source_deletions(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session_id, first);
+    assert_eq!(pending[0].source_installation_id, installation_id);
+    assert_eq!(pending[0].status, "pending");
+    assert!(store.ensure_memory_reads_allowed().is_err());
+    let request_id = pending[0].request_id.clone();
+    drop(store);
+    let store = ChatStore::open(&path).unwrap();
+    assert!(store.has_pending_memory_source_deletions().unwrap());
+    store.acknowledge_memory_source_deletion(&request_id).unwrap();
+    assert!(!store.has_pending_memory_source_deletions().unwrap());
+    assert!(store.ensure_memory_reads_allowed().is_ok());
     assert_eq!(
         store
             .sessions()
@@ -255,6 +272,17 @@ fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
     assert!(store.rename_session(&first, "missing").is_err());
     assert!(store.create_session("bad\ntitle").is_err());
     assert!(store.create_session(&"x".repeat(121)).is_err());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn deleting_chat_does_not_create_memory_outbox_when_memory_is_disabled() {
+    let path = std::env::temp_dir().join(format!("desktop-chat-no-memory-{}.db", uuid::Uuid::new_v4()));
+    let store = ChatStore::open(&path).unwrap();
+    let session = store.create_session("No memory").unwrap();
+    store.append_message(&session, "user", "ordinary chat").unwrap();
+    store.delete_session(&session).unwrap();
+    assert!(!store.has_pending_memory_source_deletions().unwrap());
     let _ = std::fs::remove_file(path);
 }
 
@@ -506,6 +534,174 @@ fn generation_events_are_correlated_and_cancelled_partial_output_is_not_committe
         runtime.store.messages(&id).unwrap().last().unwrap().content,
         "partiallate"
     );
+}
+
+#[test]
+fn memory_hooks_run_after_user_persistence_and_only_after_completed_turn() {
+    let runtime = test_runtime(Arc::new(FakeProvider::new(vec!["answer".into()])));
+    let session = runtime.store.create_session("Memory hooks").unwrap();
+    let user_seen = Mutex::new(None::<ChatMessage>);
+    let turn_seen = Mutex::new(None::<(ChatMessage, ChatMessage)>);
+    let completion = Mutex::new(None::<serde_json::Value>);
+    runtime.send_with_memory_hooks(
+        SendInput { session_id: session.clone(), content: "remember this".into(), request_id: "memory-hook".into() },
+        |name, payload| {
+            if name == "desktop_chat_completed" { *completion.lock().unwrap() = Some(payload); }
+        },
+        |user| {
+            assert_eq!(user.role, "user");
+            assert_eq!(user.content, "remember this");
+            *user_seen.lock().unwrap() = Some(user.clone());
+            Ok(None)
+        },
+        |user, assistant, _memory_context| {
+            assert_eq!(assistant.role, "assistant");
+            assert_eq!(assistant.content, "answer");
+            *turn_seen.lock().unwrap() = Some((user.clone(), assistant.clone()));
+            Ok(())
+        },
+    ).unwrap();
+    assert!(user_seen.lock().unwrap().is_some());
+    assert_eq!(turn_seen.lock().unwrap().as_ref().unwrap().0.id,
+               user_seen.lock().unwrap().as_ref().unwrap().id);
+    assert_eq!(completion.lock().unwrap().as_ref().unwrap()["assistant_message_id"],
+               turn_seen.lock().unwrap().as_ref().unwrap().1.id);
+    assert_eq!(runtime.store.messages(&session).unwrap().len(), 2);
+}
+
+#[test]
+fn memory_source_ingestion_outbox_is_persistent_and_idempotent() {
+    let path = std::env::temp_dir().join(format!("memory-ingest-outbox-{}.db", uuid::Uuid::new_v4()));
+    let payload = serde_json::json!({
+        "source_system":"tomato-desktop",
+        "source_installation_id":"install-1",
+        "session_id":"session-1",
+        "messages":[{"message_id":"user-1","role":"user","content":"我喜欢中文回答","revision":1}]
+    });
+    let request_id;
+    {
+        let store = ChatStore::open(&path).unwrap();
+        request_id = store.enqueue_memory_source_ingestion(&payload).unwrap();
+        assert_eq!(store.enqueue_memory_source_ingestion(&payload).unwrap(), request_id);
+        assert_eq!(store.pending_memory_source_ingestions(10).unwrap().len(), 1);
+    }
+    let store = ChatStore::open(&path).unwrap();
+    let pending = store.pending_memory_source_ingestions(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, request_id);
+    assert_eq!(pending[0].1, payload);
+    store.acknowledge_memory_source_ingestion(&request_id).unwrap();
+    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn chat_memory_context_persists_only_version_references_and_forget_clears_them() {
+    let path = std::env::temp_dir().join(format!("desktop-chat-memory-context-{}.db", uuid::Uuid::new_v4()));
+    let session;
+    let assistant_id;
+    let item_id = uuid::Uuid::new_v4().to_string();
+    {
+        let store = ChatStore::open(&path).unwrap();
+        session = store.create_session("Memory use").unwrap();
+        store.append_message(&session, "assistant", "answer").unwrap();
+        assistant_id = store.messages(&session).unwrap()[0].id.clone();
+        store.record_memory_chat_context(&MemoryChatContext {
+            assistant_message_id: assistant_id.clone(), session_id: session.clone(), generation: 4,
+            retrieval_mode: "hybrid".into(), items: vec![MemoryReference { item_id: item_id.clone(), version: 2 }],
+        }).unwrap();
+    }
+    let store = ChatStore::open(&path).unwrap();
+    let contexts = store.memory_chat_contexts(&session).unwrap();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].assistant_message_id, assistant_id);
+    assert_eq!(contexts[0].items, vec![MemoryReference { item_id: item_id.clone(), version: 2 }]);
+    store.enqueue_memory_item_forget(&item_id, 2).unwrap();
+    assert!(store.memory_chat_contexts(&session).unwrap().is_empty());
+    let other_item = uuid::Uuid::new_v4().to_string();
+    store.record_memory_chat_context(&MemoryChatContext {
+        assistant_message_id: assistant_id, session_id: session.clone(), generation: 5,
+        retrieval_mode: "keyword".into(), items: vec![MemoryReference { item_id: other_item, version: 1 }],
+    }).unwrap();
+    store.enqueue_memory_clear("windows-local", 5).unwrap();
+    assert!(store.memory_chat_contexts(&session).unwrap().is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn memory_source_ingestion_rejects_oversized_message_without_truncation() {
+    let store = ChatStore::open(Path::new(":memory:")).unwrap();
+    let payload = serde_json::json!({
+        "source_system":"tomato-desktop",
+        "source_installation_id":"install-1",
+        "session_id":"session-1",
+        "messages":[{"message_id":"user-1","role":"user","content":"x".repeat(6001),"revision":1}]
+    });
+    assert!(store.enqueue_memory_source_ingestion(&payload).is_err());
+    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+}
+
+#[test]
+fn disabling_memory_cancels_and_erases_unsubmitted_source_snapshots() {
+    let store = ChatStore::open(Path::new(":memory:")).unwrap();
+    store.set_memory_enabled(true).unwrap();
+    let session = store.create_session("Disable memory").unwrap();
+    let user = store.append_message(&session, "user", "我偏好中文").unwrap();
+    let payload = serde_json::json!({
+        "source_system":"tomato-desktop",
+        "source_installation_id":store.memory_installation_id().unwrap(),
+        "session_id":session,
+        "messages":[{"message_id":user.id,"role":"user","content":user.content,"revision":1}]
+    });
+    store.enqueue_memory_source_ingestion(&payload).unwrap();
+    store.set_memory_enabled(false).unwrap();
+    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    assert!(!store.memory_enabled().unwrap());
+}
+
+#[test]
+fn deleting_session_cancels_and_erases_queued_ingestion_before_source_tombstone_sync() {
+    let store = ChatStore::open(Path::new(":memory:")).unwrap();
+    store.set_memory_enabled(true).unwrap();
+    let session = store.create_session("Delete queued memory").unwrap();
+    let user = store.append_message(&session, "user", "记住我的长期安排").unwrap();
+    let installation = store.memory_installation_id().unwrap();
+    let payload = serde_json::json!({
+        "source_system":"tomato-desktop", "source_installation_id":installation,
+        "session_id":session, "messages":[{"message_id":user.id,"role":"user",
+        "content":user.content,"revision":1}]
+    });
+    store.enqueue_memory_source_ingestion(&payload).unwrap();
+    store.delete_session(&session).unwrap();
+    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    assert_eq!(store.pending_memory_source_deletions(10).unwrap().len(), 1);
+}
+
+#[test]
+fn deleting_after_memory_was_disabled_still_tombstones_previously_synced_sources() {
+    let store = ChatStore::open(Path::new(":memory:")).unwrap();
+    store.set_memory_enabled(true).unwrap();
+    let session = store.create_session("Previously remembered").unwrap();
+    let user = store.append_message(&session, "user", "我偏好中文").unwrap();
+    let payload = serde_json::json!({
+        "source_system":"tomato-desktop",
+        "source_installation_id":store.memory_installation_id().unwrap(),
+        "session_id":session,
+        "messages":[{"message_id":user.id,"role":"user","content":user.content,"revision":1}]
+    });
+    let request = store.enqueue_memory_source_ingestion(&payload).unwrap();
+    store.acknowledge_memory_source_ingestion(&request).unwrap();
+    store.set_memory_enabled(false).unwrap();
+    store.delete_session(&session).unwrap();
+    assert_eq!(store.pending_memory_source_deletions(10).unwrap().len(), 1);
+}
+
+#[test]
+fn explicit_memory_intent_detection_requires_a_direct_prefix() {
+    assert!(super::commands::is_explicit_memory_intent("记住我喜欢中文回答"));
+    assert!(super::commands::is_explicit_memory_intent("Please remember that I prefer concise answers"));
+    assert!(!super::commands::is_explicit_memory_intent("不要记住我的临时安排"));
+    assert!(!super::commands::is_explicit_memory_intent("你还记得我喜欢什么吗？"));
 }
 
 #[test]
