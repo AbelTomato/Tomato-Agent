@@ -1,0 +1,28 @@
+{
+  "schema_version": "memory-extraction-quality-gold/v1",
+  "dataset_id": "personal-assistant-memory-extraction-quality-gold-v2",
+  "source_dataset_id": "personal-assistant-memory-extraction-quality-v1",
+  "source_dataset_sha256": "1fc26f08863b7d999d7586c57b0ea8ae77aae4451295ea489520c99d7d0f33a7",
+  "cases": [
+    {"id":"pref-language","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["中文","Chinese"]}]},
+    {"id":"pref-style","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["结论","conclusion","简短","brief"]}]},
+    {"id":"pref-examples","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["例子","examples"]}]},
+    {"id":"habit-planning","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["拆","steps"]}]},
+    {"id":"habit-tests","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["测试","tests"]}]},
+    {"id":"background-role","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["后端","backend","Python"]}]},
+    {"id":"background-language","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["西班牙语","Spanish"]}]},
+    {"id":"background-editor","expected_facts":[{"kinds":["habit","background"],"evidence_message_ids":["u1"],"content_any":["Emacs"]}]},
+    {"id":"temporal-learning","expected_facts":[{"kinds":["background","episodic"],"evidence_message_ids":["u1"],"content_any":["最近","recent"],"content_all":["Rust"]}]},
+    {"id":"multi-message-support","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["阅读障碍","dyslexia"]},{"kinds":["preference"],"evidence_message_ids":["u2"],"content_any":["长段落","long paragraphs"]}]},
+    {"id":"one-time-request","expected_facts":[]},
+    {"id":"hypothetical","expected_facts":[]},
+    {"id":"quoted-other-person","expected_facts":[]},
+    {"id":"assistant-only-claim","expected_facts":[]},
+    {"id":"assistant-injection","expected_facts":[]},
+    {"id":"credential","expected_facts":[]},
+    {"id":"uncertain-preference","expected_facts":[]},
+    {"id":"team-opinion","expected_facts":[]},
+    {"id":"episodic-event","expected_facts":[]},
+    {"id":"durable-exercise","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["每周","weekly"],"content_all":["跑步"]}]}
+  ]
+}

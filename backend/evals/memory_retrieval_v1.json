@@ -1,0 +1,37 @@
+{
+  "schema_version": "memory-retrieval-dataset/v1",
+  "dataset_id": "personal-assistant-memory-retrieval-v1",
+  "facts": [
+    {"id":"pref-language","scope":"personal","scope_id":"user-a","kind":"preference","topic_key":"response.language","content":"偏好使用简体中文回答"},
+    {"id":"pref-style","scope":"personal","scope_id":"user-a","kind":"preference","topic_key":"response.style","content":"偏好简洁直接、先给结论的表达"},
+    {"id":"background-python","scope":"personal","scope_id":"user-a","kind":"background","topic_key":"work.stack","content":"长期使用 Python 开发后端服务"},
+    {"id":"background-writer","scope":"personal","scope_id":"user-a","kind":"background","topic_key":"work.role","content":"从事技术写作和开发者文档维护"},
+    {"id":"habit-planning","scope":"personal","scope_id":"user-a","kind":"habit","topic_key":"work.habit","content":"习惯先拆解目标再制定每周计划"},
+    {"id":"background-accessibility","scope":"personal","scope_id":"user-a","kind":"background","topic_key":"design.accessibility","content":"重视键盘操作可访问性和屏幕阅读器阅读支持"},
+    {"id":"project-api","scope":"project","scope_id":"project-api","kind":"background","topic_key":"project.runtime","content":"当前服务端使用 Rust 实现，数据库采用 PostgreSQL"},
+    {"id":"project-migration","scope":"project","scope_id":"project-api","kind":"episodic","topic_key":"project.migration","content":"本项目正在把认证流程迁移到新的令牌服务"},
+    {"id":"project-docs","scope":"project","scope_id":"project-docs","kind":"background","topic_key":"project.docs","content":"文档项目使用 MkDocs 管理开发者指南"},
+    {"id":"session-deadline","scope":"session","scope_id":"session-current","kind":"episodic","topic_key":"session.deadline","content":"这次讨论约定周五前完成原型评审"},
+    {"id":"session-decision","scope":"session","scope_id":"session-current","kind":"episodic","topic_key":"session.decision","content":"当前会话决定先保留 SQLite 本地存储"},
+    {"id":"background-running","scope":"personal","scope_id":"user-a","kind":"habit","topic_key":"health.activity","content":"通常每周进行三次慢跑训练"},
+    {"id":"forgotten-finance","scope":"personal","scope_id":"user-a","kind":"background","topic_key":"finance.bank","content":"曾经记录过本人的银行账户余额信息","status":"forgotten"}
+  ],
+  "cases": [
+    {"id":"zh-preference","query":"以后请按我的语言偏好作答","project_scope_id":null,"session_scope_id":null,"relevant_ids":["pref-language"],"description":"中文语言偏好短事实"},
+    {"id":"answer-style","query":"回答请先说结论，内容别太长","project_scope_id":null,"session_scope_id":null,"relevant_ids":["pref-style"],"description":"表达风格偏好"},
+    {"id":"python-background","query":"我做后端开发时适合什么技术方案","project_scope_id":null,"session_scope_id":null,"relevant_ids":["background-python"],"description":"个人技术背景"},
+    {"id":"writing-background","query":"如何改进我的开发者文档写作流程","project_scope_id":null,"session_scope_id":null,"relevant_ids":["background-writer"],"description":"个人长期工作背景"},
+    {"id":"planning-habit","query":"我习惯先拆解目标，再制定每周计划","project_scope_id":null,"session_scope_id":null,"relevant_ids":["habit-planning"],"description":"个人工作习惯"},
+    {"id":"accessibility-background","query":"我在意界面的键盘操作和屏幕阅读支持吗","project_scope_id":null,"session_scope_id":null,"relevant_ids":["background-accessibility"],"description":"个人设计背景"},
+    {"id":"project-runtime","query":"这个服务端使用什么语言实现，数据库采用什么","project_scope_id":"project-api","session_scope_id":null,"relevant_ids":["project-api"],"description":"项目范围必须匹配"},
+    {"id":"project-migration","query":"新的令牌服务迁移进行到哪一步","project_scope_id":"project-api","session_scope_id":null,"relevant_ids":["project-migration"],"description":"项目事件事实"},
+    {"id":"other-project-isolation","query":"这个服务采用什么技术栈","project_scope_id":"project-api","session_scope_id":null,"relevant_ids":["project-api"],"description":"不得混入其他项目文档"},
+    {"id":"docs-project-isolation","query":"开发者指南由什么工具维护","project_scope_id":"project-docs","session_scope_id":null,"relevant_ids":["project-docs"],"description":"不得混入其他项目服务栈"},
+    {"id":"session-deadline","query":"这次评审约定的截止时间是什么","project_scope_id":null,"session_scope_id":"session-current","relevant_ids":["session-deadline"],"description":"会话范围事件"},
+    {"id":"session-decision","query":"当前讨论决定使用哪种本地数据库","project_scope_id":null,"session_scope_id":"session-current","relevant_ids":["session-decision"],"description":"会话范围决策"},
+    {"id":"semantic-gap","query":"最近的有氧锻炼安排是什么","project_scope_id":null,"session_scope_id":null,"relevant_ids":["background-running"],"description":"词面无重叠，记录关键词路径能力边界"},
+    {"id":"unanswerable-home","query":"我家里养的宠物是什么","project_scope_id":null,"session_scope_id":null,"relevant_ids":[],"description":"无相关记忆时应返回空"},
+    {"id":"unanswerable-finance","query":"我的银行账户余额是多少","project_scope_id":null,"session_scope_id":null,"relevant_ids":[],"description":"已忘记的财务事实不得复现"},
+    {"id":"unanswerable-cooking","query":"我最喜欢哪种烘焙配方","project_scope_id":null,"session_scope_id":null,"relevant_ids":[],"description":"主题无关的空结果"}
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "memory-extraction-quality-gold/v1",
+  "dataset_id": "personal-assistant-memory-extraction-quality-holdout-gold-adjudication-v2",
+  "source_dataset_id": "personal-assistant-memory-extraction-quality-holdout-v1",
+  "source_dataset_sha256": "f9612142b51fc3079703c2effa02b8e00c7548307f8d1817fefd2475445c94fe",
+  "cases": [
+    {"id":"holdout-pref-format","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["命令","command"]}]},
+    {"id":"holdout-pref-spoilers","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["剧透","spoiler"]}]},
+    {"id":"holdout-pref-units","expected_facts":[{"kinds":["preference"],"evidence_message_ids":["u1"],"content_any":["摄氏度","Celsius"]}]},
+    {"id":"holdout-habit-review","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["review","审查"]}]},
+    {"id":"holdout-habit-notes","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["周五","Friday"]}]},
+    {"id":"holdout-background-role","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["设计","designer"]}]},
+    {"id":"holdout-background-city","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["成都","Chengdu"]},{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["地铁","subway"]}]},
+    {"id":"holdout-learning-temporal","expected_facts":[{"kinds":["background","episodic"],"evidence_message_ids":["u1"],"content_any":["日语","Japanese"]}]},
+    {"id":"holdout-background-family","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["孩子","children"]},{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["公园","park"]}]},
+    {"id":"holdout-habit-exercise","expected_facts":[{"kinds":["habit"],"evidence_message_ids":["u1"],"content_any":["骑自行车","bicycle","cycling"]}]},
+    {"id":"holdout-multi-turn","expected_facts":[{"kinds":["background"],"evidence_message_ids":["u1"],"content_any":["硕士","master"]},{"kinds":["preference"],"evidence_message_ids":["u2"],"content_any":["证据","evidence"]}]},
+    {"id":"holdout-explicit-revision","expected_facts":[{"kinds":["background","episodic"],"evidence_message_ids":["u1"],"content_any":["苏州","Suzhou"]}]},
+    {"id":"holdout-one-shot","expected_facts":[]},
+    {"id":"holdout-hypothetical","expected_facts":[]},
+    {"id":"holdout-quoted","expected_facts":[]},
+    {"id":"holdout-assistant-claim","expected_facts":[]},
+    {"id":"holdout-correction","expected_facts":[]},
+    {"id":"holdout-sensitive","expected_facts":[]},
+    {"id":"holdout-uncertain","expected_facts":[]},
+    {"id":"holdout-opinion","expected_facts":[]},
+    {"id":"holdout-third-party","expected_facts":[]}
+  ]
+}

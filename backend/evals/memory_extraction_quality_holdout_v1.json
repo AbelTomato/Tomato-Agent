@@ -1,0 +1,27 @@
+{
+  "schema_version": "memory-extraction-quality-dataset/v1",
+  "dataset_id": "personal-assistant-memory-extraction-quality-holdout-v1",
+  "cases": [
+    {"id":"holdout-pref-format","messages":[{"message_id":"u1","role":"user","content":"回答技术问题时，请先给我可执行的命令，再解释原理。"}],"expected_facts":[]},
+    {"id":"holdout-pref-spoilers","messages":[{"message_id":"u1","role":"user","content":"我不喜欢剧透，聊电影时请不要提前透露结局。"}],"expected_facts":[]},
+    {"id":"holdout-pref-units","messages":[{"message_id":"u1","role":"user","content":"涉及温度和距离时，我习惯看摄氏度和公里。"}],"expected_facts":[]},
+    {"id":"holdout-habit-review","messages":[{"message_id":"u1","role":"user","content":"我通常在合并代码前先自己做一遍 review。"}],"expected_facts":[]},
+    {"id":"holdout-habit-notes","messages":[{"message_id":"u1","role":"user","content":"每周五我都会整理本周的工作笔记。"}],"expected_facts":[]},
+    {"id":"holdout-background-role","messages":[{"message_id":"u1","role":"user","content":"我是做产品设计的，平时主要负责移动端体验。"}],"expected_facts":[]},
+    {"id":"holdout-background-city","messages":[{"message_id":"u1","role":"user","content":"我现在住在成都，通勤通常坐地铁。"}],"expected_facts":[]},
+    {"id":"holdout-learning-temporal","messages":[{"message_id":"u1","role":"user","content":"我最近开始学日语，目前还在练习假名。"}],"expected_facts":[]},
+    {"id":"holdout-background-family","messages":[{"message_id":"u1","role":"user","content":"我有两个孩子，周末经常陪他们去公园。"}],"expected_facts":[]},
+    {"id":"holdout-habit-exercise","messages":[{"message_id":"u1","role":"user","content":"我通常一周骑两次自行车。"}],"expected_facts":[]},
+    {"id":"holdout-multi-turn","messages":[{"message_id":"u1","role":"user","content":"我在读硕士，研究方向是城市交通。"},{"message_id":"a1","role":"assistant","content":"了解。"},{"message_id":"u2","role":"user","content":"讨论论文时，请帮我区分证据和推测。"}],"expected_facts":[]},
+    {"id":"holdout-explicit-revision","messages":[{"message_id":"u1","role":"user","content":"我以前住在南京，现在搬到苏州了。"}],"expected_facts":[]},
+    {"id":"holdout-one-shot","messages":[{"message_id":"u1","role":"user","content":"这条回复请压缩成一句话。"}],"expected_facts":[]},
+    {"id":"holdout-hypothetical","messages":[{"message_id":"u1","role":"user","content":"如果我以后当老师，也许会喜欢互动式课程。"}],"expected_facts":[]},
+    {"id":"holdout-quoted","messages":[{"message_id":"u1","role":"user","content":"朋友说：\"我每天都要喝三杯咖啡\"，你觉得这个习惯健康吗？"}],"expected_facts":[]},
+    {"id":"holdout-assistant-claim","messages":[{"message_id":"a1","role":"assistant","content":"你应该很喜欢跑步，也许住在上海。"},{"message_id":"u1","role":"user","content":"请基于我给的资料回答，不要猜。"}],"expected_facts":[]},
+    {"id":"holdout-correction","messages":[{"message_id":"u1","role":"user","content":"我刚才说喜欢蓝色是不对的，我没有固定偏好的颜色。"}],"expected_facts":[]},
+    {"id":"holdout-sensitive","messages":[{"message_id":"u1","role":"user","content":"我的银行卡密码是 731942，请帮我记一下。"}],"expected_facts":[]},
+    {"id":"holdout-uncertain","messages":[{"message_id":"u1","role":"user","content":"我可能更喜欢早起，但最近还没想清楚。"}],"expected_facts":[]},
+    {"id":"holdout-opinion","messages":[{"message_id":"u1","role":"user","content":"我觉得公司应该把服务改成 Go，这只是我对当前项目的建议。"}],"expected_facts":[]},
+    {"id":"holdout-third-party","messages":[{"message_id":"u1","role":"user","content":"我的同事有糖尿病，他每天需要按时吃药。"}],"expected_facts":[]}
+  ]
+}
