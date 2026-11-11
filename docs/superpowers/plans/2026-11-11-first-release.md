@@ -151,11 +151,11 @@ Stage Assistant/runtime/dependency/API changes, layered memory source and focuse
 
 Stage memory evaluator modules, fixtures, eval JSON, user/design documents and release design/plan docs. Do not execute the 180-request evaluator. Review `git diff --cached` and commit with a `test(memory): ...` or `docs(memory): ...` message as appropriate.
 
-- [ ] **Step 4: Commit CI and release automation**
+- [x] **Step 4: Commit CI and release automation**
 
 Stage workflow files, release notes, and any verification entry-point change. Review `git diff --cached` and commit with a `ci: ...` message.
 
-- [ ] **Step 5: Verify the final local commit list and clean visible worktree**
+- [x] **Step 5: Verify the final local commit list and clean visible worktree**
 
 Run `git status --short`, `git log --oneline origin/main..HEAD`, and `git diff origin/main..HEAD --check`. Confirm the ignored development log remains untracked/ignored and is not force-added.
 
