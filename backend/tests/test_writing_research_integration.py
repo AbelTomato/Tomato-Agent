@@ -101,11 +101,11 @@ async def test_real_keyword_research_publishes_snapshot_and_stops_for_confirmati
     sessions, writing_service, execution_repository, executor, llm = await _make_components(
         tmp_path, rag_database_path
     )
-    monkeypatch.setattr(main.app.state, "writing_service", writing_service)
-    monkeypatch.setattr(
-        main.app.state, "writing_execution_repository", execution_repository
+    monkeypatch.setitem(main.app.state._state, "writing_service", writing_service)
+    monkeypatch.setitem(
+        main.app.state._state, "writing_execution_repository", execution_repository
     )
-    monkeypatch.setattr(main.app.state, "writing_executor", executor)
+    monkeypatch.setitem(main.app.state._state, "writing_executor", executor)
 
     session_id = await sessions.create_session()
     task = await writing_service.create_task(session_id, "SETEX expiration")

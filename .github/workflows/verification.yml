@@ -56,5 +56,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri -> target
+      - name: Prepare Tauri resource for Rust tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path backend/dist -Force | Out-Null
+          [System.IO.File]::WriteAllText(
+            "backend/dist/tomato-agent-engine.exe",
+            "Rust tests do not execute the bundled engine."
+          )
       - name: Run desktop Rust tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml

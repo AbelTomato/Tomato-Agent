@@ -11,13 +11,13 @@ def inject_api_dependencies(monkeypatch, *, session_repository=None,
                             knowledge_repository=None, knowledge_service=None,
                             llm_client=None):
     if session_repository is not None:
-        monkeypatch.setattr(main.app.state, "session_repository", session_repository)
+        monkeypatch.setitem(main.app.state._state, "session_repository", session_repository)
     if knowledge_repository is not None:
-        monkeypatch.setattr(main.app.state, "knowledge_repository", knowledge_repository)
+        monkeypatch.setitem(main.app.state._state, "knowledge_repository", knowledge_repository)
     if knowledge_service is not None:
-        monkeypatch.setattr(main.app.state, "knowledge_service", knowledge_service)
+        monkeypatch.setitem(main.app.state._state, "knowledge_service", knowledge_service)
     if llm_client is not None:
-        monkeypatch.setattr(main.app.state, "llm_client", llm_client)
+        monkeypatch.setitem(main.app.state._state, "llm_client", llm_client)
 
 
 class ThresholdKnowledgeRepository:

@@ -39,7 +39,7 @@ async def test_writing_api_requires_explicit_confirmation_and_rejects_stale_vers
     monkeypatch.setattr(main, "repo", session_repo)
     monkeypatch.setattr(main, "writing_repository", writing_repo)
     monkeypatch.setattr(main, "writing_service", main.WritingService(writing_repo))
-    monkeypatch.setattr(main.app.state, "writing_service", main.writing_service)
+    monkeypatch.setitem(main.app.state._state, "writing_service", main.writing_service)
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -85,7 +85,7 @@ async def test_confirm_outline_api_rejects_control_fields_and_invalid_citations(
     monkeypatch.setattr(main, "repo", session_repo)
     monkeypatch.setattr(main, "writing_repository", writing_repo)
     monkeypatch.setattr(main, "writing_service", service)
-    monkeypatch.setattr(main.app.state, "writing_service", service)
+    monkeypatch.setitem(main.app.state._state, "writing_service", service)
     session_id = await session_repo.create_session()
     task = await service.create_task(session_id, "Redis")
     task = await service.publish_outline(task.task_id, outline(), [citation()])
@@ -124,7 +124,7 @@ async def test_writing_save_api_only_accepts_version_and_idempotency_key(
     monkeypatch.setattr(main, "repo", session_repo)
     monkeypatch.setattr(main, "writing_repository", writing_repo)
     monkeypatch.setattr(main, "writing_service", service)
-    monkeypatch.setattr(main.app.state, "writing_service", service)
+    monkeypatch.setitem(main.app.state._state, "writing_service", service)
 
     task = await service.create_task(session_id, "Redis")
     task = await service.publish_outline(task.task_id, outline(), [citation()])
@@ -170,7 +170,7 @@ async def test_retry_api_does_not_retry_save_failure(monkeypatch, tmp_path: Path
     session_id = await session_repo.create_session()
     service = WritingService(writing_repo, draft_directory=tmp_path / "drafts")
     monkeypatch.setattr(main, "writing_service", service)
-    monkeypatch.setattr(main.app.state, "writing_service", service)
+    monkeypatch.setitem(main.app.state._state, "writing_service", service)
 
     task = await service.create_task(session_id, "Redis")
     failed = await service.fail(

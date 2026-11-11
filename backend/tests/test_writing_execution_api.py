@@ -42,9 +42,9 @@ async def make_api_app(monkeypatch, tmp_path: Path):
     execution = WritingExecutionRepository(path)
     await execution.init()
     executor = FakeExecutor(service)
-    monkeypatch.setattr(main.app.state, "writing_service", service)
-    monkeypatch.setattr(main.app.state, "writing_executor", executor)
-    monkeypatch.setattr(main.app.state, "writing_execution_repository", execution)
+    monkeypatch.setitem(main.app.state._state, "writing_service", service)
+    monkeypatch.setitem(main.app.state._state, "writing_executor", executor)
+    monkeypatch.setitem(main.app.state._state, "writing_execution_repository", execution)
     return sessions, service, execution, executor
 
 
