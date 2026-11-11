@@ -89,8 +89,7 @@ jobs:
             ($manifest | ConvertTo-Json -Depth 3) + "`n",
             $encoding
           )
-      - name: Upload dry-run build artifacts
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload release build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-release-${{ github.run_id }}
