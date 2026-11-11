@@ -31,7 +31,7 @@
 **Interfaces:**
 - CI consumes the already-installed `backend/.venv` and runs the new pipeline test without provider credentials.
 
-- [ ] **Step 1: Add a dedicated workflow step**
+- [x] **Step 1: Add a dedicated workflow step**
 
 Add a step after backend dependency installation:
 
@@ -41,7 +41,7 @@ Add a step after backend dependency installation:
         run: .venv/bin/python -m pytest -q tests/test_layered_memory.py
 ```
 
-- [ ] **Step 2: Run the same command locally**
+- [x] **Step 2: Run the same command locally**
 
 Run from `backend/`:
 
@@ -60,7 +60,7 @@ Expected: all layered-memory tests pass using temporary SQLite databases and fak
 **Interfaces:**
 - A separate `windows-latest` job checks the repository's actual single Cargo target; `Cargo.toml` currently defines no `desktop-chat` feature.
 
-- [ ] **Step 1: Add an independent Windows job**
+- [x] **Step 1: Add an independent Windows job**
 
 Add a job with `actions/checkout@v4`, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`, and this command:
 
@@ -70,7 +70,7 @@ cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
 
 Keep `contents: read` at workflow scope and set a finite job timeout.
 
-- [ ] **Step 2: Run the equivalent test on the local host if supported**
+- [x] **Step 2: Run the equivalent test on the local host if supported**
 
 Run from the repository root:
 
@@ -92,11 +92,11 @@ Expected: success locally where system Tauri dependencies exist; Windows Actions
 - Build output: `Tomato Agent_0.1.0_x64-setup.exe`, matching `.sha256`, and `manifest.json`.
 - Release publisher: `gh release create`, authenticated only by `${{ secrets.GITHUB_TOKEN }}` with workflow `contents: write`.
 
-- [ ] **Step 1: Write release notes with verified product scope**
+- [x] **Step 1: Write release notes with verified product scope**
 
 Document first-release scope, first-launch model configuration, the unsigned installer warning, and the known clean-install/uninstall data-retention validation gap. Do not claim provider acceptance or installer signing.
 
-- [ ] **Step 2: Create the Windows workflow**
+- [x] **Step 2: Create the Windows workflow**
 
 The workflow must:
 
@@ -109,7 +109,7 @@ The workflow must:
 7. On manual runs, upload the three files as an Actions artifact and do not create a GitHub Release.
 8. On a `v0.1.0` tag push, validate the downloaded files against the manifest, create or resume a draft release from `docs/releases/v0.1.0.md`, upload all three files, then publish the draft. Refuse to overwrite an already-published release.
 
-- [ ] **Step 3: Validate workflow and release metadata locally**
+- [x] **Step 3: Validate workflow and release metadata locally**
 
 Run `git diff --check`; parse both workflow YAML documents with actionlint; verify tag/version and manifest fields match `tauri.conf.json` and the release notes. Do not simulate publishing from the local machine.
 
@@ -117,7 +117,7 @@ Run `git diff --check`; parse both workflow YAML documents with actionlint; veri
 
 **Files:** all current tracked/untracked worktree changes plus the two workflow files and release notes.
 
-- [ ] **Step 1: Run local backend and UI gates**
+- [x] **Step 1: Run local backend and UI gates**
 
 Run:
 
@@ -129,7 +129,7 @@ python3 scripts/verify.py integration --timeout 600 --artifact-root verification
 
 Run the layered-memory command from Task 1 and `git diff --check` as well. Do not run the old full memory gate or real-model/180-request evaluators.
 
-- [ ] **Step 2: Inspect staged candidates and sensitive files**
+- [x] **Step 2: Inspect staged candidates and sensitive files**
 
 Review `git status --short`, each changed file, lockfiles, evaluation data and documentation. Search candidate staged files for API keys, bearer tokens, SQLite databases, provider diagnostics, and local absolute paths. Confirm only expected source/docs are staged.
 
@@ -139,15 +139,15 @@ Review `git status --short`, each changed file, lockfiles, evaluation data and d
 - Each commit is a cohesive review unit; commit messages use the repository's existing conventional format.
 - Never amend or rewrite the seven prior local commits or the already-approved design-document commit.
 
-- [ ] **Step 1: Commit desktop chat/project changes**
+- [x] **Step 1: Commit desktop chat/project changes**
 
 Stage the related Rust chat store/commands/runtime, desktop engine bridge, UI project navigation, UI styles and desktop tests. Review `git diff --cached` and commit with a `feat(desktop): ...` message.
 
-- [ ] **Step 2: Commit backend Assistant and layered memory**
+- [x] **Step 2: Commit backend Assistant and layered memory**
 
 Stage Assistant/runtime/dependency/API changes, layered memory source and focused tests. Review `git diff --cached` and commit with a `feat(memory): ...` message.
 
-- [ ] **Step 3: Commit memory evaluation assets and documentation**
+- [x] **Step 3: Commit memory evaluation assets and documentation**
 
 Stage memory evaluator modules, fixtures, eval JSON, user/design documents and release design/plan docs. Do not execute the 180-request evaluator. Review `git diff --cached` and commit with a `test(memory): ...` or `docs(memory): ...` message as appropriate.
 

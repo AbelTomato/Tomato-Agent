@@ -20,6 +20,7 @@ PYTHON = BACKEND / ".venv" / "bin" / "python"
 MODULES = {
     "assistant": ["tests/test_assistant_*.py", "tests/test_provider_attempt_recorder.py"],
     "execution": ["tests/test_execution_*.py", "tests/test_code_execution.py", "tests/test_code_task*.py"],
+    "memory": ["tests/test_memory_*.py"],
     "rag": ["tests/test_knowledge_*.py", "tests/test_embeddings.py", "tests/test_retrieval.py"],
     "writing": ["tests/test_writing_*.py", "tests/test_application_writing_flow.py"],
     "ui": [],

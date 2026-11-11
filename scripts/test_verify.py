@@ -12,7 +12,7 @@ SPEC.loader.exec_module(verify)
 
 class VerificationEntryTests(unittest.TestCase):
     def test_module_matrix_contains_expected_groups(self):
-        self.assertEqual(set(verify.MODULES), {"assistant", "execution", "rag", "writing", "ui"})
+        self.assertEqual(set(verify.MODULES), {"assistant", "execution", "memory", "rag", "writing", "ui"})
 
     def test_integration_includes_sqlite_worker_and_api_scenarios(self):
         self.assertIn("tests/test_execution_worker.py", verify.INTEGRATION_TESTS)
