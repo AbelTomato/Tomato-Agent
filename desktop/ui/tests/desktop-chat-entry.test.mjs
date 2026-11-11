@@ -36,7 +36,9 @@ test('the default Tauri build bundles the desktop UI and managed engine', async 
   assert.match(native, /mod chat/);
   assert.match(native, /desktop_chat_latest_session/);
   assert.doesNotMatch(native, /legacy\.rs|feature\s*=\s*"desktop-chat"/);
-  assert.match(appConfig, /--dir \.\.\/ui build/);
+  const tauriConfig = JSON.parse(appConfig);
+  assert.equal(tauriConfig.build.beforeDevCommand, 'pnpm --dir ui dev -- --host 127.0.0.1');
+  assert.equal(tauriConfig.build.beforeBuildCommand, 'pnpm --dir ui build');
   assert.match(appConfig, /tomato-agent-engine\.exe/);
   assert.match(packageJson, /"dev": "tauri dev/);
   assert.match(packageJson, /"build": "tauri build/);
