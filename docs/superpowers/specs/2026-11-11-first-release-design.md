@@ -20,11 +20,11 @@
 
 ### CI
 
-保留现有 Ubuntu Verification workflow，补充新 layered-memory 定向回归，并在 Windows runner 执行 Rust 默认与 `desktop-chat` feature 测试。CI 使用锁定的 Python、Node、pnpm 和 Cargo lockfiles，不使用真实模型密钥，不运行真实 Provider 请求、Docker/OpenShell 外部验收或 180 请求盲评。发布阻断以被 workflow 明确执行的绿色检查为准；旧 memory module 全量门禁在其装配契约另行处理前不纳入本次 CI 命令，但其两项失败须在发布记录中如实注明。
+保留现有 Ubuntu Verification workflow，补充新 layered-memory 定向回归，并在 Windows runner 执行 Rust 全量 `cargo test --locked`。当前 `Cargo.toml` 没有 `desktop-chat` feature。CI 使用锁定的 Python、Node、pnpm 和 Cargo lockfiles，不使用真实模型密钥，不运行真实 Provider 请求、Docker/OpenShell 外部验收或 180 请求盲评。发布阻断以被 workflow 明确执行的绿色检查为准；旧 memory module 全量门禁在其装配契约另行处理前不纳入本次 CI 命令，但其两项失败须在发布记录中如实注明。
 
 ### Release
 
-新增仅由 `v0.1.0` tag 触发的 Windows x64 Release workflow。Windows runner 构建前端、使用仓库现有收集参数打包 Python 引擎，再用 Tauri/Cargo lockfile 生成 NSIS 安装器。workflow 生成安装器 SHA-256 和包含版本、commit、目标平台、文件大小与摘要的 manifest，使用最小 `contents: write` 权限创建 GitHub Release 并上传安装器、摘要和 manifest。发布说明明确该安装器未签名及现有文档列出的安装/卸载验收限制。
+新增 Windows x64 Release workflow，支持 `workflow_dispatch` dry-run 与 `v0.1.0` tag 正式发布。Windows runner 构建前端、使用仓库现有收集参数打包 Python 引擎，再用 Tauri/Cargo lockfile 生成 NSIS 安装器。手动运行只上传 Actions artifact 供验证，不创建 Release；只有推送 `v0.1.0` tag 才能发布。workflow 生成安装器 SHA-256 和包含版本、commit、目标平台、文件大小与摘要的 manifest，先校验工件并创建 draft，再上传资产后发布；中断时保留 draft 供同一 tag 安全重跑。仅发布 job 获得 `contents: write`。发布说明明确该安装器未签名及现有文档列出的安装/卸载验收限制。
 
 ### 推送与发布顺序
 
