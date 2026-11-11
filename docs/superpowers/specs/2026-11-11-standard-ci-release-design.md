@@ -23,6 +23,7 @@
 7. 保留 `contents: read` 的默认权限；只有创建/更新 Draft 的 job 获得 `contents: write`。不加入代码签名密钥或真实 Provider 凭据。
 8. Python runtime、test 和 Windows packaging 依赖由 `backend/uv.lock` 锁定；PyInstaller 固定在 build dependency group 中。CI、Release workflow 和本地 Windows 打包脚本均使用同一锁定环境。
 9. 本地 Windows 打包脚本的产品版本和 NSIS 安装器路径从 Tauri 配置读取，遵循与 GitHub Release 相同的版本契约。
+10. 本地 Windows 打包从 WSL UNC 源码目录运行时，将 uv cache 与临时目录固定在 Windows 本地构建盘，避免跨文件系统原子移动失败。
 
 ## 验收
 

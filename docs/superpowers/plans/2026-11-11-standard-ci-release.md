@@ -53,6 +53,7 @@
 - `workflow_dispatch` builds current source and uploads an artifact without using a tag or touching a GitHub Release.
 - Build outputs are `<product>-<version>-x64-setup.exe`, the matching `.sha256`, and a manifest containing version, nullable tag, source commit, target, filename, byte size, and digest.
 - GitHub Release and local Windows build-release package the Python engine from the same locked environment; local archive metadata derives its version and installer path from Tauri config.
+- The local Windows script places uv temporary files and cache on the local Windows build drive while reading project files from WSL UNC.
 
 - [x] Change tag trigger to `v*`, retain `workflow_dispatch`, and add per-ref concurrency with cancellation disabled.
 - [x] Invoke the release-version checker for tag builds and `--check-current` for manual builds.

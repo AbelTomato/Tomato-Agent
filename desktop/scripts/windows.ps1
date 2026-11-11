@@ -75,6 +75,12 @@ $engineVenv = Join-Path $engineBuildRoot "venv"
 New-Item -ItemType Directory -Path $engineBuildRoot -Force | Out-Null
 $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
 if (!$uv) { throw "Bundled-engine build requires uv on PATH to install backend/uv.lock." }
+$uvTemp = Join-Path $engineBuildRoot "uv-temp"
+$uvCache = Join-Path $engineBuildRoot "uv-cache"
+New-Item -ItemType Directory -Path $uvTemp, $uvCache -Force | Out-Null
+$env:TEMP = $uvTemp
+$env:TMP = $uvTemp
+$env:UV_CACHE_DIR = $uvCache
 $env:UV_PROJECT_ENVIRONMENT = $engineVenv
 $backendRoot = Join-Path $repoRoot "backend"
 & $uv.Source sync --locked --project $backendRoot --python $python --no-dev --group build
