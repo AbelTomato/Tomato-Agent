@@ -67,16 +67,19 @@ if ((Get-Item -LiteralPath $frontendDist).LastWriteTimeUtc -le $frontendDistTime
 
 $python = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
 if (!(Test-Path -LiteralPath $python)) { throw "Bundled-engine build requires Windows Python 3.12: $python" }
+$versionScript = Join-Path $repoRoot "scripts\release_version.py"
+$applicationVersion = (& $python $versionScript --check-current).Trim()
+if ($LASTEXITCODE -ne 0) { throw "Application release version validation failed." }
 $engineBuildRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\engine-build"
 $engineVenv = Join-Path $engineBuildRoot "venv"
 New-Item -ItemType Directory -Path $engineBuildRoot -Force | Out-Null
-if (!(Test-Path -LiteralPath (Join-Path $engineVenv "Scripts\python.exe"))) {
-    & $python -m venv $engineVenv
-    if ($LASTEXITCODE -ne 0) { throw "Could not prepare the Windows engine build environment." }
-}
+$uv = Get-Command uv.exe -ErrorAction SilentlyContinue
+if (!$uv) { throw "Bundled-engine build requires uv on PATH to install backend/uv.lock." }
+$env:UV_PROJECT_ENVIRONMENT = $engineVenv
+$backendRoot = Join-Path $repoRoot "backend"
+& $uv.Source sync --locked --project $backendRoot --python $python --no-dev --group build
+if ($LASTEXITCODE -ne 0) { throw "Could not install locked Windows engine build dependencies." }
 $enginePython = Join-Path $engineVenv "Scripts\python.exe"
-& $enginePython -m pip install --disable-pip-version-check -e (Join-Path $repoRoot "backend") "pyinstaller==6.17.0"
-if ($LASTEXITCODE -ne 0) { throw "Could not install the pinned Windows engine build dependencies." }
 $engineOutput = Join-Path $repoRoot "backend\dist"
 $engineWork = Join-Path $engineBuildRoot "work"
 New-Item -ItemType Directory -Path $engineOutput -Force | Out-Null
@@ -122,9 +125,11 @@ try {
     Remove-Item -LiteralPath $override -ErrorAction SilentlyContinue
 }
 
+$tauriConfig = Get-Content (Join-Path $desktopRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
+$installerName = "$($tauriConfig.productName)_${applicationVersion}_x64-setup.exe"
 $artifacts = @(
     (Join-Path $env:CARGO_TARGET_DIR "release\tomato-agent-desktop.exe"),
-    (Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis\Tomato Agent_0.1.0_x64-setup.exe")
+    (Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis\$installerName")
 )
 foreach ($artifact in $artifacts) {
     if (!(Test-Path -LiteralPath $artifact)) { throw "Expected build artifact not found: $artifact" }
@@ -151,7 +156,7 @@ Copy-Item -LiteralPath $installer.FullName -Destination $archivedInstaller -Erro
 
 $manifest = [ordered]@{
     archivedAtLocal = $archiveTimestamp.ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz")
-    applicationVersion = "0.1.0"
+    applicationVersion = $applicationVersion
     applicationIdentifier = if ($BundleIdentifier) { $BundleIdentifier } else { "dev.tomato.agent" }
     gitCommit = $gitCommit
     gitWorktree = if ($gitStatus) { "dirty" } else { "clean" }

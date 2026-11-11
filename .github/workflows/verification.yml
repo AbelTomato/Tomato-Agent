@@ -16,6 +16,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.13
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -23,10 +26,7 @@ jobs:
         with:
           version: 10.34.5
       - name: Install backend test dependencies
-        working-directory: backend
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -e '.[test]'
+        run: uv sync --locked --project backend --extra test
       - name: Layered memory regressions
         working-directory: backend
         run: .venv/bin/python -m pytest -q tests/test_layered_memory.py
@@ -35,6 +35,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Verify entry point
         run: python3 -m unittest scripts/test_verify.py
+      - name: Verify release version contract
+        run: python3 -m unittest scripts/test_release_version.py
+      - name: Check current release metadata
+        run: python3 scripts/release_version.py --check-current
       - name: Module regressions
         run: python3 scripts/verify.py module assistant execution rag writing ui --artifact-root verification-artifacts
       - name: Integration gate
@@ -64,5 +68,19 @@ jobs:
             "backend/dist/tomato-agent-engine.exe",
             "Rust tests do not execute the bundled engine."
           )
+      - name: Validate Windows build script syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "desktop/scripts/windows.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            throw "Windows build script contains PowerShell syntax errors."
+          }
       - name: Run desktop Rust tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml

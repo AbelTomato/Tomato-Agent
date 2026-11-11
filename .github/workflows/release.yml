@@ -3,8 +3,12 @@ name: Windows Release
 on:
   push:
     tags:
-      - v0.1.0
+      - 'v*'
   workflow_dispatch:
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,6 +22,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.12.13
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -33,19 +40,32 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: pnpm install --frozen-lockfile
-      - name: Check release version
+      - name: Validate release version
         shell: pwsh
         run: |
-          $config = Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-          $expectedTag = "v$($config.version)"
-          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $expectedTag) {
-            throw "Release tag $env:GITHUB_REF_NAME does not match app version $($config.version)."
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = (python scripts/release_version.py --tag $env:GITHUB_REF_NAME).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Release tag validation failed." }
+            $releaseTag = $env:GITHUB_REF_NAME
+          } else {
+            $version = (python scripts/release_version.py --check-current).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Current release metadata validation failed." }
+            $releaseTag = $null
           }
+          $state = "RELEASE_VERSION=$version`nRELEASE_TAG=$releaseTag`n"
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_ENV,
+            $state,
+            [System.Text.UTF8Encoding]::new($false)
+          )
       - name: Package Python engine
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check -e backend "pyinstaller==6.17.0"
-          python -m PyInstaller --noconfirm --clean --onefile --name tomato-agent-engine --paths backend --collect-all tiktoken --collect-all uvicorn --hidden-import tiktoken_ext.openai_public --distpath backend/dist --workpath "$env:RUNNER_TEMP\pyinstaller" backend/app/desktop/bootstrap.py
+          uv sync --locked --project backend --no-dev --group build
+          if ($LASTEXITCODE -ne 0) { throw "Could not install locked Python engine build dependencies." }
+          $enginePython = "backend/.venv/Scripts/python.exe"
+          & $enginePython -m PyInstaller --noconfirm --clean --onefile --name tomato-agent-engine --paths backend --collect-all tiktoken --collect-all uvicorn --hidden-import tiktoken_ext.openai_public --distpath backend/dist --workpath "$env:RUNNER_TEMP\pyinstaller" backend/app/desktop/bootstrap.py
+          if ($LASTEXITCODE -ne 0) { throw "Windows Python engine packaging failed." }
           if (!(Test-Path backend/dist/tomato-agent-engine.exe)) {
             throw "The bundled Python engine was not created."
           }
@@ -64,20 +84,24 @@ jobs:
           }
           $releaseDirectory = Join-Path $env:RUNNER_TEMP "release-assets"
           New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-          $fileName = "Tomato-Agent-0.1.0-x64-setup.exe"
+          $config = Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $productName = $config.productName -replace '\s+', '-'
+          $fileName = "$productName-$env:RELEASE_VERSION-x64-setup.exe"
           $installerPath = Join-Path $releaseDirectory $fileName
           Copy-Item $installers[0].FullName $installerPath
           $installer = Get-Item $installerPath
           $sha256 = (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $encoding = [System.Text.UTF8Encoding]::new($false)
+          $manifestTag = $env:RELEASE_TAG
+          if (!$manifestTag) { $manifestTag = $null }
           [System.IO.File]::WriteAllText(
             "$installerPath.sha256",
             "$sha256 *$fileName`n",
             $encoding
           )
           $manifest = [ordered]@{
-            version = "0.1.0"
-            tag = "v0.1.0"
+            version = $env:RELEASE_VERSION
+            tag = $manifestTag
             commit = $env:SOURCE_COMMIT
             target = "windows-x64"
             file = $fileName
@@ -97,8 +121,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish-release:
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v0.1.0'
+  create-draft-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: windows-build
     runs-on: ubuntu-latest
     permissions:
@@ -111,23 +135,32 @@ jobs:
         with:
           name: windows-release-${{ github.run_id }}
           path: release-assets
-      - name: Publish GitHub Release
+      - name: Create or update Draft Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          (cd release-assets && sha256sum --check Tomato-Agent-0.1.0-x64-setup.exe.sha256)
+          installer=$(jq -er '.file' release-assets/manifest.json)
+          (cd release-assets && sha256sum --check "$installer.sha256")
+          digest=$(sha256sum "release-assets/$installer" | cut -d ' ' -f 1)
+          size_bytes=$(wc -c < "release-assets/$installer" | tr -d '[:space:]')
           jq --exit-status \
             --arg tag "$GITHUB_REF_NAME" \
             --arg commit "$GITHUB_SHA" \
-            '.version == "0.1.0" and .tag == $tag and .commit == $commit and .target == "windows-x64"' \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --arg installer "$installer" \
+            --arg digest "$digest" \
+            --argjson size_bytes "$size_bytes" \
+            '.version == $version and .tag == $tag and .commit == $commit and .target == "windows-x64" and .file == $installer and .sha256 == $digest and .size_bytes == $size_bytes' \
             release-assets/manifest.json
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes_file"
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
               --verify-tag \
               --draft \
               --title "Tomato Agent $GITHUB_REF_NAME" \
-              --notes-file docs/releases/v0.1.0.md
+              --notes-file "$notes_file"
           fi
           is_draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
           if [[ "$is_draft" != "true" ]]; then
@@ -136,10 +169,9 @@ jobs:
           fi
           gh release edit "$GITHUB_REF_NAME" \
             --title "Tomato Agent $GITHUB_REF_NAME" \
-            --notes-file docs/releases/v0.1.0.md
+            --notes-file "$notes_file"
           gh release upload "$GITHUB_REF_NAME" \
-            release-assets/Tomato-Agent-0.1.0-x64-setup.exe \
-            release-assets/Tomato-Agent-0.1.0-x64-setup.exe.sha256 \
+            "release-assets/$installer" \
+            "release-assets/$installer.sha256" \
             release-assets/manifest.json \
             --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false

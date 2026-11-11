@@ -27,6 +27,7 @@ Rust 测试使用 `pnpm test:native`。UI 检查在 `ui` 目录运行 `pnpm buil
 ```
 
 `build-release` 会构建 UI、冻结 Windows Python 引擎、准备 x64 MSVC 环境、生成 Release 和 NSIS 安装包，并归档安装包及清单。构建脚本可从 WSL 检出目录读取源码；安装后的应用不会调用 WSL。
+Windows 主机需要安装 Python 3.12 和 `uv` 并将其加入 `PATH`；引擎 runtime 与 PyInstaller 使用仓库 `backend/uv.lock` 中的锁定依赖。
 
 引擎安装资源位于应用安装目录。用户数据、SQLite 聊天记录和偏好保存在安装目录之外。模型 Key 存入 Windows Credential Manager，不写入普通配置文件。
 

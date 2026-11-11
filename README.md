@@ -31,6 +31,7 @@ pnpm dev
 ```
 
 脚本会构建界面、打包 Windows Python 引擎、生成 Tauri 安装包，并附带 SHA-256 清单归档。安装后的应用不依赖 WSL 或系统 Python。
+Windows 主机需要安装 Python 3.12 和 `uv` 并将其加入 `PATH`；引擎构建依赖通过 `backend/uv.lock` 安装。
 
 首次配置、数据备份和故障处理见 [Windows 桌面使用说明](docs/Windows普通聊天使用说明.md)。
 
