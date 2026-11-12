@@ -1,6 +1,10 @@
 # Tomato Agent
 
-Tomato Agent 是面向 Windows 的桌面助手，提供普通聊天、知识检索、技术写作和受控代码任务。维护中的产品入口是 Tauri 桌面应用，不再提供浏览器界面或独立 Web 部署。
+Tomato Agent始于2026.09，最开始是因为碰到一家小厂的笔试题，要求实现一个最小可用Agent，当时刚好想要入手学习Agent这个领域的知识，比较感兴趣，所以就开始做了这个项目
+
+这个项目主要是记录我一些学习Agent的探索，从最开始的基础的基于ReAct的Agent Loop，滑动窗口做Context截断，再到现在已经实现的RAG系统，基础的Observability、Eval，还有长期Memory系统，后来也可能继续探索Agent的隔离运行环境等等，总而言之学无止境也
+
+> Updated 2026.11.12
 
 ## 架构
 
@@ -21,6 +25,7 @@ pnpm install
 cd ui
 pnpm install
 cd ..
+.\scripts\build-engine.ps1
 pnpm dev
 ```
 
@@ -31,7 +36,7 @@ pnpm dev
 ```
 
 脚本会构建界面、打包 Windows Python 引擎、生成 Tauri 安装包，并附带 SHA-256 清单归档。安装后的应用不依赖 WSL 或系统 Python。
-Windows 主机需要安装 Python 3.12 和 `uv` 并将其加入 `PATH`；引擎构建依赖通过 `backend/uv.lock` 安装。
+Windows 开发和构建需要安装 Python 3.12 和 `uv` 并将 `uv` 加入 `PATH`；引擎构建依赖通过 `backend/uv.lock` 安装。
 
 首次配置、数据备份和故障处理见 [Windows 桌面使用说明](docs/Windows普通聊天使用说明.md)。
 
@@ -39,7 +44,16 @@ Windows 主机需要安装 Python 3.12 和 `uv` 并将其加入 `PATH`；引擎�
 
 ```bash
 cd desktop/ui && pnpm build && node --test tests/*.test.mjs
+```
+
+Windows PowerShell 中先构建 Tauri 所需的 Python 引擎，再运行 Rust 测试：
+
+```powershell
+.\desktop\scripts\build-engine.ps1
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+```
+
+```bash
 backend/.venv/bin/python -m pytest backend/tests
 ```
 

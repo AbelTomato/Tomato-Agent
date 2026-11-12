@@ -24,6 +24,7 @@ $desktopRoot = Join-Path $repoRoot "desktop"
 Set-Location $desktopRoot
 
 if ($Action -eq "test") {
+    & (Join-Path $PSScriptRoot "build-engine.ps1") -RepoRoot $repoRoot
     & cargo.exe test --manifest-path (Join-Path $desktopRoot "src-tauri\Cargo.toml") --locked
     exit $LASTEXITCODE
 }
@@ -70,30 +71,7 @@ if (!(Test-Path -LiteralPath $python)) { throw "Bundled-engine build requires Wi
 $versionScript = Join-Path $repoRoot "scripts\release_version.py"
 $applicationVersion = (& $python $versionScript --check-current).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Application release version validation failed." }
-$engineBuildRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\engine-build"
-$engineVenv = Join-Path $engineBuildRoot "venv"
-New-Item -ItemType Directory -Path $engineBuildRoot -Force | Out-Null
-$uv = Get-Command uv.exe -ErrorAction SilentlyContinue
-if (!$uv) { throw "Bundled-engine build requires uv on PATH to install backend/uv.lock." }
-$uvTemp = Join-Path $engineBuildRoot "uv-temp"
-$uvCache = Join-Path $engineBuildRoot "uv-cache"
-New-Item -ItemType Directory -Path $uvTemp, $uvCache -Force | Out-Null
-$env:TEMP = $uvTemp
-$env:TMP = $uvTemp
-$env:UV_CACHE_DIR = $uvCache
-$env:UV_PROJECT_ENVIRONMENT = $engineVenv
-$backendRoot = Join-Path $repoRoot "backend"
-& $uv.Source sync --locked --project $backendRoot --python $python --no-dev --group build
-if ($LASTEXITCODE -ne 0) { throw "Could not install locked Windows engine build dependencies." }
-$enginePython = Join-Path $engineVenv "Scripts\python.exe"
-$engineOutput = Join-Path $repoRoot "backend\dist"
-$engineWork = Join-Path $engineBuildRoot "work"
-New-Item -ItemType Directory -Path $engineOutput -Force | Out-Null
-& $enginePython -m PyInstaller --noconfirm --clean --onefile --name tomato-agent-engine `
-    --paths (Join-Path $repoRoot "backend") --collect-all tiktoken --collect-all uvicorn `
-    --hidden-import tiktoken_ext.openai_public `
-    --distpath $engineOutput --workpath $engineWork (Join-Path $repoRoot "backend\app\desktop\bootstrap.py")
-if ($LASTEXITCODE -ne 0) { throw "Windows Python engine packaging failed." }
+& (Join-Path $PSScriptRoot "build-engine.ps1") -RepoRoot $repoRoot
 
 $vcvars = "D:\Dev-Tools\MSVC\tool\VC\Auxiliary\Build\vcvars64.bat"
 if (!(Test-Path -LiteralPath $vcvars)) { throw "MSVC vcvars64.bat was not found: $vcvars" }

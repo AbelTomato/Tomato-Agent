@@ -73,14 +73,16 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            "desktop/scripts/windows.ps1",
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_ }
-            throw "Windows build script contains PowerShell syntax errors."
+          foreach ($script in @("desktop/scripts/windows.ps1", "desktop/scripts/build-engine.ps1")) {
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $script,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              throw "PowerShell syntax errors found in $script."
+            }
           }
       - name: Run desktop Rust tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml

@@ -6,7 +6,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "test:native": "cargo test --manifest-path src-tauri/Cargo.toml --locked"
+    "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-engine.ps1 && cargo test --manifest-path src-tauri/Cargo.toml --locked"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.3"
