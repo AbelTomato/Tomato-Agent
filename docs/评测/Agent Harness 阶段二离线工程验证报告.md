@@ -27,7 +27,7 @@
 
 报告产物：
 
-`/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/reports/2026-10-03/harness-stage-2/`
+`backend/data/rag/reports/2026-10-03/harness-stage-2/`
 
 - `summary.json`
 - `cases.jsonl`
@@ -39,7 +39,7 @@
 
 ## 4. 本轮工程验证
 
-使用项目后端虚拟环境 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/.venv` 执行：
+使用项目后端虚拟环境 `backend/.venv` 执行：
 
 | 验证范围 | 结果 |
 | --- | ---: |

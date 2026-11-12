@@ -45,7 +45,7 @@ keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总�
 
 ### 2.4 2026-10-07 RAG 收尾真实 dev18
 
-完整 run：`4ba7c70c-0615-4ec6-a240-42fef4e09657`；工件目录：`/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/reports/2026-10-07/public-blog/dev/production-equivalent-real-final/2026-10-07/public-blog/dev/observe-v1/4ba7c70c-0615-4ec6-a240-42fef4e09657/`。使用既有只读快照和 `production-equivalent` profile，未修改算法、配置文件或生产开关。LLM 为 `gpt-5.6-luna`，Embedding 为 `qwen3.7-text-embedding-flash`（1024 维），Reranker 为 `qwen3.7-text-rerank`。
+完整 run：`4ba7c70c-0615-4ec6-a240-42fef4e09657`；工件目录：`backend/data/rag/reports/2026-10-07/public-blog/dev/production-equivalent-real-final/2026-10-07/public-blog/dev/observe-v1/4ba7c70c-0615-4ec6-a240-42fef4e09657/`。使用既有只读快照和 `production-equivalent` profile，未修改算法、配置文件或生产开关。LLM 为 `gpt-5.6-luna`，Embedding 为 `qwen3.7-text-embedding-flash`（1024 维），Reranker 为 `qwen3.7-text-rerank`。
 
 | 检查 | 本次结果 |
 |---|---|
@@ -72,9 +72,9 @@ keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总�
 
 | 验收项 | 冻结事实与分母 | 可追溯证据 | 结论 |
 |---|---|---|---|
-| A1 输入与快照 | 原始题集文件 36 题，SHA-256 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；选定 `dev` 规范化题集 18 题，指纹 `0d320487ad2f76269ba225bb43f2f3236f6b8759606a6a0478db11baa2dbf4f3`；快照文件 SHA-256 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`；SQLite `integrity_check=ok`，66 documents、886 chunks、886 embeddings | `/home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json`、2026-09-24 Benchmark `report.json`、只读 SQLite 核验 | 通过 |
+| A1 输入与快照 | 原始题集文件 36 题，SHA-256 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；选定 `dev` 规范化题集 18 题，指纹 `0d320487ad2f76269ba225bb43f2f3236f6b8759606a6a0478db11baa2dbf4f3`；快照文件 SHA-256 `20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`；SQLite `integrity_check=ok`，66 documents、886 chunks、886 embeddings | `backend/evals/benchmark_manifest.json`、2026-09-24 Benchmark `report.json`、只读 SQLite 核验 | 通过 |
 | A2 题集与标注范围 | manifest 与规范化 `dev` 题集 ID 完全一致：`blog-formal-001`–`blog-formal-018`；可回答 15 题、无答案 3 题（`013/017/018`）；可回答题共 17 条标注 evidence span，`014` 占 2 条、`015` 占 2 条，其余 13 题各 1 条；所有 `document_version`、物理起止行均通过范围校验 | `load_questions(..., split="dev")`、`benchmark_snapshot.py` 的 `EvidenceSpan` 校验、manifest `question_ids/question_splits/question_groups` | 通过 |
-| A3 对照策略与有效配置 | 三个已归档对照 run 均为 `status=complete`、相同 `metric_version=benchmark-metrics/v1`、相同 corpus/index/source 指纹和 `dev` 题集指纹：`keyword-v1`（BM25，candidate 30/final 5，阈值 0.0）、`vector-v1`（cosine，candidate 30/final 5，阈值 0.5，`qwen3.7-text-embedding-flash`/1024 维）、`hybrid-v1`（RRF，candidate 30/final 5，余弦阈值 0.2，同一 Embedding） | `/home/abeltomato/workspace/projects/Tomato-Agent/backend/evals/benchmark_manifest.json`、`backend/data/rag/reports/2026-09-24/public-blog/dev/benchmark-v1/*/report.json`；三 run `source_sha256` 均为 `796a8d174f63e9ef9a3ed3da33022e491d2eab36a572a6cc6285168c6b02f22b` | 通过；仅作描述性对照 |
+| A3 对照策略与有效配置 | 三个已归档对照 run 均为 `status=complete`、相同 `metric_version=benchmark-metrics/v1`、相同 corpus/index/source 指纹和 `dev` 题集指纹：`keyword-v1`（BM25，candidate 30/final 5，阈值 0.0）、`vector-v1`（cosine，candidate 30/final 5，阈值 0.5，`qwen3.7-text-embedding-flash`/1024 维）、`hybrid-v1`（RRF，candidate 30/final 5，余弦阈值 0.2，同一 Embedding） | `backend/evals/benchmark_manifest.json`、`backend/data/rag/reports/2026-09-24/public-blog/dev/benchmark-v1/*/report.json`；三 run `source_sha256` 均为 `796a8d174f63e9ef9a3ed3da33022e491d2eab36a572a6cc6285168c6b02f22b` | 通过；仅作描述性对照 |
 | A4 逐题字段与语义边界 | `evaluation.py` 的逐题结果分别记录 candidate/final 证据、证据/来源覆盖、Judge 状态与 reason、LLM 是否调用、阶段/端到端耗时、错误；离线检索报告的 `answer_quality_evaluated` 固定为 `false`，无答案非空不能计为正确拒答，执行错误不计为空结果或正确拒答 | `EvaluationQuestion`/`QuestionResult`、`evaluate_question_results`、`test_knowledge_evaluation.py` 现有断言；`014` 仍单列 candidate/final 覆盖，三道无答案仍单列非空风险 | 通过；不替代任务 4/5 人工答案审计 |
 
 题集当前 schema 没有独立的 `annotation_version` 字段；本轮不擅自新增字段。标注版本由每条 `relevant_spans` 的 `document_version` 与物理行范围表达，已纳入 A2 校验。机器 Judge 的 `supported`、引用白名单合法性和报告 `complete` 均不代表答案语义通过；`014` 双证据最终覆盖与三道无答案题的安全拒答仍是后续任务门禁。
@@ -82,7 +82,7 @@ keyword 同策略重复 run 比较状态为 `unchanged`；除延迟外的汇总�
 评测 CLI 固定为：
 
 ```bash
-cd /home/abeltomato/workspace/projects/Tomato-Agent/backend
+cd backend
 .venv/bin/python -m app.knowledge.evaluation \
   --dataset /absolute/path/to/questions.jsonl \
   --split dev \
@@ -122,7 +122,7 @@ cd /home/abeltomato/workspace/projects/Tomato-Agent/backend
 
 正式题集为 `backend/evals/blog_questions.jsonl`，文件 SHA-256 为 `ee24b12743fa41dad6e4f7c2f55632be5063292817362a4a31d206459b812992`；本次 `dev` 为 18 题（15 个可回答、3 个无答案）。最初 v3 快照将 YAML front matter 作为 927 个片段中的一部分入库；该历史基线用于定位问题，不能与下列 v4 直接作策略优劣比较。
 
-当前 v4 隔离快照为 `/home/abeltomato/workspace/projects/Tomato-Agent/backend/data/rag/databases/public-blog-2026-09-23-v1.db`（SHA-256：`20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`），包含 66 个文档、886 个正文片段，66/66 文档索引状态为 `ready`。YAML front matter 已排除，正文行号保持原文物理行号；向量配置为 `qwen3.7-text-embedding-flash`、1024 维；vector/hybrid 使用 `top_k=5` 和最低余弦相似度 `0.5`。早期临时快照路径只作为历史运行记录，不作为后续实验路径。
+当前 v4 隔离快照为 `backend/data/rag/databases/public-blog-2026-09-23-v1.db`（SHA-256：`20e2ec267c4bd7f9b78ba5b9f8821514fc029ea8fb420ba0065e2a7cbf3504d4`），包含 66 个文档、886 个正文片段，66/66 文档索引状态为 `ready`。YAML front matter 已排除，正文行号保持原文物理行号；向量配置为 `qwen3.7-text-embedding-flash`、1024 维；vector/hybrid 使用 `top_k=5` 和最低余弦相似度 `0.5`。早期临时快照路径只作为历史运行记录，不作为后续实验路径。
 
 | 模式 | 可回答空结果 | Recall@5 | MRR@5 | Hit@5 | 无答案空结果 | 执行错误 |
 |---|---:|---:|---:|---:|---:|---:|

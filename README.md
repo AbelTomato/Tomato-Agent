@@ -38,7 +38,7 @@ pnpm dev
 脚本会构建界面、打包 Windows Python 引擎、生成 Tauri 安装包，并附带 SHA-256 清单归档。安装后的应用不依赖 WSL 或系统 Python。
 Windows 开发和构建需要安装 Python 3.12 和 `uv` 并将 `uv` 加入 `PATH`；引擎构建依赖通过 `backend/uv.lock` 安装。
 
-首次配置、数据备份和故障处理见 [Windows 桌面使用说明](docs/Windows普通聊天使用说明.md)。
+首次配置、数据备份和故障处理见 [Windows 桌面使用说明](docs/guides/Windows普通聊天使用说明.md)。
 
 ## 开发验证
 
@@ -61,4 +61,4 @@ backend/.venv/bin/python -m pytest backend/tests
 
 ## 迁移记录
 
-架构与语言职责说明见[桌面端架构迁移与语言选型建议](docs/桌面端架构迁移与语言选型建议.md)。`docs` 下的 Web/WSL 文件仅作为历史验收记录，不再描述受支持的产品入口。
+架构与语言职责说明见[桌面端架构迁移与语言选型建议](docs/architecture/桌面端架构迁移与语言选型建议.md)。文档分类与归档入口见 [文档索引](docs/README.md)。
