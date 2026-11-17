@@ -46,11 +46,10 @@ Windows 开发和构建需要安装 Python 3.12 和 `uv` 并将 `uv` 加入 `PAT
 cd desktop/ui && pnpm build && node --test tests/*.test.mjs
 ```
 
-Windows PowerShell 中先构建 Tauri 所需的 Python 引擎，再运行 Rust 测试：
+Windows PowerShell 中通过统一脚本构建 Python 引擎并运行 Rust 测试：
 
 ```powershell
-.\desktop\scripts\build-engine.ps1
-cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+.\desktop\scripts\windows.ps1 -Action test
 ```
 
 ```bash
