@@ -22,6 +22,7 @@ from app.errors import ToolNotFoundError
 from app.runs.models import PendingAction
 from app.tools.base import ToolContext, ToolResult
 from .models import AssistantResult, CapabilityError, CapabilityOutcome
+from .tools.project import ProjectReadAuthorizationRequired
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,11 @@ class AssistantExecutionPort(LeaseExecutionPort):
     async def preflight(self, tool_name, arguments, snapshot):
         check = getattr(self.capabilities.get(tool_name), "preflight", None)
         if check is not None:
+            structured = snapshot.harness_state.get("structured_state", {})
             await check(arguments, ToolContext(session_id=str(snapshot.session_id), run_id=str(snapshot.run_id),
-                workspace_id=self.workspace_id, profile=self.profile, lease=self.lease))
+                workspace_id=self.workspace_id, project_id=structured.get("project_id"),
+                project_read_grant=structured.get("project_read_grant"),
+                profile=self.profile, lease=self.lease))
 
     async def run_harness(self, harness, state, strategy, *, llm, tools, policy, budget, snapshot):
         diagnostic_stage = "initialize"
@@ -78,7 +82,7 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 usage=UsageSnapshot(model_calls=current.reserved_model_calls),
                 tool_calls=current.reserved_tool_calls, duration_ms=(monotonic() - started) * 1000)
 
-        async def wait(action, *, unknown=False):
+        async def wait(action, *, unknown=False, event_type="assistant.waiting", event_payload=None):
             if unknown:
                 operation = await self.get_operation(snapshot.pending_operation_id)
                 descriptor = self.capabilities.resolve(operation.tool_name)
@@ -98,7 +102,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                 pending_response=None, pending_decision=None,
                 logical_index=snapshot.logical_index + (0 if unknown else 1))
             await self.finish("waiting", snapshot=saved, pending_action=action,
-                event_type="assistant.waiting", event_payload={"schema_version": 1, "action_id": action.action_id})
+                event_type=event_type,
+                event_payload={"schema_version": 1, "action_id": action.action_id, **(event_payload or {})})
             return await result("waiting", action.reason)
 
         try:
@@ -360,7 +365,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             snapshot = await self.save_snapshot(updated(phase="ready_model",
                                 logical_index=snapshot.logical_index + 1, loop_count=snapshot.loop_count + 1))
                             continue
-                        if descriptor.requires_workspace and self.workspace_id is None:
+                        desktop_broker = getattr(self.capabilities.get(decision.tool_name), "bridge", None) is not None
+                        if descriptor.requires_workspace and self.workspace_id is None and not desktop_broker:
                             action = PendingAction(action_id=str(uuid4()), reason="workspace_required", business_version=0,
                                 action_type="workspace_binding", target_capability=decision.tool_name,
                                 frozen_parameters=arguments, allowed_actions=["bind_workspace", "reject_action"])
@@ -368,6 +374,14 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             return await wait(action)
                         try:
                             await self.preflight(decision.tool_name, arguments, snapshot)
+                        except ProjectReadAuthorizationRequired:
+                            action = PendingAction(action_id=str(uuid4()), reason="project_read_authorization_required",
+                                business_version=0, action_type="project_read", target_capability=decision.tool_name,
+                                frozen_parameters=arguments,
+                                display_data={"project_id": state.structured_state.get("project_id"),
+                                    "operations": ["list_entries", "search_text", "read_file"]},
+                                allowed_actions=["authorize_project_read", "reject_action"])
+                            return await wait(action)
                         except PermissionError:
                             feedback = CapabilityOutcome(kind="failed", error=CapabilityError(
                                 category="permission_denied", code="permission_denied")).model_dump(mode="json")
@@ -408,7 +422,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         return await result("failed", "tool_not_allowed")
                     if not descriptor.available:
                         return await result("failed", "capability_unavailable")
-                    if descriptor.requires_workspace and self.workspace_id is None:
+                    desktop_broker = getattr(self.capabilities.get(operation.tool_name), "bridge", None) is not None
+                    if descriptor.requires_workspace and self.workspace_id is None and not desktop_broker:
                         return await wait(PendingAction(action_id=str(uuid4()), reason="workspace_required",
                             business_version=0, action_type="workspace_binding", target_capability=operation.tool_name,
                             frozen_parameters=operation.input_payload, allowed_actions=["bind_workspace", "reject_action"]))
@@ -431,7 +446,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         continue
                     snapshot = await self.repository.get_snapshot(self.lease.run_id)
                     category = blocked.get(operation.tool_name)
-                    if category or descriptor.requires_workspace and self.workspace_id is None:
+                    desktop_broker = getattr(self.capabilities.get(operation.tool_name), "bridge", None) is not None
+                    if category or descriptor.requires_workspace and self.workspace_id is None and not desktop_broker:
                         category = category or "recoverable_error"
                         tool_result = ToolResult(success=False, data=CapabilityOutcome(kind="failed",
                             error=CapabilityError(category=category, code="capability_blocked" if blocked.get(operation.tool_name)
@@ -444,7 +460,10 @@ class AssistantExecutionPort(LeaseExecutionPort):
                         client = llm.scoped_client(str(operation.id), operation.tool_name, str(self.lease.attempt_id))
                         client.context = {"remaining_seconds": timeout, "deadline": deadline, "cancel_event": self.cancel_event}
                         context = ToolContext(session_id=str(snapshot.session_id), run_id=str(snapshot.run_id),
-                            workspace_id=self.workspace_id, profile=self.profile, lease=self.lease,
+                            workspace_id=self.workspace_id,
+                            project_id=state.structured_state.get("project_id"),
+                            project_read_grant=state.structured_state.get("project_read_grant"),
+                            profile=self.profile, lease=self.lease,
                             invocation_id=str(operation.id), step_id=str(step.id),
                             remaining_seconds=timeout, deadline=deadline, cancel_event=self.cancel_event, model_client=client)
                         request = asyncio.create_task(tools.execute(operation.tool_name, operation.input_payload, context, timeout=timeout))
@@ -511,6 +530,10 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     messages.append(Message(role="user", content=json.dumps({
                         "assistant_tool_result": outcome.model_dump(mode="json")}, ensure_ascii=False)))
                 if outcome.kind == "waiting":
+                    if outcome.pending_action.action_type == "changeset_approval":
+                        return await wait(outcome.pending_action, event_type="changeset.proposed",
+                            event_payload={"change_id": outcome.pending_action.frozen_parameters["change_id"],
+                                "digest": outcome.pending_action.frozen_parameters["digest"]})
                     return await wait(outcome.pending_action, unknown=outcome.error is not None)
                 if outcome.error:
                     category = outcome.error.category
@@ -526,8 +549,8 @@ class AssistantExecutionPort(LeaseExecutionPort):
         except (TimeoutError, asyncio.CancelledError):
             raise
         except (ValidationError, ValueError) as exc:
-            logger.exception("assistant execution contract validation failed run_id=%s stage=%s error_type=%s error=%s",
-                             self.lease.run_id, diagnostic_stage, type(exc).__name__, str(exc))
+            logger.warning("assistant execution contract validation failed run_id=%s stage=%s error_type=%s",
+                           self.lease.run_id, diagnostic_stage, type(exc).__name__)
             code = (str(exc) if diagnostic_stage == "decision_validation"
                     and str(exc) == "invalid_assistant_protocol_json"
                     else "invalid_capability_contract")
@@ -549,8 +572,8 @@ async def execute_assistant(run, lease, port, *, harness, strategy, llm, policy,
             try:
                 output = validate_completion(await port.repository.get_snapshot(run.id), result.output).model_dump(mode="json")
             except ValueError as exc:
-                logger.exception("assistant completion validation failed run_id=%s error_type=%s error=%s",
-                                 run.id, type(exc).__name__, str(exc))
+                logger.warning("assistant completion validation failed run_id=%s error_type=%s",
+                               run.id, type(exc).__name__)
                 await port.finish("failed", error={"code": str(exc) if str(exc) in {
                     "invalid_citation", "validation_not_available"} else "invalid_assistant_result"})
                 return result.model_copy(update={"status": "failed", "stop_reason": "invalid_assistant_result"})

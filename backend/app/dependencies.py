@@ -41,6 +41,7 @@ from app.writing.service import WritingService
 from app.workspaces.service import WorkspaceService
 from app.execution.repository import ExecutionRepository
 from app.execution.worker import ExecutionWorker
+from app.execution.desktop_backend import ExecutionBackend, UnavailableExecutionBackend
 from app.memory.repository import MemoryRepository
 from app.memory.extraction import MemoryExtractor
 from app.memory.worker import MemoryWorker
@@ -71,6 +72,7 @@ class AppDependencies:
     code_task_service: CodeTaskService
     execution_repository: ExecutionRepository
     execution_worker: ExecutionWorker
+    execution_backend: ExecutionBackend
     task_service: object
     memory_repository: MemoryRepository
     memory_extractor: MemoryExtractor | None
@@ -246,6 +248,8 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
     from app.execution.ports import canonical_digest
     from app.assistant.service import AssistantService
 
+    execution_backend: ExecutionBackend = UnavailableExecutionBackend()
+
     runtime = AgentRuntime(llm_client, ContextManager(), tool_registry, session_repository,
                            "You are a concise assistant.", config.runtime_config)
     from app.execution.docker import DockerTerminationVerifier
@@ -268,7 +272,8 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
             termination_verifier=docker_termination_verifier,
             settlement_termination_verifier=settlement_termination_verifier,
             memory_repository=memory_repository, memory_embedding_client=embedding_client,
-            layered_memory_service=layered_memory_service, project_service=project_service),
+            layered_memory_service=layered_memory_service, project_service=project_service,
+            execution_backend=execution_backend),
         config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
             "runtime": config.runtime_config.model_dump(mode="json"),
             "writing": {"retrieval_mode": config.writing_retrieval_mode,
@@ -324,6 +329,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         code_task_service=code_task_service,
         execution_repository=code_task_service.execution_repository,
         execution_worker=execution_worker,
+        execution_backend=execution_backend,
         task_service=task_service,
         memory_repository=memory_repository,
         memory_extractor=memory_extractor,

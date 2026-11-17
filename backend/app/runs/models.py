@@ -19,7 +19,7 @@ TaskKind = Literal["chat", "knowledge", "writing", "code", "assistant"]
 TaskAction = Literal[
     "cancel", "confirm_outline", "save_draft", "inspect_recovery", "continue_recovery",
     "provide_input", "approve_action", "reject_action", "bind_workspace",
-    "resolve_side_effect",
+    "authorize_project_read", "resolve_side_effect",
 ]
 
 
@@ -31,7 +31,7 @@ class PendingAction(BaseModel):
     allowed_actions: list[TaskAction] = Field(min_length=1)
     business_version: int = Field(ge=0)
     display_data: dict[str, Any] = Field(default_factory=dict)
-    action_type: Literal["legacy", "clarification", "confirmation", "workspace_binding", "recovery"] = "legacy"
+    action_type: Literal["legacy", "clarification", "confirmation", "workspace_binding", "project_read", "changeset_approval", "recovery"] = "legacy"
     target_capability: str | None = Field(default=None, min_length=1)
     frozen_parameters: dict[str, Any] = Field(default_factory=dict)
 

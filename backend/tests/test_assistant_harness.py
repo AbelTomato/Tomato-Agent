@@ -340,7 +340,7 @@ async def test_execute_assistant_commits_result_on_same_run(tmp_path):
     assert (await repo.get_run(run.id)).result == AssistantResult(answer="answer").model_dump(mode="json")
 
 
-async def test_invalid_decision_logs_stage_and_exception_without_changing_public_error(tmp_path, caplog):
+async def test_invalid_decision_logs_safe_diagnostics_without_exception_details(tmp_path, caplog):
     import logging
 
     run, repo, port, registry, gateway, _, _ = await fixture(tmp_path)
@@ -349,7 +349,7 @@ async def test_invalid_decision_logs_stage_and_exception_without_changing_public
         async def decide(self, state, available, response):
             raise ValueError("invalid simulated decision")
 
-    caplog.set_level(logging.ERROR, logger="app.assistant.execution")
+    caplog.set_level(logging.WARNING, logger="app.assistant.execution")
     result = await run_harness(repo, run, port, registry, gateway, InvalidStrategy())
 
     assert result.status == "failed"
@@ -357,8 +357,8 @@ async def test_invalid_decision_logs_stage_and_exception_without_changing_public
     assert f"run_id={run.id}" in caplog.text
     assert "stage=decision_validation" in caplog.text
     assert "error_type=ValueError" in caplog.text
-    assert "invalid simulated decision" in caplog.text
-    assert "Traceback (most recent call last)" in caplog.text
+    assert "invalid simulated decision" not in caplog.text
+    assert "Traceback (most recent call last)" not in caplog.text
 
 
 async def test_invalid_protocol_json_has_specific_failure_code(tmp_path, caplog):
@@ -370,7 +370,7 @@ async def test_invalid_protocol_json_has_specific_failure_code(tmp_path, caplog)
         async def decide(self, state, available, response):
             raise ValueError("invalid_assistant_protocol_json")
 
-    caplog.set_level(logging.ERROR, logger="app.assistant.execution")
+    caplog.set_level(logging.WARNING, logger="app.assistant.execution")
     result = await run_harness(repo, run, port, registry, gateway, InvalidProtocolStrategy())
 
     assert result.status == "failed"

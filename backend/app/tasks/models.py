@@ -74,7 +74,7 @@ class TaskActionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_payload(self):
-        if self.action in {"provide_input", "approve_action", "reject_action", "bind_workspace"}:
+        if self.action in {"provide_input", "approve_action", "reject_action", "bind_workspace", "authorize_project_read"}:
             if not self.action_id.strip() or not self.client_request_id.strip():
                 raise ValueError("action identity cannot be blank")
         if self.action == "confirm_outline":
@@ -100,12 +100,38 @@ class TaskActionRequest(BaseModel):
             if (set(self.payload) != {key} or not isinstance(self.payload[key], str)
                     or not self.payload[key].strip()):
                 raise ValueError(f"nonblank {key} required")
+        elif self.action == "authorize_project_read":
+            if (set(self.payload) != {"grant"} or not isinstance(self.payload["grant"], str)
+                    or not self.payload["grant"].strip() or len(self.payload["grant"]) > 512):
+                raise ValueError("opaque project grant required")
         elif self.action == "approve_action" and self.payload:
-            if set(self.payload) != {"outline"} or not isinstance(self.payload["outline"], dict):
-                raise ValueError("only outline object allowed")
-            # Structural validation here; evidence membership is checked against
-            # the server's frozen citation snapshot when the action is executed.
-            GeneratedOutline.model_validate(self.payload["outline"], strict=True)
+            if set(self.payload) == {"outline"} and isinstance(self.payload["outline"], dict):
+                # Structural validation here; evidence membership is checked against
+                # the server's frozen citation snapshot when the action is executed.
+                GeneratedOutline.model_validate(self.payload["outline"], strict=True)
+            elif set(self.payload) == {"commit_receipt"}:
+                receipt = self.payload["commit_receipt"]
+                if (not isinstance(receipt, dict)
+                        or set(receipt) != {"schema_version", "change_id", "digest", "status", "files"}
+                        or type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1
+                        or not isinstance(receipt.get("change_id"), str)
+                        or not isinstance(receipt.get("digest"), str)
+                        or len(receipt["digest"]) != 64
+                        or any(character not in "0123456789abcdef" for character in receipt["digest"])
+                        or receipt.get("status") != "completed"
+                        or not isinstance(receipt.get("files"), list)
+                        or not 1 <= len(receipt["files"]) <= 100):
+                    raise ValueError("completed_changeset_receipt_required")
+                for file in receipt["files"]:
+                    if (not isinstance(file, dict)
+                            or set(file) != {"relative_path", "status", "error"}
+                            or not isinstance(file.get("relative_path"), str)
+                            or not file["relative_path"]
+                            or file.get("status") != "applied"
+                            or file.get("error") is not None):
+                        raise ValueError("completed_changeset_receipt_required")
+            else:
+                raise ValueError("only outline or commit receipt allowed")
         elif self.payload:
             raise ValueError("payload must be empty")
         return self

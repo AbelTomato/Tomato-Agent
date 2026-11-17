@@ -28,6 +28,17 @@ def read_input():
     token = value.get("token", "")
     if len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
         raise ValueError("invalid input")
+    bridge_port = value.get("bridge_port")
+    bridge_token = value.get("bridge_token")
+    if bridge_port is not None or bridge_token is not None:
+        if (
+            type(bridge_port) is not int
+            or not 1 <= bridge_port <= 65535
+            or not isinstance(bridge_token, str)
+            or len(bridge_token) != 64
+            or any(c not in "0123456789abcdef" for c in bridge_token)
+        ):
+            raise ValueError("invalid capability bridge")
     if not isinstance(value.get("owner"), str) or not value["owner"]:
         raise ValueError("invalid owner")
     if value.get("data_dir") is not None:
@@ -109,6 +120,15 @@ async def serve(value):
         identity_path.chmod(0o600)
     instance = identity_path.read_text().strip()
     app.state.project_service.service_instance_id = instance
+    if value.get("bridge_port") is not None:
+        from app.desktop.capability_bridge import DesktopCapabilityBridge
+
+        app.state.desktop_capability_bridge = DesktopCapabilityBridge(
+            port=value["bridge_port"], token=value["bridge_token"], instance_id=instance
+        )
+        assistant = app.state.task_service.assistant
+        for name in ("list_files", "search_files", "read_file"):
+            assistant.registry.get(name).bridge = app.state.desktop_capability_bridge
     sock = socket.socket()
     port_request = value.get("port", 0)
     if type(port_request) is not int or not 0 <= port_request <= 65535:

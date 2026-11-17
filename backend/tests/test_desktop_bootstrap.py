@@ -112,6 +112,27 @@ def test_memory_settings_input_is_validated_and_disabled_by_default():
         sys.stdin = original_stdin
 
 
+def test_private_bridge_configuration_requires_loopback_port_and_independent_key():
+    from app.desktop.bootstrap import read_input
+
+    from io import StringIO
+    original_stdin = sys.stdin
+    try:
+        sys.stdin = StringIO(json.dumps({"token": "a" * 64, "owner": "owner",
+                                        "bridge_port": 45123,
+                                        "bridge_token": "b" * 64}) + "\n")
+        value = read_input()
+        assert value["bridge_port"] == 45123
+        assert value["bridge_token"] == "b" * 64
+
+        sys.stdin = StringIO(json.dumps({"token": "a" * 64, "owner": "owner",
+                                        "bridge_port": 45123}) + "\n")
+        with pytest.raises(ValueError, match="invalid capability bridge"):
+            read_input()
+    finally:
+        sys.stdin = original_stdin
+
+
 def test_managed_engine_rejects_relative_draft_directory(tmp_path):
     from app.desktop.bootstrap import read_input
 

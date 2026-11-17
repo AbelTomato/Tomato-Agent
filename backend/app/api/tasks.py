@@ -128,6 +128,29 @@ async def get_task(run_id: str, request: Request):
     return await task_payload(request, await task_required(request, run_id))
 
 
+@router.get("/api/tasks/{run_id}/desktop-project-read-grant")
+async def desktop_project_read_grant(run_id: str, request: Request, session_id: str):
+    if not getattr(request.app.state, "desktop_connection_installed", False):
+        raise HTTPException(404, {"code": "task_not_found"})
+    run = await task_required(request, run_id)
+    if run.status != "waiting" or str(run.session_id) != session_id:
+        raise HTTPException(404, {"code": "task_not_found"})
+    snapshot = await request.app.state.execution_repository.get_snapshot(run.id)
+    pending = request.app.state.task_service.pending_action(run)
+    if snapshot is None or pending is None or pending.action_type != "changeset_approval":
+        raise HTTPException(404, {"code": "task_not_found"})
+    session = await session_required(request, session_id)
+    state = snapshot.harness_state.get("structured_state", {})
+    grant = state.get("project_read_grant")
+    project_id = state.get("project_id")
+    changeset = pending.display_data.get("changeset", {})
+    if (not isinstance(grant, str) or not grant or not isinstance(project_id, str)
+            or session.project_id != project_id or changeset.get("project_id") != project_id
+            or changeset.get("run_id") != str(run.id)):
+        raise HTTPException(404, {"code": "task_not_found"})
+    return {"grant": grant, "project_id": project_id}
+
+
 @router.post("/api/sessions/{session_id}/queue", status_code=202)
 async def enqueue_task(session_id: str, body: UnifiedTaskRequest, request: Request):
     session_id = ident(session_id, "session_id")

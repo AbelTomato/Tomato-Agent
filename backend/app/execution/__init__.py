@@ -5,6 +5,22 @@ from .models import (
     LeaseHandle,
     PROTOCOL_VERSION,
 )
+from .desktop_backend import (
+    EXECUTION_BACKEND_PROTOCOL_VERSION,
+    BackendCapabilities,
+    BackendOperationResult,
+    ChangeCollectionResult,
+    ExecutionBackend,
+    ExecutionBackendUnavailable,
+    ExecutionHandle,
+    ExecutionObservation,
+    ExecutionPolicy,
+    ExecutionRequest,
+    ExecutionResult,
+    ExecutionStatus,
+    UnavailableExecutionBackend,
+    WorkspaceSnapshot,
+)
 
 __all__ = [
     "AttemptRecord",
@@ -12,4 +28,18 @@ __all__ = [
     "ExecutionSnapshot",
     "LeaseHandle",
     "PROTOCOL_VERSION",
+    "EXECUTION_BACKEND_PROTOCOL_VERSION",
+    "BackendCapabilities",
+    "BackendOperationResult",
+    "ChangeCollectionResult",
+    "ExecutionBackend",
+    "ExecutionBackendUnavailable",
+    "ExecutionHandle",
+    "ExecutionObservation",
+    "ExecutionPolicy",
+    "ExecutionRequest",
+    "ExecutionResult",
+    "ExecutionStatus",
+    "UnavailableExecutionBackend",
+    "WorkspaceSnapshot",
 ]

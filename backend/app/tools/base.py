@@ -10,6 +10,8 @@ class ToolContext(BaseModel):
     session_id: str
     run_id: str
     workspace_id: str | None = None
+    project_id: str | None = None
+    project_read_grant: str | None = None
     # policies imports ToolResult; code tools validate this server-owned value
     # at their boundary to avoid a circular import for ordinary Session tools.
     profile: Any = None

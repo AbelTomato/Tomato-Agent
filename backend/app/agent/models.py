@@ -100,6 +100,17 @@ class SessionRecord(BaseModel):
     updated_at: datetime
 
 
+class VisibleMessageRecord(BaseModel):
+    id: str
+    session_id: UUID
+    sequence: int
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+    run_id: UUID | None = None
+    message_kind: str | None = None
+
+
 class RunRecord(BaseModel):
     id: UUID
     session_id: UUID

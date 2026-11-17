@@ -6,6 +6,7 @@ import pytest
 
 from app.agent.models import LLMResponse
 from test_application_lifecycle import make_app
+from app.tasks.models import TaskActionRequest
 
 
 class Provider:
@@ -54,6 +55,25 @@ def request(**changes):
     return {"kind": "assistant", "message": "Explain the project", "client_request_id": "first", **changes}
 
 
+def test_project_read_authorization_action_requires_an_opaque_grant():
+    action = TaskActionRequest(
+        action_id="read-approval",
+        action="authorize_project_read",
+        expected_version=2,
+        client_request_id="approval-1",
+        payload={"grant": "opaque-host-issued-grant"},
+    )
+    assert action.payload == {"grant": "opaque-host-issued-grant"}
+    with pytest.raises(ValueError):
+        TaskActionRequest(
+            action_id="read-approval",
+            action="authorize_project_read",
+            expected_version=2,
+            client_request_id="approval-2",
+            payload={"grant": "", "project_id": "model-selected"},
+        )
+
+
 def decision(kind, payload):
     return LLMResponse(kind="final", content=json.dumps(
         {"protocol_version": 1, "type": kind, "payload": payload}))
@@ -81,6 +101,8 @@ async def test_assistant_http_worker_replay_and_history(tmp_path):
         response = await client.post(route, json=request())
         assert response.status_code == 202
         run_id = response.json()["run_id"]
+        visible = await app.state.session_repository.list_visible_messages(session)
+        assert [(message.role, message.content) for message in visible] == [("user", "Explain the project")]
         assert (await client.post(route, json=request())).json()["run_id"] == run_id
         assert (await client.post(route, json=request(message="changed"))).status_code == 409
         assert await app.state.execution_worker.run_once()
@@ -88,6 +110,9 @@ async def test_assistant_http_worker_replay_and_history(tmp_path):
         assert current["status"] == "completed"
         assert current["result"]["answer"] == "hello"
         assert current["result"]["validation_status"] == "not_required"
+        visible = await app.state.session_repository.list_visible_messages(session)
+        assert [(message.role, message.content) for message in visible] == [
+            ("user", "Explain the project"), ("assistant", "hello")]
         assert provider.calls == 1
         assert provider.response_formats[0]["type"] == "json_schema"
         assert provider.response_formats[0]["json_schema"]["strict"] is True
@@ -125,6 +150,292 @@ async def test_question_answer_is_explicit_single_consumption_and_same_run(tmp_p
         assert provider.calls == 2
         events = (await client.get(f"/api/tasks/{run_id}/events")).json()["events"]
         assert len([e for e in events if e["event_type"] == "assistant.resumed"]) == 1
+
+
+async def test_project_read_waits_for_explicit_run_grant_before_broker_access(tmp_path):
+    class Broker:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, operation, payload, **identity):
+            self.calls.append((operation, payload, identity))
+            if operation == "revoke_run":
+                return {"revoked": True}
+            return {"path": "README.md", "content": "project contents", "bytes": 16}
+
+    responses = [
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("finish", {"result": {"answer": "The project contents are available."}}),
+    ]
+    async with assistant_api(tmp_path, responses) as (app, client, session, _):
+        await app.state.session_repository.set_project(session, "project-1")
+        broker = Broker()
+        app.state.task_service.assistant.registry.get("read_file").bridge = broker
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert waiting["status"] == "waiting"
+        assert waiting["pending_action"]["action_type"] == "project_read"
+        assert broker.calls == []
+
+        action = {"action_id": waiting["pending_action"]["action_id"],
+            "action": "authorize_project_read", "expected_version": waiting["version"],
+            "client_request_id": "grant", "payload": {"grant": "host-issued-grant"}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=action)).status_code == 200
+        assert await app.state.execution_worker.run_once()
+        completed = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert completed["status"] == "completed"
+        snapshot = await app.state.execution_repository.get_snapshot(run_id)
+        assert [call[0] for call in broker.calls] == ["read_file", "revoke_run"]
+        assert broker.calls[0][2]["run_id"] == run_id
+        assert snapshot.harness_state["structured_state"]["project_read_grant"] == "host-issued-grant"
+        assert all("host-issued-grant" not in message.content for message in snapshot.messages)
+
+
+async def test_project_read_rejection_is_persisted_and_blocks_retry(tmp_path):
+    class Broker:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, operation, payload, **identity):
+            self.calls.append(operation)
+            return {"path": "README.md", "content": "should not be read", "bytes": 18}
+
+    responses = [
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("finish", {"result": {"answer": "I will continue without reading the project."}}),
+    ]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        await app.state.session_repository.set_project(session, "project-1")
+        broker = Broker()
+        app.state.task_service.assistant.registry.get("read_file").bridge = broker
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting = (await client.get(f"/api/tasks/{run_id}")).json()
+        action = {"action_id": waiting["pending_action"]["action_id"],
+            "action": "reject_action", "expected_version": waiting["version"],
+            "client_request_id": "reject-project-read", "payload": {}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=action)).status_code == 200
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=action)).status_code == 409
+        assert await app.state.execution_worker.run_once()
+
+        completed = (await client.get(f"/api/tasks/{run_id}")).json()
+        snapshot = await app.state.execution_repository.get_snapshot(run_id)
+        events = (await client.get(f"/api/tasks/{run_id}/events")).json()["events"]
+        assert completed["status"] == "completed"
+        assert provider.calls == 3
+        assert broker.calls == []
+        assert snapshot.harness_state["structured_state"]["blocked_capabilities"]["read_file"] == "user_rejected"
+        assert snapshot.harness_state["structured_state"]["rejected_actions"] == [action["action_id"]]
+        assert [event["event_type"] for event in events].count("assistant.action") == 1
+
+
+async def test_rejected_changeset_proposal_leaves_project_bytes_unchanged(tmp_path):
+    import hashlib
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project_file = project / "README.md"
+    project_file.write_bytes(b"before\n")
+
+    class Broker:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, operation, payload, **identity):
+            self.calls.append(operation)
+            if operation == "read_file":
+                return {"path": "README.md", "content": "before\n", "bytes": 7}
+            return {"revoked": True}
+
+    responses = [
+        decision("call_tool", {"name": "read_file", "contract_version": "1",
+            "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "read_file", "contract_version": "1",
+            "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "propose_changeset", "contract_version": "1",
+            "arguments": {"changes": [{
+                "relative_path": "README.md",
+                "operation": "modify",
+                "expected_old_sha256": hashlib.sha256(b"before\n").hexdigest(),
+                "base_content": "before\n",
+                "content": "after\n",
+                "summary": "Update project notes",
+            }]}}),
+        decision("finish", {"result": {"answer": "The proposed change was declined."}}),
+    ]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        await app.state.session_repository.set_project(session, "project-1")
+        broker = Broker()
+        app.state.task_service.assistant.registry.get("read_file").bridge = broker
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting_read = (await client.get(f"/api/tasks/{run_id}")).json()
+        grant_action = {"action_id": waiting_read["pending_action"]["action_id"],
+            "action": "authorize_project_read", "expected_version": waiting_read["version"],
+            "client_request_id": "grant-before-changeset", "payload": {"grant": "host-issued-grant"}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=grant_action)).status_code == 200
+        assert await app.state.execution_worker.run_once()
+
+        waiting_changeset = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert waiting_changeset["pending_action"]["action_type"] == "changeset_approval"
+        reject_action = {"action_id": waiting_changeset["pending_action"]["action_id"],
+            "action": "reject_action", "expected_version": waiting_changeset["version"],
+            "client_request_id": "reject-changeset", "payload": {}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=reject_action)).status_code == 200
+        assert await app.state.execution_worker.run_once()
+
+        completed = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert completed["status"] == "completed"
+        assert provider.calls == 4
+        assert project_file.read_bytes() == b"before\n"
+        assert "apply_changeset" not in broker.calls
+
+
+async def test_applied_changeset_receipt_resumes_only_the_bound_runtime_action(tmp_path):
+    import hashlib
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project_file = project / "README.md"
+    project_file.write_bytes(b"before\n")
+
+    class Broker:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, operation, payload, **identity):
+            self.calls.append(operation)
+            if operation == "read_file":
+                return {"path": "README.md", "content": "before\n", "bytes": 7}
+            return {"revoked": True}
+
+    responses = [
+        decision("call_tool", {"name": "read_file", "contract_version": "1",
+            "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "read_file", "contract_version": "1",
+            "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "propose_changeset", "contract_version": "1",
+            "arguments": {"changes": [{
+                "relative_path": "README.md",
+                "operation": "modify",
+                "expected_old_sha256": hashlib.sha256(b"before\n").hexdigest(),
+                "base_content": "before\n",
+                "content": "after\n",
+                "summary": "Update project notes",
+            }]}}),
+        decision("finish", {"result": {"answer": "The approved change was applied."}}),
+    ]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        await app.state.session_repository.set_project(session, "project-1")
+        broker = Broker()
+        app.state.task_service.assistant.registry.get("read_file").bridge = broker
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting_read = (await client.get(f"/api/tasks/{run_id}")).json()
+        grant_action = {"action_id": waiting_read["pending_action"]["action_id"],
+            "action": "authorize_project_read", "expected_version": waiting_read["version"],
+            "client_request_id": "grant-before-approved-changeset", "payload": {"grant": "host-issued-grant"}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=grant_action)).status_code == 200
+        assert await app.state.execution_worker.run_once()
+
+        waiting_changeset = (await client.get(f"/api/tasks/{run_id}")).json()
+        pending = waiting_changeset["pending_action"]
+        changeset = pending["display_data"]["changeset"]
+        assert pending["action_type"] == "changeset_approval"
+        assert changeset["changes"][0]["relative_path"] == "README.md"
+        assert (await client.get(f"/api/tasks/{run_id}/desktop-project-read-grant?session_id={session}")).status_code == 404
+        app.state.desktop_connection_installed = True
+        recovered_grant = await client.get(
+            f"/api/tasks/{run_id}/desktop-project-read-grant?session_id={session}"
+        )
+        assert recovered_grant.status_code == 200
+        assert recovered_grant.json() == {"grant": "host-issued-grant", "project_id": "project-1"}
+        assert (await client.get(
+            f"/api/tasks/{run_id}/desktop-project-read-grant?session_id=another-session"
+        )).status_code == 404
+        project_file.write_bytes(b"after\n")
+        receipt = {"schema_version": 1, "change_id": changeset["change_id"],
+            "digest": pending["display_data"]["digest"], "status": "completed",
+            "files": [{"relative_path": "README.md", "status": "applied", "error": None}]}
+        approve_action = {"action_id": pending["action_id"], "action": "approve_action",
+            "expected_version": waiting_changeset["version"], "client_request_id": "approve-change-set",
+            "payload": {"commit_receipt": receipt}}
+        route = f"/api/tasks/{run_id}/actions"
+        applied = await client.post(route, json=approve_action)
+        assert applied.status_code == 200
+        assert applied.json()["pending_action"] is None
+        assert (await client.post(route, json=approve_action)).status_code == 409
+        assert await app.state.execution_worker.run_once()
+
+        completed = (await client.get(f"/api/tasks/{run_id}")).json()
+        assert completed["status"] == "completed"
+        assert completed["result"]["answer"] == "The approved change was applied."
+        assert project_file.read_bytes() == b"after\n"
+        assert broker.calls == ["read_file", "revoke_run"]
+        assert provider.calls == 4
+
+
+async def test_cancelled_project_read_rpc_is_audited_without_committing_late_content(tmp_path):
+    import asyncio
+
+    class Broker:
+        def __init__(self):
+            self.calls = []
+            self.read_started = asyncio.Event()
+            self.release_read = asyncio.Event()
+
+        async def call(self, operation, payload, **identity):
+            self.calls.append(operation)
+            if operation == "revoke_run":
+                return {"revoked": True}
+            self.read_started.set()
+            await self.release_read.wait()
+            return {"path": "README.md", "content": "late private contents", "bytes": 21}
+
+    responses = [
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("call_tool", {"name": "read_file", "contract_version": "1", "arguments": {"path": "README.md"}}),
+        decision("finish", {"result": {"answer": "This must not be committed."}}),
+    ]
+    async with assistant_api(tmp_path, responses) as (app, client, session, provider):
+        await app.state.session_repository.set_project(session, "project-1")
+        broker = Broker()
+        app.state.task_service.assistant.registry.get("read_file").bridge = broker
+        run_id = (await client.post(f"/api/sessions/{session}/tasks", json=request())).json()["run_id"]
+        assert await app.state.execution_worker.run_once()
+        waiting = (await client.get(f"/api/tasks/{run_id}")).json()
+        grant_action = {"action_id": waiting["pending_action"]["action_id"],
+            "action": "authorize_project_read", "expected_version": waiting["version"],
+            "client_request_id": "grant-before-cancel", "payload": {"grant": "host-issued-grant"}}
+        assert (await client.post(f"/api/tasks/{run_id}/actions", json=grant_action)).status_code == 200
+
+        worker = asyncio.create_task(app.state.execution_worker.run_once())
+        await asyncio.wait_for(broker.read_started.wait(), timeout=2)
+        running = (await client.get(f"/api/tasks/{run_id}")).json()
+        cancel_action = {"action_id": "cancel-read", "action": "cancel",
+            "expected_version": running["version"], "client_request_id": "cancel-read", "payload": {}}
+        cancelled = await client.post(f"/api/tasks/{run_id}/actions", json=cancel_action)
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+
+        broker.release_read.set()
+        assert await asyncio.wait_for(worker, timeout=2)
+
+        final = (await client.get(f"/api/tasks/{run_id}")).json()
+        snapshot = await app.state.execution_repository.get_snapshot(run_id)
+        visible = await app.state.session_repository.list_visible_messages(session)
+        events = (await client.get(f"/api/tasks/{run_id}/events")).json()["events"]
+        late_events = [event for event in events if event["event_type"] == "tool.late_result"]
+        assert final["status"] == "cancelled"
+        assert provider.calls == 2
+        assert [message.content for message in visible] == ["Explain the project"]
+        assert "late private contents" not in snapshot.model_dump_json()
+        assert "late private contents" not in json.dumps([event["payload"] for event in events])
+        assert len(late_events) == 1
+        assert "result_digest" in late_events[0]["payload"]["detail"]["data"]
+        assert broker.calls == ["read_file", "revoke_run"]
 
 
 async def test_message_events_use_existing_http_cursor_and_versioned_payload(tmp_path):

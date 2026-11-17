@@ -1,11 +1,18 @@
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import aiosqlite
 
-from app.agent.models import CheckpointRecord, Event, RunRecord, SessionRecord
+from app.agent.models import (
+    CheckpointRecord,
+    Event,
+    RunRecord,
+    SessionRecord,
+    VisibleMessageRecord,
+)
 
 
 def now():
@@ -37,6 +44,29 @@ class SessionRepository:
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, loop_count INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY (session_id) REFERENCES sessions(id));
             CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id, sequence), FOREIGN KEY (session_id) REFERENCES sessions(id), FOREIGN KEY (run_id) REFERENCES runs(id));
             CREATE TABLE IF NOT EXISTS checkpoints (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (run_id) REFERENCES runs(id));
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence > 0),
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                run_id TEXT,
+                message_kind TEXT,
+                UNIQUE(session_id, sequence),
+                UNIQUE(run_id, message_kind),
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_visible_messages_session_order
+                ON messages(session_id, sequence);
+            CREATE TABLE IF NOT EXISTS desktop_history_imports (
+                installation_id TEXT PRIMARY KEY,
+                payload_digest TEXT NOT NULL,
+                session_count INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                imported_at TEXT NOT NULL
+            );
             """)
             columns = await db.execute_fetchall("PRAGMA table_info(sessions)")
             if "default_workspace_id" not in {column[1] for column in columns}:
@@ -48,6 +78,219 @@ class SessionRepository:
                 if name not in {column[1] for column in columns}:
                     await db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
             await db.commit()
+
+    async def import_desktop_history(
+        self, installation_id: str, sessions: list[dict], messages: list[dict],
+        source_digest: str | None = None,
+    ) -> dict:
+        if (not installation_id or len(installation_id) > 200
+                or not isinstance(sessions, list) or not isinstance(messages, list)
+                or len(sessions) > 20_000 or len(messages) > 500_000):
+            raise ValueError("invalid_desktop_history")
+        normalized_sessions = []
+        session_ids = set()
+        for item in sessions:
+            try:
+                ident = UUID(item["id"])
+                title = str(item["title"])
+                project_id = item.get("project_id")
+                created_at = str(item["created_at"])
+                parse_datetime(created_at)
+                if (not title.strip() or len(title) > 200 or project_id is not None
+                        and (not isinstance(project_id, str) or len(project_id) > 200)):
+                    raise ValueError
+                if str(ident) in session_ids:
+                    raise ValueError
+                session_ids.add(str(ident))
+                normalized_sessions.append({"id": str(ident), "title": title,
+                                            "project_id": project_id,
+                                            "created_at": created_at})
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid_desktop_history") from exc
+
+        normalized_messages = []
+        message_ids = set()
+        last_sequence = {}
+        for item in messages:
+            try:
+                message_id = item["id"]
+                session_id = str(UUID(item["session_id"]))
+                sequence = item["sequence"]
+                role = item["role"]
+                content = item["content"]
+                created_at = str(item["created_at"])
+                parse_datetime(created_at)
+                if (not isinstance(message_id, str) or not message_id or len(message_id) > 200
+                        or message_id in message_ids or session_id not in session_ids
+                        or type(sequence) is not int or sequence != last_sequence.get(session_id, 0) + 1
+                        or role not in {"user", "assistant"} or not isinstance(content, str)):
+                    raise ValueError
+                message_ids.add(message_id)
+                last_sequence[session_id] = sequence
+                normalized_messages.append({"id": message_id, "session_id": session_id,
+                                            "sequence": sequence, "role": role,
+                                            "content": content, "created_at": created_at})
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid_desktop_history") from exc
+
+        payload = {"sessions": normalized_sessions, "messages": normalized_messages}
+        digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":")).encode("utf-8")).hexdigest()
+        if source_digest is not None and source_digest != digest:
+            raise ValueError("desktop_history_digest_mismatch")
+        async with aiosqlite.connect(self.path) as db:
+            await self._enable_foreign_keys(db)
+            await db.execute("BEGIN IMMEDIATE")
+            previous = await (await db.execute(
+                "SELECT payload_digest,session_count,message_count FROM desktop_history_imports "
+                "WHERE installation_id=?", (installation_id,)
+            )).fetchone()
+            if previous is not None:
+                await db.rollback()
+                if previous[0] != digest:
+                    raise ValueError("desktop_history_conflict")
+                return {"installation_id": installation_id, "digest": digest,
+                        "sessions": previous[1], "messages": previous[2], "imported": True}
+            try:
+                for item in normalized_sessions:
+                    metadata = json.dumps({"title": item["title"]}, ensure_ascii=False)
+                    await db.execute(
+                        "INSERT INTO sessions(id,status,metadata,created_at,updated_at,project_id) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (item["id"], "active", metadata, item["created_at"],
+                         item["created_at"], item["project_id"]),
+                    )
+                for item in normalized_messages:
+                    await db.execute(
+                        "INSERT INTO messages(id,session_id,sequence,role,content,created_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (item["id"], item["session_id"], item["sequence"], item["role"],
+                         item["content"], item["created_at"]),
+                    )
+                await db.execute(
+                    "INSERT INTO desktop_history_imports VALUES(?,?,?,?,?)",
+                    (installation_id, digest, len(normalized_sessions),
+                     len(normalized_messages), now()),
+                )
+            except aiosqlite.IntegrityError as exc:
+                await db.rollback()
+                raise ValueError("desktop_history_conflict") from exc
+            await db.commit()
+        return {"installation_id": installation_id, "digest": digest,
+                "sessions": len(normalized_sessions), "messages": len(normalized_messages),
+                "imported": True}
+
+    async def desktop_history_import_status(self, installation_id: str) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            row = await (await db.execute(
+                "SELECT payload_digest,session_count,message_count FROM desktop_history_imports WHERE installation_id=?",
+                (installation_id,),
+            )).fetchone()
+        if row is None:
+            return None
+        return {"installation_id": installation_id, "digest": row[0],
+                "sessions": row[1], "messages": row[2], "imported": True}
+
+    async def append_visible_message(
+        self,
+        session_id: UUID,
+        *,
+        message_id: str,
+        role: str,
+        content: str,
+        created_at: str | None = None,
+        run_id: UUID | None = None,
+        message_kind: str | None = None,
+    ) -> VisibleMessageRecord:
+        if (not message_id or len(message_id) > 200 or role not in {"user", "assistant"}
+                or not isinstance(content, str)):
+            raise ValueError("invalid_visible_message")
+        if (run_id is None) != (message_kind is None):
+            raise ValueError("invalid_visible_message")
+        if message_kind is not None and (not message_kind or len(message_kind) > 64):
+            raise ValueError("invalid_visible_message")
+        timestamp = created_at or now()
+        async with aiosqlite.connect(self.path) as db:
+            await self._enable_foreign_keys(db)
+            await db.execute("BEGIN IMMEDIATE")
+            session = await (await db.execute(
+                "SELECT 1 FROM sessions WHERE id=?", (str(session_id),)
+            )).fetchone()
+            if session is None:
+                await db.rollback()
+                raise ValueError(f"Session not found: {session_id}")
+            if run_id is not None:
+                run = await (await db.execute(
+                    "SELECT session_id FROM runs WHERE id=?", (str(run_id),)
+                )).fetchone()
+                if run is None or run[0] != str(session_id):
+                    await db.rollback()
+                    raise ValueError("visible_message_run_mismatch")
+            existing = await (await db.execute(
+                "SELECT session_id,role,content,created_at,run_id,message_kind "
+                "FROM messages WHERE id=?", (message_id,)
+            )).fetchone()
+            if existing is not None:
+                same = (existing[0] == str(session_id) and existing[1] == role
+                        and existing[2] == content and existing[4] == (str(run_id) if run_id else None)
+                        and existing[5] == message_kind
+                        and (created_at is None or existing[3] == created_at))
+                await db.rollback()
+                if not same:
+                    raise ValueError("visible_message_conflict")
+                return (await self.get_visible_message(message_id))
+            row = await (await db.execute(
+                "SELECT COALESCE(MAX(sequence),0)+1 FROM messages WHERE session_id=?",
+                (str(session_id),)
+            )).fetchone()
+            sequence = row[0]
+            try:
+                await db.execute(
+                    "INSERT INTO messages(id,session_id,sequence,role,content,created_at,run_id,message_kind) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (message_id, str(session_id), sequence, role, content, timestamp,
+                     str(run_id) if run_id else None, message_kind),
+                )
+            except aiosqlite.IntegrityError as exc:
+                await db.rollback()
+                raise ValueError("visible_message_conflict") from exc
+            await db.commit()
+        return await self.get_visible_message(message_id)
+
+    async def get_visible_message(self, message_id: str) -> VisibleMessageRecord:
+        async with aiosqlite.connect(self.path) as db:
+            await self._enable_foreign_keys(db)
+            row = await (await db.execute(
+                "SELECT id,session_id,sequence,role,content,created_at,run_id,message_kind "
+                "FROM messages WHERE id=?", (message_id,)
+            )).fetchone()
+        if row is None:
+            raise ValueError("visible_message_not_found")
+        return VisibleMessageRecord(
+            id=row[0], session_id=UUID(row[1]), sequence=row[2], role=row[3],
+            content=row[4], created_at=parse_datetime(row[5]),
+            run_id=UUID(row[6]) if row[6] else None, message_kind=row[7],
+        )
+
+    async def list_visible_messages(
+        self, session_id: UUID, *, limit: int = 500, offset: int = 0
+    ) -> list[VisibleMessageRecord]:
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("invalid_message_page")
+        if await self.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        async with aiosqlite.connect(self.path) as db:
+            await self._enable_foreign_keys(db)
+            rows = await db.execute_fetchall(
+                "SELECT id,session_id,sequence,role,content,created_at,run_id,message_kind "
+                "FROM messages WHERE session_id=? ORDER BY sequence LIMIT ? OFFSET ?",
+                (str(session_id), limit, offset),
+            )
+        return [VisibleMessageRecord(
+            id=row[0], session_id=UUID(row[1]), sequence=row[2], role=row[3],
+            content=row[4], created_at=parse_datetime(row[5]),
+            run_id=UUID(row[6]) if row[6] else None, message_kind=row[7],
+        ) for row in rows]
 
     async def create_session(self, metadata: dict | None = None) -> UUID:
         ident = uuid4()
@@ -95,12 +338,22 @@ class SessionRepository:
     async def list_sessions(self, limit=50, offset=0):
         async with aiosqlite.connect(self.path) as db:
             rows = await db.execute_fetchall(
-                "SELECT id FROM sessions ORDER BY created_at, id LIMIT ? OFFSET ?", (limit, offset))
+                "SELECT id FROM sessions WHERE status != 'deleted' ORDER BY created_at, id LIMIT ? OFFSET ?", (limit, offset))
         sessions = [await self.get_session(UUID(row[0])) for row in rows]
         for session in sessions:
             if session is not None:
                 session.metadata.setdefault("title", "未命名对话")
         return sessions
+
+    async def delete_session(self, session_id: UUID):
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "UPDATE sessions SET status='deleted', updated_at=? WHERE id=? AND status!='deleted'",
+                (now(), str(session_id)),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("session_not_found")
+            await db.commit()
 
     async def set_default_workspace(self, session_id, workspace_id):
         async with aiosqlite.connect(self.path) as db:

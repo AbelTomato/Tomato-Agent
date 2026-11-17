@@ -21,6 +21,21 @@ from .steer import AssistantSteerRepository
 from .settlement import AssistantSettlementRepository
 
 
+def validate_changeset_commit_receipt(pending, receipt: dict) -> None:
+    proposed = pending.display_data.get("changeset", {})
+    expected_paths = [item.get("relative_path") for item in proposed.get("changes", [])]
+    files = receipt.get("files") if isinstance(receipt, dict) else None
+    if not isinstance(files, list):
+        raise RunRepositoryConflict("changeset_commit_unavailable")
+    receipt_paths = [item.get("relative_path") for item in files if isinstance(item, dict)]
+    if (receipt.get("status") != "completed"
+            or receipt.get("change_id") != pending.frozen_parameters.get("change_id")
+            or receipt.get("digest") != pending.frozen_parameters.get("digest")
+            or receipt_paths != expected_paths or len(receipt_paths) != len(files)
+            or any(item.get("status") != "applied" or item.get("error") is not None for item in files)):
+        raise RunRepositoryConflict("changeset_commit_unavailable")
+
+
 class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepository):
     def __init__(self, path: Path, *, clock: Clock | None = None) -> None:
         self.path = Path(path)
@@ -633,7 +648,11 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                 raise RunRepositoryConflict("action_not_allowed")
             if request.action == "resolve_side_effect":
                 return await self._resolve_assistant_side_effect(db, row, snapshot, pending, request, digest, now, recovery_validator)
-            if request.action not in {"provide_input", "reject_action", "approve_action", "bind_workspace"} or pending.action_type == "recovery":
+            if request.action not in {"provide_input", "reject_action", "approve_action", "bind_workspace", "authorize_project_read"} or pending.action_type == "recovery":
+                raise RunRepositoryConflict("action_not_allowed")
+            if request.action == "authorize_project_read" and pending.action_type != "project_read":
+                raise RunRepositoryConflict("action_not_allowed")
+            if pending.action_type == "project_read" and request.action not in {"authorize_project_read", "reject_action"}:
                 raise RunRepositoryConflict("action_not_allowed")
             if request.action == "provide_input":
                 if pending.action_type != "clarification":
@@ -670,15 +689,24 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                     raise RunRepositoryConflict("workspace_busy_unknown_outcome")
                 await db.execute("UPDATE task_runs SET workspace_id=? WHERE id=?", (workspace_id, str(run_id)))
             if request.action == "approve_action":
-                if pending.action_type != "confirmation" or confirmation_validator is None:
-                    raise RunRepositoryConflict("confirmation_handler_unavailable")
-                confirmation_validator(pending.model_copy(deep=True), dict(request.payload))
+                if pending.action_type == "confirmation":
+                    if confirmation_validator is None:
+                        raise RunRepositoryConflict("confirmation_handler_unavailable")
+                    confirmation_validator(pending.model_copy(deep=True), dict(request.payload))
+                elif pending.action_type == "changeset_approval":
+                    receipt = request.payload.get("commit_receipt")
+                    validate_changeset_commit_receipt(pending, receipt)
+                else:
+                    raise RunRepositoryConflict("action_not_allowed")
             state = dict(snapshot.harness_state)
             dynamic = dict(state.get("structured_state", {}))
             dynamic["workspace_id"] = workspace_id
+            action_payload = {"authorized": True} if request.action == "authorize_project_read" else request.payload
             dynamic["action_feedback"] = {"action_id": pending.action_id, "action": request.action,
-                "payload": request.payload, "target_capability": pending.target_capability,
+                "payload": action_payload, "target_capability": pending.target_capability,
                 "frozen_parameters": pending.frozen_parameters, "business_version": pending.business_version}
+            if request.action == "authorize_project_read":
+                dynamic["project_read_grant"] = request.payload["grant"]
             if request.action == "reject_action":
                 if pending.action_type == "workspace_binding":
                     dynamic["workspace_rejected"] = True
@@ -688,7 +716,7 @@ class ExecutionRepository(AssistantSteerRepository, AssistantSettlementRepositor
                         pending.target_capability: "user_rejected"}
             state["structured_state"] = dynamic
             messages = [*snapshot.messages, Message(role="user", content=json.dumps(
-                {"action": request.action, "payload": request.payload}, ensure_ascii=False))]
+                {"action": request.action, "payload": action_payload}, ensure_ascii=False))]
             saved = snapshot.model_copy(update={"phase": "ready_model", "pending_action": None,
                 "pending_decision": None, "pending_response": None, "harness_state": state,
                 "messages": messages, "workspace_id": workspace_id,
