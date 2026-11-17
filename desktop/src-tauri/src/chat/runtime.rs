@@ -45,7 +45,11 @@ impl ChatRuntime {
         input: SendInput,
         emit: impl Fn(&str, serde_json::Value),
         mut after_user_message: impl FnMut(&ChatMessage) -> Result<Option<MemoryContextInput>, String>,
-        mut after_completed_turn: impl FnMut(&ChatMessage, &ChatMessage, Option<&MemoryContextInput>) -> Result<(), String>,
+        mut after_completed_turn: impl FnMut(
+            &ChatMessage,
+            &ChatMessage,
+            Option<&MemoryContextInput>,
+        ) -> Result<(), String>,
     ) -> Result<(), String> {
         let SendInput {
             session_id,

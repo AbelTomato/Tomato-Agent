@@ -9,6 +9,9 @@ type Message = { id: string; session_id: string; role: 'user' | 'assistant'; con
 type Delta = { request_id: string; session_id: string; delta: string };
 type TaskEvent = { sequence: number; event_type: string; summary?: string; payload: Record<string, unknown> };
 type PendingAction = { action_id: string; reason: string; action_type?: string; allowed_actions: string[]; display_data: Record<string, unknown> };
+type ProposedChange = { relative_path: string; operation: 'add' | 'modify'; base_content: string | null; content: string; summary: string };
+type CommitInspection = { status: string; files: { relative_path: string; status: string; error: string | null }[] };
+type DiffRow = { kind: 'same' | 'added' | 'removed'; oldLine: number | null; newLine: number | null; text: string };
 type AgentTask = { run_id: string; session_id: string; kind: string; status: string; phase: string | null; version: number;
   result: { answer?: string; draft?: string; outline?: Record<string, unknown>; citations?: unknown[]; artifacts?: unknown[] } | null; error: { code?: string } | null;
   pending_action: PendingAction | null; capabilities: string[]; events?: TaskEvent[] };
@@ -23,19 +26,54 @@ type EditDialog = { kind: 'create-project'; rootPath: string } | { kind: 'rename
   | { kind: 'delete-project'; project: Project } | { kind: 'rename-session'; session: Session }
   | { kind: 'delete-session'; session: Session };
 
+function lineDiff(before: string, after: string): DiffRow[] | null {
+  const oldLines = before.split('\n');
+  const newLines = after.split('\n');
+  if ((oldLines.length + 1) * (newLines.length + 1) > 250_000) return null;
+  const columns = newLines.length + 1;
+  const lengths = new Uint32Array((oldLines.length + 1) * columns);
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      const index = oldIndex * columns + newIndex;
+      lengths[index] = oldLines[oldIndex] === newLines[newIndex]
+        ? lengths[(oldIndex + 1) * columns + newIndex + 1] + 1
+        : Math.max(lengths[(oldIndex + 1) * columns + newIndex], lengths[index + 1]);
+    }
+  }
+  const rows: DiffRow[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
+      rows.push({ kind: 'same', oldLine: oldIndex + 1, newLine: newIndex + 1, text: oldLines[oldIndex] });
+      oldIndex += 1;
+      newIndex += 1;
+    } else if (oldIndex < oldLines.length && (newIndex >= newLines.length
+      || lengths[(oldIndex + 1) * columns + newIndex] >= lengths[oldIndex * columns + newIndex + 1])) {
+      rows.push({ kind: 'removed', oldLine: oldIndex + 1, newLine: null, text: oldLines[oldIndex] });
+      oldIndex += 1;
+    } else {
+      rows.push({ kind: 'added', oldLine: null, newLine: newIndex + 1, text: newLines[newIndex] });
+      newIndex += 1;
+    }
+  }
+  return rows;
+}
+
 export function DesktopChatApp() {
   const [configured, setConfigured] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [historySource, setHistorySource] = useState<'rust' | 'python'>('rust');
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
+  const [commitInspections, setCommitInspections] = useState<Record<string, CommitInspection>>({});
   const [engineWorkspaces, setEngineWorkspaces] = useState<EngineWorkspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState('');
   const [input, setInput] = useState('');
   const [taskReply, setTaskReply] = useState('');
-  const [mode, setMode] = useState<'chat' | 'assistant' | 'writing'>('chat');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [settings, setSettings] = useState(false);
@@ -68,9 +106,12 @@ export function DesktopChatApp() {
   const activeSession = useRef<string | null>(null);
   const activeSendSession = useRef<string | null>(null);
   const activeGeneration = useRef<string | null>(null);
+  const pendingTaskActions = useRef(new Set<string>());
   const [hasOlder, setHasOlder] = useState(false);
   const activeTaskKey = agentTasks.filter(task => ['queued', 'running', 'waiting'].includes(task.status)).map(task => task.run_id).join(',');
   const syncedTaskReplies = useRef(new Set<string>());
+  const taskEventCursors = useRef(new Map<string, number>());
+  const taskEventHistory = useRef(new Map<string, TaskEvent[]>());
 
   useEffect(() => {
     const updateViewport = () => {
@@ -156,20 +197,38 @@ export function DesktopChatApp() {
       setError(event.payload.error);
       void refreshHistory(event.payload.session_id).catch(reason => setError(String(reason)));
     });
-    void Promise.all([invoke<Session[]>('desktop_chat_sessions'), invoke<Project[]>('desktop_chat_projects')]).then(async ([list, projectList]) => {
+    void Promise.all([invoke<string>('desktop_chat_history_source'), invoke<{ configured: boolean }>('desktop_chat_status'), invoke<Project[]>('desktop_chat_projects')]).then(async ([storedSource, status, projectList]) => {
+      if (!active) return;
+      let source: 'rust' | 'python' = storedSource === 'python' ? 'python' : 'rust';
+      if (source === 'rust' && status.configured) {
+        try {
+          await invoke('desktop_chat_migrate_history');
+          await invoke('desktop_chat_activate_python_history');
+          source = 'python';
+        } catch {
+          setNotice('历史迁移尚未完成，继续使用本地会话记录');
+        }
+      }
+      if (!active) return;
+      setHistorySource(source);
+      const list = source === 'python'
+        ? await invoke<Session[]>('desktop_runtime_sessions')
+        : await invoke<Session[]>('desktop_chat_sessions');
       if (!active) return;
       setSessions(list);
       setProjects(projectList);
-      const id = await invoke<string | null>('desktop_chat_latest_session');
+      const id = source === 'python'
+        ? await invoke<string | null>('desktop_runtime_latest_session')
+        : await invoke<string | null>('desktop_chat_latest_session');
       if (!active || !id) return;
-      await selectSession(id);
+      await selectSession(id, source);
     }).catch(reason => { if (active) setError(String(reason)); }).finally(() => { if (active) setInitializing(false); });
     return () => { active = false; void completed.then(stop => stop()); void cancelled.then(stop => stop()); void failed.then(stop => stop()); };
   }, []);
 
   async function refreshNavigation() {
     const [list, projectList] = await Promise.all([
-      invoke<Session[]>('desktop_chat_sessions'),
+      historySource === 'python' ? invoke<Session[]>('desktop_runtime_sessions') : invoke<Session[]>('desktop_chat_sessions'),
       invoke<Project[]>('desktop_chat_projects'),
     ]);
     setSessions(list);
@@ -177,12 +236,14 @@ export function DesktopChatApp() {
     return list;
   }
 
-  async function refreshHistory(id: string) {
+  async function refreshHistory(id: string, source = historySource) {
     const revision = ++historyRevision.current;
     try {
-      const history = await invoke<Message[]>('desktop_chat_history', { sessionId: id });
+      const history = source === 'python'
+        ? await invoke<Message[]>('desktop_runtime_history', { sessionId: id, offset: 0, limit: 500 })
+        : await invoke<Message[]>('desktop_chat_history', { sessionId: id });
       if (activeSession.current === id && historyRevision.current === revision) {
-        setMessages(history); setHasOlder(history.length >= 100);
+        setMessages(history); setHasOlder(source === 'python' ? history.length >= 500 : history.length >= 100);
         try {
           const response = await invoke<{ body: { contexts: MemoryTurnUse[] } }>('desktop_chat_memory_contexts', { sessionId: id });
           if (activeSession.current === id && historyRevision.current === revision) {
@@ -204,7 +265,7 @@ export function DesktopChatApp() {
     }
   }
 
-  async function refreshAgentTasks(id: string) {
+  async function refreshAgentTasks(id: string, source = historySource) {
     const revision = navigationRevision.current;
     const tasks = await invoke<AgentTask[]>('desktop_agent_session_tasks', { sessionId: id });
     if (activeSession.current !== id || navigationRevision.current !== revision) return;
@@ -221,10 +282,10 @@ export function DesktopChatApp() {
         syncedTaskReplies.current.add(task.run_id);
       }
     }
-    if (activeSession.current === id && navigationRevision.current === revision) await refreshHistory(id);
+    if (activeSession.current === id && navigationRevision.current === revision) await refreshHistory(id, source);
   }
 
-  async function selectSession(id: string) {
+  async function selectSession(id: string, source = historySource) {
     const revision = ++navigationRevision.current;
     if (activeSession.current !== id && busy) await invoke('desktop_chat_cancel').catch(() => undefined);
     if (revision !== navigationRevision.current) return;
@@ -238,9 +299,9 @@ export function DesktopChatApp() {
     setAgentTasks([]);
     setSelectedWorkspace('');
     try {
-      await invoke('desktop_chat_select_session', { sessionId: id });
+      if (source === 'rust') await invoke('desktop_chat_select_session', { sessionId: id });
       if (activeSession.current === id && revision === navigationRevision.current) {
-        await refreshAgentTasks(id);
+        await refreshAgentTasks(id, source);
       }
     } catch (reason) { if (activeSession.current === id && revision === navigationRevision.current) setError(String(reason)); }
   }
@@ -250,7 +311,9 @@ export function DesktopChatApp() {
     mutationPending.current = true; setWorking(true); setError('');
     try {
       if (busy) await invoke('desktop_chat_cancel');
-      const id = await invoke<string>('desktop_chat_create_session', { projectId: projectId ?? null });
+      const id = historySource === 'python'
+        ? await invoke<string>('desktop_runtime_create_session', { projectId: projectId ?? null })
+        : await invoke<string>('desktop_chat_create_session', { projectId: projectId ?? null });
       await refreshNavigation();
       ++navigationRevision.current;
       ++historyRevision.current;
@@ -286,7 +349,8 @@ export function DesktopChatApp() {
     mutationPending.current = true;
     setError(''); setWorking(true);
     try {
-      await invoke('desktop_chat_set_session_project', { input: { sessionId: session.id, projectId: projectId || null } });
+      if (historySource === 'python') await invoke('desktop_runtime_set_session_project', { sessionId: session.id, projectId: projectId || null });
+      else await invoke('desktop_chat_set_session_project', { input: { sessionId: session.id, projectId: projectId || null } });
       await refreshNavigation();
     } catch (reason) { setError(String(reason)); }
     finally { mutationPending.current = false; setWorking(false); }
@@ -305,10 +369,21 @@ export function DesktopChatApp() {
         case 'delete-project':
           await invoke('desktop_chat_delete_project', { projectId: dialog.project.id }); break;
         case 'rename-session':
-          await invoke('desktop_chat_rename_session', { sessionId: dialog.session.id, title: dialogValue }); break;
+          if (historySource === 'python') await invoke('desktop_runtime_rename_session', {
+            sessionId: dialog.session.id, title: dialogValue, expectedVersion: dialog.session.title_version ?? 0,
+          });
+          else await invoke('desktop_chat_rename_session', { sessionId: dialog.session.id, title: dialogValue });
+          break;
         case 'delete-session':
-          if (activeSession.current === dialog.session.id && busy) await invoke('desktop_chat_cancel');
-          const deletion = await invoke<{ pending_memory_sync: number }>('desktop_chat_delete_session', { sessionId: dialog.session.id });
+          if (activeSession.current === dialog.session.id && busy) {
+            if (historySource === 'python') {
+              const task = agentTasks.find(item => ['queued', 'running', 'waiting'].includes(item.status) && item.capabilities.includes('cancel'));
+              if (task) await actOnTask(task, 'cancel');
+            } else await invoke('desktop_chat_cancel');
+          }
+          const deletion = historySource === 'python'
+            ? (await invoke('desktop_runtime_delete_session', { sessionId: dialog.session.id }), { pending_memory_sync: 0 })
+            : await invoke<{ pending_memory_sync: number }>('desktop_chat_delete_session', { sessionId: dialog.session.id });
           if (deletion.pending_memory_sync > 0) { setMemorySyncPending(true); setNotice('对话已删除，记忆来源删除将在引擎连接后同步'); }
           if (activeSession.current === dialog.session.id) {
             ++navigationRevision.current; ++historyRevision.current;
@@ -331,12 +406,13 @@ export function DesktopChatApp() {
     const requestId = crypto.randomUUID();
     activeGeneration.current = requestId;
     activeSendSession.current = requestSession;
-    if (mode === 'chat') memoryRecallFailed.current = false;
+    const pythonRuntime = historySource === 'python';
+    if (!pythonRuntime) memoryRecallFailed.current = false;
     setInput(''); setError(''); setNotice(''); setBusy(true);
     try {
-      if (mode !== 'chat') {
+      if (pythonRuntime) {
         const task = await invoke<AgentTask>('desktop_agent_submit_task', {
-          input: { sessionId: requestSession, content, requestId, kind: mode },
+          input: { sessionId: requestSession, content, requestId, kind: 'assistant' },
         });
         if (activeSession.current === requestSession && activeGeneration.current === requestId) {
           setAgentTasks(current => [task, ...current.filter(item => item.run_id !== task.run_id)].slice(0, 10));
@@ -366,10 +442,17 @@ export function DesktopChatApp() {
       for (const runId of runIds) {
         try {
           const task = await invoke<AgentTask>('desktop_agent_task_status', { sessionId, runId });
-          const eventsResponse = await invoke<{ body: { events?: TaskEvent[] } }>('desktop_agent_task_events', {
-            sessionId, runId, after: 0,
+          const after = taskEventCursors.current.get(runId) ?? 0;
+          const eventsResponse = await invoke<{ body: { events?: TaskEvent[]; next_cursor?: number } }>('desktop_agent_task_events', {
+            sessionId, runId, after,
           });
-          task.events = eventsResponse.body.events ?? [];
+          const newEvents = eventsResponse.body.events ?? [];
+          taskEventCursors.current.set(runId, eventsResponse.body.next_cursor ?? newEvents.at(-1)?.sequence ?? after);
+          const previousEvents = taskEventHistory.current.get(runId) ?? [];
+          const knownSequences = new Set(previousEvents.map(item => item.sequence));
+          const mergedEvents = [...previousEvents, ...newEvents.filter(item => !knownSequences.has(item.sequence))];
+          taskEventHistory.current.set(runId, mergedEvents);
+          task.events = mergedEvents;
           if (!active || activeSession.current !== sessionId) return;
           setAgentTasks(current => current.some(item => item.run_id === runId)
             ? current.map(item => item.run_id === runId ? task : item)
@@ -391,6 +474,8 @@ export function DesktopChatApp() {
   }, [sessionId, activeTaskKey]);
 
   async function actOnTask(task: AgentTask, action: string, payload: Record<string, unknown> = {}) {
+    if (pendingTaskActions.current.has(task.run_id)) return;
+    pendingTaskActions.current.add(task.run_id);
     setError(''); setBusy(true);
     try {
       const response = await invoke<{ body: AgentTask }>('desktop_agent_task_action', {
@@ -403,6 +488,18 @@ export function DesktopChatApp() {
       setBusy(response.body.status === 'queued' || response.body.status === 'running');
       setTaskReply('');
     } catch (reason) { setError(String(reason)); setBusy(false); }
+    finally { pendingTaskActions.current.delete(task.run_id); }
+  }
+
+  async function inspectChangeset(task: AgentTask) {
+    setError('');
+    try {
+      const result = await invoke<CommitInspection>('desktop_agent_inspect_changeset', {
+        sessionId: activeSession.current,
+        runId: task.run_id,
+      });
+      setCommitInspections(current => ({ ...current, [task.run_id]: result }));
+    } catch (reason) { setError(String(reason)); }
   }
 
   async function loadOlder() {
@@ -424,6 +521,21 @@ export function DesktopChatApp() {
     try {
       await invoke('desktop_chat_configure', { input: { baseUrl, model, apiKey: apiKey || null } });
       setApiKey(''); setConfigured(true); setSettings(false);
+      if (historySource === 'rust') {
+        try {
+          await invoke('desktop_chat_migrate_history');
+          await invoke('desktop_chat_activate_python_history');
+          setHistorySource('python');
+          const list = await invoke<Session[]>('desktop_runtime_sessions');
+          setSessions(list);
+          if (activeSession.current) {
+            const history = await invoke<Message[]>('desktop_runtime_history', { sessionId: activeSession.current, offset: 0, limit: 500 });
+            setMessages(history);
+          } else if (list[0]) await selectSession(list[0].id, 'python');
+        } catch {
+          setNotice('历史迁移尚未完成，继续使用本地会话记录');
+        }
+      }
     } catch (reason) { setError(String(reason)); }
   }
 
@@ -585,6 +697,10 @@ export function DesktopChatApp() {
           })}
           {agentTasks.map(task => {
             const clarification = task.pending_action?.action_type === 'clarification';
+            const projectRead = task.pending_action?.action_type === 'project_read';
+            const authorizedProjectId = typeof task.pending_action?.display_data.project_id === 'string'
+              ? task.pending_action.display_data.project_id : sessions.find(session => session.id === sessionId)?.project_id;
+            const authorizedProjectName = projects.find(project => project.id === authorizedProjectId)?.name ?? '当前项目';
             const choices = Array.isArray(task.pending_action?.display_data.choices)
               ? task.pending_action.display_data.choices.filter((item): item is string => typeof item === 'string') : [];
             const answer = messages.some(message => message.id === `agent-assistant-${task.run_id}`)
@@ -592,6 +708,12 @@ export function DesktopChatApp() {
             const outlineValue = task.pending_action?.display_data.outline;
             const writingOutline = outlineValue && typeof outlineValue === 'object'
               ? outlineValue as Record<string, unknown> : null;
+            const changesetValue = task.pending_action?.display_data.changeset;
+            const changeset = changesetValue && typeof changesetValue === 'object'
+              ? changesetValue as { digest?: string; changes?: ProposedChange[] } : null;
+            const changesetDigest = typeof task.pending_action?.display_data.digest === 'string'
+              ? task.pending_action.display_data.digest : changeset?.digest;
+            const commitInspection = commitInspections[task.run_id];
             return <article className="desktop-agent-task" key={task.run_id} aria-label={task.kind === 'writing' ? '写作任务' : '助手任务'}>
               <header><strong>{task.kind === 'writing' ? '写作任务' : '助手任务'}</strong><span>{task.status === 'queued' ? '排队中' : task.status === 'running' ? '处理中' : task.status === 'waiting' ? '等待操作' : task.status === 'completed' ? '已完成' : task.status === 'cancelled' ? '已取消' : '未完成'}</span></header>
               {task.phase && <p className="desktop-agent-task-phase">{task.phase}</p>}
@@ -603,6 +725,56 @@ export function DesktopChatApp() {
                   <label>补充信息<textarea value={taskReply} onChange={event => setTaskReply(event.target.value)} rows={2} /></label>
                   <button type="submit" disabled={!taskReply.trim()}>提交回答</button>
                 </form>}
+                {projectRead && <div className="desktop-agent-project-read-approval">
+                  <p>允许本次任务读取“{authorizedProjectName}”中的文件吗？范围仅包括列出、搜索和读取，任务结束后失效。</p>
+                  <button type="button" onClick={() => void actOnTask(task, 'authorize_project_read', {})}>允许本次读取</button>
+                  <button type="button" onClick={() => void actOnTask(task, 'reject_action')}>拒绝</button>
+                </div>}
+                {task.pending_action.action_type === 'changeset_approval' && changeset && <section className="desktop-agent-changeset" aria-label="待审批文件修改">
+                  <header><strong>待审批修改</strong><code>{changesetDigest ?? ''}</code></header>
+                  {(changeset.changes ?? []).map(change => {
+                    const diffRows = change.operation === 'modify'
+                      ? lineDiff(change.base_content ?? '', change.content) : null;
+                    return <article key={change.relative_path}>
+                    <h4>{change.relative_path} <span>{change.operation === 'add' ? '新增' : '修改'}</span></h4>
+                    {change.summary && <p>{change.summary}</p>}
+                    {change.operation === 'modify' && <div className="desktop-agent-change-content">
+                      {diffRows ? <section className="desktop-agent-line-diff" aria-label="逐行差异">
+                        <strong>逐行差异</strong>
+                        <pre>{diffRows.map((row, index) => <span className={`desktop-agent-diff-row ${row.kind}`} key={`${row.kind}:${row.oldLine}:${row.newLine}:${index}`}>
+                          <span>{row.oldLine ?? ''}</span><span>{row.newLine ?? ''}</span><span>{row.kind === 'added' ? '+' : row.kind === 'removed' ? '-' : ' '}</span><code>{row.text || ' '}</code>
+                        </span>)}</pre>
+                      </section> : <>
+                        <section><strong>原内容</strong><pre>{change.base_content ?? ''}</pre></section>
+                        <section><strong>新内容</strong><pre>{change.content}</pre></section>
+                      </>}
+                    </div>}
+                    {change.operation === 'add' && <div className="desktop-agent-change-content">
+                      <section><strong>新增内容</strong><pre>{change.content}</pre></section>
+                    </div>}
+                    </article>;
+                  })}
+                  <p>完整内容均参与审批摘要；尚未确认写入。</p>
+                  <button type="button" onClick={() => void inspectChangeset(task)}>查看提交状态</button>
+                  {commitInspection && <div className="desktop-agent-commit-inspection" role="status">
+                    <strong>提交状态：{commitInspection.status === 'completed' ? '全部完成' : commitInspection.status === 'partial' ? '部分完成' : commitInspection.status === 'failed' ? '未写入' : commitInspection.status === 'needs_inspection' ? '需要检查' : commitInspection.status === 'not_started' ? '尚未开始' : commitInspection.status}</strong>
+                    {commitInspection.status === 'partial' &&
+                      <p>部分文件已经写入。再次批准会检查并继续未完成的文件；拒绝只会停止后续写入，已应用内容不会自动回滚。</p>}
+                    {commitInspection.status === 'failed' &&
+                      <p>当前没有文件写入成功。修复目标文件问题后可重新批准。</p>}
+                    {commitInspection.files.map(file => <p key={file.relative_path}>
+                      <code>{file.relative_path}</code> · {file.status}{file.error ? ` · ${file.error}` : ''}
+                    </p>)}
+                    {commitInspection.status === 'needs_inspection' &&
+                      <p>存在无法自动判断的文件；已应用内容不会自动回滚。拒绝将停止剩余修改。</p>}
+                  </div>}
+                  <button type="button" disabled={commitInspection?.status === 'needs_inspection' || commitInspection?.status === 'completed'} onClick={() => void actOnTask(task, 'approve_action')}>
+                    {commitInspection?.status === 'partial' ? '检查并继续剩余修改' : '批准并写入项目'}
+                  </button>
+                  <button type="button" onClick={() => void actOnTask(task, 'reject_action')}>
+                    {commitInspection && commitInspection.status !== 'not_started' ? '停止剩余修改' : '拒绝修改'}
+                  </button>
+                </section>}
                 {task.kind === 'writing' && task.pending_action.reason === 'confirm_outline' && writingOutline &&
                   <button type="button" onClick={() => void actOnTask(task, 'confirm_outline', { outline: writingOutline })}>确认提纲并生成草稿</button>}
                 {task.kind === 'writing' && task.pending_action.reason === 'save_draft' &&
@@ -643,16 +815,11 @@ export function DesktopChatApp() {
           })}
         </div>
         <div className="desktop-chat-feedback">{notice && <p role="status">{notice}</p>}{error && <p className="desktop-chat-error" role="alert">{error}</p>}</div>
-        <div className="desktop-chat-mode" role="group" aria-label="对话模式">
-          <button type="button" aria-pressed={mode === 'chat'} disabled={busy} onClick={() => setMode('chat')}>普通聊天</button>
-          <button type="button" aria-pressed={mode === 'assistant'} disabled={busy} onClick={() => setMode('assistant')}>助手任务</button>
-          <button type="button" aria-pressed={mode === 'writing'} disabled={busy} onClick={() => setMode('writing')}>写作</button>
-        </div>
         <form className="desktop-chat-composer" onSubmit={send}>
-          <textarea aria-label={mode === 'chat' ? '消息' : mode === 'writing' ? '写作主题' : '任务内容'} placeholder={!configured ? '请先配置模型' : mode === 'chat' ? '输入消息' : mode === 'writing' ? '描述写作主题' : '描述需要完成的任务'} value={input} onChange={event => setInput(event.target.value)} disabled={!configured || !sessionId || busy} />
-          {busy ? <button type="button" onClick={() => mode !== 'chat'
+          <textarea aria-label="消息" placeholder={!configured ? '请先配置模型' : '输入消息或描述需要完成的工作'} value={input} onChange={event => setInput(event.target.value)} disabled={!configured || !sessionId || busy} />
+          {busy ? <button type="button" onClick={() => historySource === 'python'
             ? (() => { const task = agentTasks.find(item => ['queued', 'running'].includes(item.status) && item.capabilities.includes('cancel')); if (task) void actOnTask(task, 'cancel'); })()
-            : void invoke('desktop_chat_cancel')}>{mode !== 'chat' ? '取消任务' : '停止'}</button> : <button type="submit" disabled={!configured || !sessionId || !input.trim()}>{mode === 'chat' ? '发送' : mode === 'writing' ? '开始写作' : '开始任务'}</button>}
+            : void invoke('desktop_chat_cancel')}>{historySource === 'python' ? '取消任务' : '停止'}</button> : <button type="submit" disabled={!configured || !sessionId || !input.trim()}>发送</button>}
         </form>
       </section>
       {dialog && <div className="desktop-chat-backdrop"><form className="desktop-chat-settings" role="dialog" aria-modal="true"

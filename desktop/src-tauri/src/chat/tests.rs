@@ -31,18 +31,115 @@ fn sqlite_history_survives_reopening_and_uses_utc_timestamps() {
 }
 
 #[test]
+fn history_migration_snapshot_preserves_session_message_ids_and_order_stably() {
+    let path = std::env::temp_dir().join(format!(
+        "desktop-history-snapshot-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let project_root =
+        std::env::temp_dir().join(format!("desktop-history-project-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&project_root).unwrap();
+    let store = ChatStore::open(&path).unwrap();
+    let project = store
+        .create_project(project_root.to_str().unwrap(), Some("Project"))
+        .unwrap();
+    let session = store
+        .create_session_in_project("历史", Some(&project.id))
+        .unwrap();
+    store
+        .append_message_with_id("user-message", &session, "user", "你好")
+        .unwrap();
+    store
+        .append_message_with_id("assistant-message", &session, "assistant", "你好。／")
+        .unwrap();
+
+    let first = store.history_migration_snapshot().unwrap();
+    let second = store.history_migration_snapshot().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first["sessions"][0]["id"], session);
+    assert_eq!(first["sessions"][0]["project_id"], project.id);
+    assert_eq!(first["messages"][0]["id"], "user-message");
+    assert_eq!(first["messages"][1]["id"], "assistant-message");
+    assert_eq!(first["messages"][1]["sequence"], 2);
+    assert_eq!(first["messages"][1]["content"], "你好。／");
+    assert_eq!(first["source_digest"].as_str().unwrap().len(), 64);
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir_all(project_root);
+}
+
+#[test]
+fn history_digest_matches_the_python_canonical_json_contract() {
+    let payload = serde_json::json!({
+        "sessions": [{
+            "id": "00000000-0000-0000-0000-000000000201",
+            "title": "历史会话",
+            "created_at": "2026-11-01T00:00:00+00:00",
+            "project_id": "project-1",
+        }],
+        "messages": [{
+            "id": "message-1",
+            "session_id": "00000000-0000-0000-0000-000000000201",
+            "sequence": 1,
+            "role": "user",
+            "content": "历史内容",
+            "created_at": "2026-11-01T00:00:01+00:00",
+        }],
+    });
+    assert_eq!(
+        super::store::canonical_history_digest(&payload).unwrap(),
+        "fca8c67f07208a4a4cf3149faf8cf7a23b3279257d5b46ef5aad3eea8195086c",
+    );
+}
+
+#[test]
+fn history_source_switch_is_persistent_and_bound_to_installation() {
+    let path = std::env::temp_dir().join(format!(
+        "desktop-history-source-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let installation_id;
+    {
+        let store = ChatStore::open(&path).unwrap();
+        assert_eq!(store.history_source().unwrap(), "rust");
+        installation_id = store.history_migration_snapshot().unwrap()["installation_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(store
+            .mark_history_migrated("another-installation", &"a".repeat(64))
+            .is_err());
+        store
+            .mark_history_migrated(&installation_id, &"a".repeat(64))
+            .unwrap();
+    }
+    let store = ChatStore::open(&path).unwrap();
+    assert_eq!(store.history_source().unwrap(), "python");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn engine_session_mapping_and_task_messages_survive_reopening_idempotently() {
     let path = std::env::temp_dir().join(format!("desktop-engine-map-{}.db", uuid::Uuid::new_v4()));
     let desktop_session;
     {
         let store = ChatStore::open(&path).unwrap();
         desktop_session = store.create_session("Task session").unwrap();
-        store.bind_engine_session(&desktop_session, "engine-session").unwrap();
-        store.append_message_with_id("task-run-user", &desktop_session, "user", "run this").unwrap();
-        store.append_message_with_id("task-run-user", &desktop_session, "user", "duplicate").unwrap();
+        store
+            .bind_engine_session(&desktop_session, "engine-session")
+            .unwrap();
+        store
+            .append_message_with_id("task-run-user", &desktop_session, "user", "run this")
+            .unwrap();
+        store
+            .append_message_with_id("task-run-user", &desktop_session, "user", "duplicate")
+            .unwrap();
     }
     let store = ChatStore::open(&path).unwrap();
-    assert_eq!(store.engine_session(&desktop_session).unwrap().as_deref(), Some("engine-session"));
+    assert_eq!(
+        store.engine_session(&desktop_session).unwrap().as_deref(),
+        Some("engine-session")
+    );
     let messages = store.messages(&desktop_session).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "run this");
@@ -257,7 +354,9 @@ fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
     drop(store);
     let store = ChatStore::open(&path).unwrap();
     assert!(store.has_pending_memory_source_deletions().unwrap());
-    store.acknowledge_memory_source_deletion(&request_id).unwrap();
+    store
+        .acknowledge_memory_source_deletion(&request_id)
+        .unwrap();
     assert!(!store.has_pending_memory_source_deletions().unwrap());
     assert!(store.ensure_memory_reads_allowed().is_ok());
     assert_eq!(
@@ -277,10 +376,15 @@ fn sessions_can_be_listed_renamed_and_deleted_with_cascading_history() {
 
 #[test]
 fn deleting_chat_does_not_create_memory_outbox_when_memory_is_disabled() {
-    let path = std::env::temp_dir().join(format!("desktop-chat-no-memory-{}.db", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!(
+        "desktop-chat-no-memory-{}.db",
+        uuid::Uuid::new_v4()
+    ));
     let store = ChatStore::open(&path).unwrap();
     let session = store.create_session("No memory").unwrap();
-    store.append_message(&session, "user", "ordinary chat").unwrap();
+    store
+        .append_message(&session, "user", "ordinary chat")
+        .unwrap();
     store.delete_session(&session).unwrap();
     assert!(!store.has_pending_memory_source_deletions().unwrap());
     let _ = std::fs::remove_file(path);
@@ -543,35 +647,48 @@ fn memory_hooks_run_after_user_persistence_and_only_after_completed_turn() {
     let user_seen = Mutex::new(None::<ChatMessage>);
     let turn_seen = Mutex::new(None::<(ChatMessage, ChatMessage)>);
     let completion = Mutex::new(None::<serde_json::Value>);
-    runtime.send_with_memory_hooks(
-        SendInput { session_id: session.clone(), content: "remember this".into(), request_id: "memory-hook".into() },
-        |name, payload| {
-            if name == "desktop_chat_completed" { *completion.lock().unwrap() = Some(payload); }
-        },
-        |user| {
-            assert_eq!(user.role, "user");
-            assert_eq!(user.content, "remember this");
-            *user_seen.lock().unwrap() = Some(user.clone());
-            Ok(None)
-        },
-        |user, assistant, _memory_context| {
-            assert_eq!(assistant.role, "assistant");
-            assert_eq!(assistant.content, "answer");
-            *turn_seen.lock().unwrap() = Some((user.clone(), assistant.clone()));
-            Ok(())
-        },
-    ).unwrap();
+    runtime
+        .send_with_memory_hooks(
+            SendInput {
+                session_id: session.clone(),
+                content: "remember this".into(),
+                request_id: "memory-hook".into(),
+            },
+            |name, payload| {
+                if name == "desktop_chat_completed" {
+                    *completion.lock().unwrap() = Some(payload);
+                }
+            },
+            |user| {
+                assert_eq!(user.role, "user");
+                assert_eq!(user.content, "remember this");
+                *user_seen.lock().unwrap() = Some(user.clone());
+                Ok(None)
+            },
+            |user, assistant, _memory_context| {
+                assert_eq!(assistant.role, "assistant");
+                assert_eq!(assistant.content, "answer");
+                *turn_seen.lock().unwrap() = Some((user.clone(), assistant.clone()));
+                Ok(())
+            },
+        )
+        .unwrap();
     assert!(user_seen.lock().unwrap().is_some());
-    assert_eq!(turn_seen.lock().unwrap().as_ref().unwrap().0.id,
-               user_seen.lock().unwrap().as_ref().unwrap().id);
-    assert_eq!(completion.lock().unwrap().as_ref().unwrap()["assistant_message_id"],
-               turn_seen.lock().unwrap().as_ref().unwrap().1.id);
+    assert_eq!(
+        turn_seen.lock().unwrap().as_ref().unwrap().0.id,
+        user_seen.lock().unwrap().as_ref().unwrap().id
+    );
+    assert_eq!(
+        completion.lock().unwrap().as_ref().unwrap()["assistant_message_id"],
+        turn_seen.lock().unwrap().as_ref().unwrap().1.id
+    );
     assert_eq!(runtime.store.messages(&session).unwrap().len(), 2);
 }
 
 #[test]
 fn memory_source_ingestion_outbox_is_persistent_and_idempotent() {
-    let path = std::env::temp_dir().join(format!("memory-ingest-outbox-{}.db", uuid::Uuid::new_v4()));
+    let path =
+        std::env::temp_dir().join(format!("memory-ingest-outbox-{}.db", uuid::Uuid::new_v4()));
     let payload = serde_json::json!({
         "source_system":"tomato-desktop",
         "source_installation_id":"install-1",
@@ -582,7 +699,10 @@ fn memory_source_ingestion_outbox_is_persistent_and_idempotent() {
     {
         let store = ChatStore::open(&path).unwrap();
         request_id = store.enqueue_memory_source_ingestion(&payload).unwrap();
-        assert_eq!(store.enqueue_memory_source_ingestion(&payload).unwrap(), request_id);
+        assert_eq!(
+            store.enqueue_memory_source_ingestion(&payload).unwrap(),
+            request_id
+        );
         assert_eq!(store.pending_memory_source_ingestions(10).unwrap().len(), 1);
     }
     let store = ChatStore::open(&path).unwrap();
@@ -590,39 +710,71 @@ fn memory_source_ingestion_outbox_is_persistent_and_idempotent() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].0, request_id);
     assert_eq!(pending[0].1, payload);
-    store.acknowledge_memory_source_ingestion(&request_id).unwrap();
-    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    store
+        .acknowledge_memory_source_ingestion(&request_id)
+        .unwrap();
+    assert!(store
+        .pending_memory_source_ingestions(10)
+        .unwrap()
+        .is_empty());
     let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn chat_memory_context_persists_only_version_references_and_forget_clears_them() {
-    let path = std::env::temp_dir().join(format!("desktop-chat-memory-context-{}.db", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!(
+        "desktop-chat-memory-context-{}.db",
+        uuid::Uuid::new_v4()
+    ));
     let session;
     let assistant_id;
     let item_id = uuid::Uuid::new_v4().to_string();
     {
         let store = ChatStore::open(&path).unwrap();
         session = store.create_session("Memory use").unwrap();
-        store.append_message(&session, "assistant", "answer").unwrap();
+        store
+            .append_message(&session, "assistant", "answer")
+            .unwrap();
         assistant_id = store.messages(&session).unwrap()[0].id.clone();
-        store.record_memory_chat_context(&MemoryChatContext {
-            assistant_message_id: assistant_id.clone(), session_id: session.clone(), generation: 4,
-            retrieval_mode: "hybrid".into(), items: vec![MemoryReference { item_id: item_id.clone(), version: 2 }],
-        }).unwrap();
+        store
+            .record_memory_chat_context(&MemoryChatContext {
+                assistant_message_id: assistant_id.clone(),
+                session_id: session.clone(),
+                generation: 4,
+                retrieval_mode: "hybrid".into(),
+                items: vec![MemoryReference {
+                    item_id: item_id.clone(),
+                    version: 2,
+                }],
+            })
+            .unwrap();
     }
     let store = ChatStore::open(&path).unwrap();
     let contexts = store.memory_chat_contexts(&session).unwrap();
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].assistant_message_id, assistant_id);
-    assert_eq!(contexts[0].items, vec![MemoryReference { item_id: item_id.clone(), version: 2 }]);
+    assert_eq!(
+        contexts[0].items,
+        vec![MemoryReference {
+            item_id: item_id.clone(),
+            version: 2
+        }]
+    );
     store.enqueue_memory_item_forget(&item_id, 2).unwrap();
     assert!(store.memory_chat_contexts(&session).unwrap().is_empty());
     let other_item = uuid::Uuid::new_v4().to_string();
-    store.record_memory_chat_context(&MemoryChatContext {
-        assistant_message_id: assistant_id, session_id: session.clone(), generation: 5,
-        retrieval_mode: "keyword".into(), items: vec![MemoryReference { item_id: other_item, version: 1 }],
-    }).unwrap();
+    store
+        .record_memory_chat_context(&MemoryChatContext {
+            assistant_message_id: assistant_id,
+            session_id: session.clone(),
+            generation: 5,
+            retrieval_mode: "keyword".into(),
+            items: vec![MemoryReference {
+                item_id: other_item,
+                version: 1,
+            }],
+        })
+        .unwrap();
     store.enqueue_memory_clear("windows-local", 5).unwrap();
     assert!(store.memory_chat_contexts(&session).unwrap().is_empty());
     let _ = std::fs::remove_file(path);
@@ -638,7 +790,10 @@ fn memory_source_ingestion_rejects_oversized_message_without_truncation() {
         "messages":[{"message_id":"user-1","role":"user","content":"x".repeat(6001),"revision":1}]
     });
     assert!(store.enqueue_memory_source_ingestion(&payload).is_err());
-    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    assert!(store
+        .pending_memory_source_ingestions(10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -646,7 +801,9 @@ fn disabling_memory_cancels_and_erases_unsubmitted_source_snapshots() {
     let store = ChatStore::open(Path::new(":memory:")).unwrap();
     store.set_memory_enabled(true).unwrap();
     let session = store.create_session("Disable memory").unwrap();
-    let user = store.append_message(&session, "user", "我偏好中文").unwrap();
+    let user = store
+        .append_message(&session, "user", "我偏好中文")
+        .unwrap();
     let payload = serde_json::json!({
         "source_system":"tomato-desktop",
         "source_installation_id":store.memory_installation_id().unwrap(),
@@ -655,7 +812,10 @@ fn disabling_memory_cancels_and_erases_unsubmitted_source_snapshots() {
     });
     store.enqueue_memory_source_ingestion(&payload).unwrap();
     store.set_memory_enabled(false).unwrap();
-    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    assert!(store
+        .pending_memory_source_ingestions(10)
+        .unwrap()
+        .is_empty());
     assert!(!store.memory_enabled().unwrap());
 }
 
@@ -664,7 +824,9 @@ fn deleting_session_cancels_and_erases_queued_ingestion_before_source_tombstone_
     let store = ChatStore::open(Path::new(":memory:")).unwrap();
     store.set_memory_enabled(true).unwrap();
     let session = store.create_session("Delete queued memory").unwrap();
-    let user = store.append_message(&session, "user", "记住我的长期安排").unwrap();
+    let user = store
+        .append_message(&session, "user", "记住我的长期安排")
+        .unwrap();
     let installation = store.memory_installation_id().unwrap();
     let payload = serde_json::json!({
         "source_system":"tomato-desktop", "source_installation_id":installation,
@@ -673,7 +835,10 @@ fn deleting_session_cancels_and_erases_queued_ingestion_before_source_tombstone_
     });
     store.enqueue_memory_source_ingestion(&payload).unwrap();
     store.delete_session(&session).unwrap();
-    assert!(store.pending_memory_source_ingestions(10).unwrap().is_empty());
+    assert!(store
+        .pending_memory_source_ingestions(10)
+        .unwrap()
+        .is_empty());
     assert_eq!(store.pending_memory_source_deletions(10).unwrap().len(), 1);
 }
 
@@ -682,7 +847,9 @@ fn deleting_after_memory_was_disabled_still_tombstones_previously_synced_sources
     let store = ChatStore::open(Path::new(":memory:")).unwrap();
     store.set_memory_enabled(true).unwrap();
     let session = store.create_session("Previously remembered").unwrap();
-    let user = store.append_message(&session, "user", "我偏好中文").unwrap();
+    let user = store
+        .append_message(&session, "user", "我偏好中文")
+        .unwrap();
     let payload = serde_json::json!({
         "source_system":"tomato-desktop",
         "source_installation_id":store.memory_installation_id().unwrap(),
@@ -698,10 +865,18 @@ fn deleting_after_memory_was_disabled_still_tombstones_previously_synced_sources
 
 #[test]
 fn explicit_memory_intent_detection_requires_a_direct_prefix() {
-    assert!(super::commands::is_explicit_memory_intent("记住我喜欢中文回答"));
-    assert!(super::commands::is_explicit_memory_intent("Please remember that I prefer concise answers"));
-    assert!(!super::commands::is_explicit_memory_intent("不要记住我的临时安排"));
-    assert!(!super::commands::is_explicit_memory_intent("你还记得我喜欢什么吗？"));
+    assert!(super::commands::is_explicit_memory_intent(
+        "记住我喜欢中文回答"
+    ));
+    assert!(super::commands::is_explicit_memory_intent(
+        "Please remember that I prefer concise answers"
+    ));
+    assert!(!super::commands::is_explicit_memory_intent(
+        "不要记住我的临时安排"
+    ));
+    assert!(!super::commands::is_explicit_memory_intent(
+        "你还记得我喜欢什么吗？"
+    ));
 }
 
 #[test]

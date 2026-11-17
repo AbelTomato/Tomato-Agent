@@ -42,7 +42,7 @@ const s1 = { id: 's1', title: '项目对话', project_id: 'p1' };
 const s2 = { id: 's2', title: '独立对话', project_id: null };
 async function setup(overrides = {}) {
   slots = []; listeners = {}; calls = [];
-  handler = (name, args) => name in overrides ? overrides[name](args) : ({ desktop_chat_status: { configured: false }, desktop_chat_sessions: [s1, s2], desktop_chat_projects: [p1], desktop_chat_latest_session: 's1', desktop_chat_history: [{ id: args?.sessionId, role: 'user', content: `history ${args?.sessionId}` }], desktop_agent_session_tasks: [] })[name];
+  handler = (name, args) => name in overrides ? overrides[name](args) : ({ desktop_chat_history_source: 'rust', desktop_chat_status: { configured: false }, desktop_chat_sessions: [s1, s2], desktop_chat_projects: [p1], desktop_chat_latest_session: 's1', desktop_chat_history: [{ id: args?.sessionId, role: 'user', content: `history ${args?.sessionId}` }], desktop_agent_session_tasks: [] })[name];
   render(); await flush(); return render();
 }
 test('navigation groups chats, keeps orphans visible, and forwards create/select/move/delete actions', () => {
@@ -248,7 +248,7 @@ test('memory export invokes the scoped export command and downloads JSON explici
 
 test('late events from an earlier generation cannot alter the current conversation', async () => {
   let finish;
-  let tree = await setup({ desktop_chat_status: () => ({ configured: true }), desktop_chat_send: () => new Promise(resolve => { finish = resolve; }) });
+  let tree = await setup({ desktop_chat_status: () => ({ configured: true }), desktop_chat_migrate_history: () => Promise.reject('migration unavailable'), desktop_chat_send: () => new Promise(resolve => { finish = resolve; }) });
   ofType(tree, 'textarea')[0].props.onChange({ target: { value: 'question' } });
   tree = render();
   const composer = ofType(tree, 'form').find(node => node.props.className === 'desktop-chat-composer');
@@ -262,13 +262,12 @@ test('late events from an earlier generation cannot alter the current conversati
   finish(); await sending;
 });
 
-test('assistant mode submits through the managed engine with the selected desktop session', async () => {
-  let tree = await setup({ desktop_chat_status: () => ({ configured: true }), desktop_agent_submit_task: () => ({
+test('the Python history source uses one composer and sends every input to the Runtime', async () => {
+  let tree = await setup({ desktop_chat_history_source: () => 'python', desktop_runtime_sessions: () => [s1, s2], desktop_runtime_latest_session: () => 's1', desktop_runtime_history: () => [], desktop_chat_status: () => ({ configured: true }), desktop_agent_submit_task: () => ({
     run_id: 'run-1', session_id: 'engine-session', kind: 'assistant', status: 'queued', version: 0,
     phase: 'ready_model', capabilities: ['cancel'], result: null, pending_action: null, error: null,
   }), desktop_agent_task_status: () => ({ run_id: 'run-1', session_id: 'engine-session', kind: 'assistant', status: 'queued', version: 0, phase: 'ready_model', capabilities: ['cancel'], result: null, pending_action: null, error: null }), desktop_agent_task_events: () => ({ body: { events: [] } }) });
-  const modeButton = button(tree, '助手任务'); modeButton.props.onClick(); tree = render();
-  ofType(tree, 'textarea').find(node => node.props['aria-label'] === '任务内容').props.onChange({ target: { value: '总结这个项目' } });
+  ofType(tree, 'textarea').find(node => node.props['aria-label'] === '消息').props.onChange({ target: { value: '总结这个项目' } });
   tree = render();
   const composer = ofType(tree, 'form').find(node => node.props.className === 'desktop-chat-composer');
   await composer.props.onSubmit(event); tree = render();
@@ -276,23 +275,36 @@ test('assistant mode submits through the managed engine with the selected deskto
   assert.deepEqual(call[1].input, { sessionId: 's1', content: '总结这个项目', requestId: call[1].input.requestId, kind: 'assistant' });
   assert.match(call[1].input.requestId, /^[0-9a-f-]{36}$/);
   assert.match(textOf(tree), /助手任务.*排队中/);
+  assert.equal(button(tree, '普通聊天'), undefined);
+  assert.equal(button(tree, '写作'), undefined);
+  assert.equal(calls.some(([name]) => name === 'desktop_chat_send'), false);
   assert.equal(button(tree, '取消任务') !== undefined, true);
 });
 
-test('writing mode exposes versioned outline and draft save confirmations', async () => {
+test('history migrates before Python becomes active and failures retain Rust as the source', async () => {
+  let tree = await setup({ desktop_chat_status: () => ({ configured: true }),
+    desktop_chat_migrate_history: () => ({ imported: true }), desktop_chat_activate_python_history: () => ({}),
+    desktop_runtime_sessions: () => [s1], desktop_runtime_latest_session: () => 's1', desktop_runtime_history: () => [] });
+  await flush(); tree = render();
+  assert.ok(calls.some(([name]) => name === 'desktop_chat_migrate_history'));
+  assert.ok(calls.some(([name]) => name === 'desktop_chat_activate_python_history'));
+  assert.ok(calls.some(([name]) => name === 'desktop_runtime_sessions'));
+
+  tree = await setup({ desktop_chat_status: () => ({ configured: true }),
+    desktop_chat_migrate_history: () => Promise.reject('migration failed') });
+  await flush(); tree = render();
+  assert.ok(calls.some(([name]) => name === 'desktop_chat_sessions'));
+  assert.equal(calls.some(([name]) => name === 'desktop_chat_activate_python_history'), false);
+  assert.match(textOf(tree), /历史迁移尚未完成/);
+});
+
+test('legacy writing tasks remain actionable without a composer mode', async () => {
   const waiting = { run_id: 'write-run', session_id: 'engine-session', kind: 'writing', status: 'waiting', version: 2,
     phase: 'waiting', capabilities: ['confirm_outline', 'cancel'], result: { outline: { sections: ['A'] } }, error: null,
     pending_action: { action_id: 'outline-2', reason: 'confirm_outline', allowed_actions: ['confirm_outline', 'cancel'],
       display_data: { outline: { sections: ['A'] } } } };
-  let tree = await setup({ desktop_chat_status: () => ({ configured: true }),
-    desktop_agent_submit_task: input => ({ ...waiting, status: 'queued', submitted: input }),
+  let tree = await setup({ desktop_chat_status: () => ({ configured: false }),
     desktop_agent_task_action: input => ({ body: { ...waiting, status: 'queued', version: 3, action: input.input } }) });
-  const writingMode = button(tree, '写作'); writingMode.props.onClick(); tree = render();
-  ofType(tree, 'textarea').find(node => node.props['aria-label'] === '写作主题').props.onChange({ target: { value: '主题' } });
-  tree = render();
-  const composer = ofType(tree, 'form').find(node => node.props.className === 'desktop-chat-composer');
-  await composer.props.onSubmit({ preventDefault() {} }); tree = render();
-  assert.deepEqual(calls.find(([name]) => name === 'desktop_agent_submit_task')[1].input.kind, 'writing');
   tree = await setup({ desktop_agent_session_tasks: () => [waiting], desktop_agent_task_status: () => waiting,
     desktop_agent_task_events: () => ({ body: { events: [] } }), desktop_agent_task_action: input => ({ body: { ...waiting, status: 'queued', action: input.input } }) });
   await flush(); tree = render();
@@ -363,4 +375,47 @@ test('waiting assistant task displays clarification and submits the versioned an
   assert.deepEqual(call[1].input, { action_id: 'action-3', action: 'provide_input', expected_version: 3,
     client_request_id: call[1].input.client_request_id, payload: { message: '简要' } });
   assert.match(call[1].input.client_request_id, /^[0-9a-f-]{36}$/);
+});
+
+test('changeset approval and rejection submit only the explicit versioned UI action', async () => {
+  const changeset = { change_id: 'change-1', session_id: 'engine-session', run_id: '9a897cdc-0bf1-47cc-8b4a-6e85ce278232',
+    project_id: 'p1', authorization_version: 'grant-digest', changes: [{ relative_path: 'src/app.py', operation: 'add',
+      expected_old_sha256: null, base_content: null, content: 'print("ok")\n', summary: 'Add entry point' }] };
+  const waiting = { run_id: changeset.run_id, session_id: 'engine-session', kind: 'assistant', status: 'waiting', version: 7,
+    phase: 'waiting', capabilities: ['approve_action', 'reject_action'], result: null, error: null,
+    pending_action: { action_id: 'changeset-action-7', action_type: 'changeset_approval', reason: '等待文件修改审批',
+      allowed_actions: ['approve_action', 'reject_action'], display_data: { changeset, digest: 'd'.repeat(64) } } };
+  let finishAction;
+  let tree = await setup({ desktop_chat_history_source: () => 'python', desktop_runtime_sessions: () => [s1],
+    desktop_runtime_latest_session: () => 's1', desktop_runtime_history: () => [], desktop_chat_projects: () => [{ ...p1, available: true }],
+    desktop_agent_session_tasks: () => [waiting], desktop_agent_task_status: () => waiting,
+    desktop_agent_task_events: () => ({ body: { events: [] } }),
+    desktop_agent_task_action: () => new Promise(resolve => { finishAction = resolve; }) });
+  await flush(); await flush(); tree = render();
+  assert.match(textOf(tree), /print\("ok"\)/);
+  const approve = button(tree, '批准并写入项目');
+  assert.ok(approve);
+  approve.props.onClick();
+  approve.props.onClick();
+  await flush();
+  const actionCalls = calls.filter(([name]) => name === 'desktop_agent_task_action');
+  assert.equal(actionCalls.length, 1);
+  assert.equal(actionCalls[0][1].runId, waiting.run_id);
+  assert.deepEqual({ ...actionCalls[0][1].input, client_request_id: 'generated' }, {
+    action_id: 'changeset-action-7', action: 'approve_action', expected_version: 7,
+    client_request_id: 'generated', payload: {},
+  });
+  finishAction({ body: { ...waiting, status: 'completed', pending_action: null } });
+  await flush();
+
+  tree = await setup({ desktop_chat_history_source: () => 'python', desktop_runtime_sessions: () => [s1],
+    desktop_runtime_latest_session: () => 's1', desktop_runtime_history: () => [], desktop_chat_projects: () => [{ ...p1, available: true }],
+    desktop_agent_session_tasks: () => [waiting], desktop_agent_task_status: () => waiting,
+    desktop_agent_task_events: () => ({ body: { events: [] } }),
+    desktop_agent_task_action: ({ input }) => ({ body: { ...waiting, status: 'completed', action: input } }) });
+  await flush(); await flush(); tree = render();
+  await button(tree, '拒绝修改').props.onClick();
+  const rejection = calls.find(([name]) => name === 'desktop_agent_task_action');
+  assert.equal(rejection[1].input.action, 'reject_action');
+  assert.equal(rejection[1].input.action_id, 'changeset-action-7');
 });

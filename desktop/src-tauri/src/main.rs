@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod chat;
+mod desktop_bridge;
 
 mod engine;
 
@@ -11,6 +12,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             chat::desktop_chat_status,
+            chat::desktop_chat_history_source,
             chat::desktop_chat_pick_project_directory,
             chat::desktop_chat_projects,
             chat::desktop_chat_create_project,
@@ -25,6 +27,15 @@ fn main() {
             chat::desktop_chat_rename_session,
             chat::desktop_chat_delete_session,
             chat::desktop_chat_history,
+            engine::desktop_chat_migrate_history,
+            engine::desktop_chat_activate_python_history,
+            engine::desktop_runtime_sessions,
+            engine::desktop_runtime_history,
+            engine::desktop_runtime_latest_session,
+            engine::desktop_runtime_create_session,
+            engine::desktop_runtime_rename_session,
+            engine::desktop_runtime_set_session_project,
+            engine::desktop_runtime_delete_session,
             chat::desktop_chat_history_page,
             chat::desktop_chat_older_history,
             chat::desktop_chat_latest_session,
@@ -50,6 +61,7 @@ fn main() {
             engine::desktop_agent_session_tasks,
             engine::desktop_agent_task_status,
             engine::desktop_agent_task_action,
+            engine::desktop_agent_inspect_changeset,
             engine::desktop_agent_task_events,
             engine::desktop_agent_workspaces,
             engine::desktop_agent_register_workspace,
@@ -86,14 +98,25 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if arguments.first().is_some_and(|argument| argument == "--desktop-task-probe-report") {
-        let Some(output) = arguments.get(1) else { std::process::exit(2); };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-task-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
         let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
             std::process::exit(2);
         };
-        let Some(chat) = app.try_state::<chat::ChatRuntime>() else { std::process::exit(2); };
-        let result = engine::write_task_probe_report(&app.handle(), engine.as_ref(), chat.inner(),
-            &std::path::PathBuf::from(output));
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_task_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
         if let Err(error) = result {
             eprintln!("Desktop task probe failed: {error}");
             let _ = engine.stop();
@@ -101,14 +124,51 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if arguments.first().is_some_and(|argument| argument == "--desktop-writing-probe-report") {
-        let Some(output) = arguments.get(1) else { std::process::exit(2); };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-changeset-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
         let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
             std::process::exit(2);
         };
-        let Some(chat) = app.try_state::<chat::ChatRuntime>() else { std::process::exit(2); };
-        let result = engine::write_writing_probe_report(&app.handle(), engine.as_ref(), chat.inner(),
-            &std::path::PathBuf::from(output));
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_changeset_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
+        if let Err(error) = result {
+            eprintln!("Desktop changeset probe failed: {error}");
+            let _ = engine.stop();
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-writing-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
+        let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
+            std::process::exit(2);
+        };
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_writing_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
         if let Err(error) = result {
             eprintln!("Desktop writing probe failed: {error}");
             let _ = engine.stop();
@@ -116,14 +176,25 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if arguments.first().is_some_and(|argument| argument == "--desktop-cancel-probe-report") {
-        let Some(output) = arguments.get(1) else { std::process::exit(2); };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-cancel-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
         let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
             std::process::exit(2);
         };
-        let Some(chat) = app.try_state::<chat::ChatRuntime>() else { std::process::exit(2); };
-        let result = engine::write_cancel_probe_report(&app.handle(), engine.as_ref(), chat.inner(),
-            &std::path::PathBuf::from(output));
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_cancel_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
         if let Err(error) = result {
             eprintln!("Desktop cancel probe failed: {error}");
             let _ = engine.stop();
@@ -131,14 +202,25 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if arguments.first().is_some_and(|argument| argument == "--desktop-project-isolation-probe-report") {
-        let Some(output) = arguments.get(1) else { std::process::exit(2); };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-project-isolation-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
         let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
             std::process::exit(2);
         };
-        let Some(chat) = app.try_state::<chat::ChatRuntime>() else { std::process::exit(2); };
-        let result = engine::write_project_isolation_probe_report(&app.handle(), engine.as_ref(), chat.inner(),
-            &std::path::PathBuf::from(output));
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_project_isolation_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
         if let Err(error) = result {
             eprintln!("Desktop project isolation probe failed: {error}");
             let _ = engine.stop();
@@ -146,14 +228,25 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if arguments.first().is_some_and(|argument| argument == "--desktop-task-recovery-probe-report") {
-        let Some(output) = arguments.get(1) else { std::process::exit(2); };
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--desktop-task-recovery-probe-report")
+    {
+        let Some(output) = arguments.get(1) else {
+            std::process::exit(2);
+        };
         let Some(engine) = app.try_state::<std::sync::Arc<engine::EngineManager>>() else {
             std::process::exit(2);
         };
-        let Some(chat) = app.try_state::<chat::ChatRuntime>() else { std::process::exit(2); };
-        let result = engine::write_task_recovery_probe_report(&app.handle(), engine.as_ref(), chat.inner(),
-            &std::path::PathBuf::from(output));
+        let Some(chat) = app.try_state::<chat::ChatRuntime>() else {
+            std::process::exit(2);
+        };
+        let result = engine::write_task_recovery_probe_report(
+            &app.handle(),
+            engine.as_ref(),
+            chat.inner(),
+            &std::path::PathBuf::from(output),
+        );
         if let Err(error) = result {
             eprintln!("Desktop task recovery probe failed: {error}");
             let _ = engine.stop();

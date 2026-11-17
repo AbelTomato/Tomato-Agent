@@ -21,21 +21,33 @@ pub struct AgentTaskInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MemoryItemIdInput { pub item_id: String }
+pub struct MemoryItemIdInput {
+    pub item_id: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MemoryCorrectInput { pub item_id: String, pub expected_version: u32, pub content: String }
+pub struct MemoryCorrectInput {
+    pub item_id: String,
+    pub expected_version: u32,
+    pub content: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MemoryCandidateIdInput { pub candidate_id: String }
+pub struct MemoryCandidateIdInput {
+    pub candidate_id: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MemoryGenerationInput { pub expected_generation: u64 }
+pub struct MemoryGenerationInput {
+    pub expected_generation: u64,
+}
 
-fn default_task_kind() -> String { "assistant".into() }
+fn default_task_kind() -> String {
+    "assistant".into()
+}
 
 fn local_draft_directory(local_app_data: &Path, identifier: &str) -> PathBuf {
     local_app_data
@@ -73,12 +85,100 @@ mod tests {
     fn desktop_task_kind_defaults_to_assistant_and_accepts_writing() {
         let input: AgentTaskInput = serde_json::from_value(serde_json::json!({
             "sessionId": "session", "requestId": "request", "content": "topic"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(input.kind, "assistant");
         let input: AgentTaskInput = serde_json::from_value(serde_json::json!({
             "sessionId": "session", "requestId": "request", "content": "topic", "kind": "writing"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(input.kind, "writing");
+    }
+
+    #[test]
+    fn python_session_project_lookup_uses_runtime_session_records() {
+        let sessions = [serde_json::json!({
+            "id": "runtime-session",
+            "project_id": "project-1"
+        })];
+        assert_eq!(
+            super::runtime_session_project_id(&sessions, "runtime-session").unwrap(),
+            Some("project-1".to_string())
+        );
+        assert_eq!(
+            super::runtime_session_project_id(&sessions, "missing-session").unwrap_err(),
+            "对话不存在"
+        );
+    }
+
+    #[test]
+    fn changeset_probe_cleanup_removes_only_its_session_and_project() {
+        let path = std::env::temp_dir().join(format!(
+            "changeset-probe-cleanup-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let project_root = path.with_extension("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let store = crate::chat::ChatStore::open(&path).unwrap();
+        let project = store
+            .create_project(project_root.to_str().unwrap(), Some("probe"))
+            .unwrap();
+        let session = store.create_session("probe").unwrap();
+        store
+            .set_session_project(&session, Some(&project.id))
+            .unwrap();
+
+        super::cleanup_changeset_probe_store(&store, &session, &project.id).unwrap();
+
+        assert!(store.sessions().unwrap().is_empty());
+        assert!(store.projects().unwrap().is_empty());
+        assert!(store.latest_session().unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn history_migration_response_must_match_digest_and_record_counts() {
+        let response = serde_json::json!({
+            "installation_id": "installation-1",
+            "digest": "a".repeat(64),
+            "sessions": 2,
+            "messages": 3,
+            "imported": true
+        });
+        assert!(super::validate_history_migration_response(
+            &response,
+            "installation-1",
+            &"a".repeat(64),
+            2,
+            3
+        )
+        .is_ok());
+        assert_eq!(
+            super::validate_history_migration_response(
+                &response,
+                "installation-1",
+                &"b".repeat(64),
+                2,
+                3
+            )
+            .unwrap_err(),
+            "聊天迁移核验失败"
+        );
+        assert_eq!(
+            super::validate_history_migration_response(
+                &response,
+                "installation-1",
+                &"a".repeat(64),
+                1,
+                3
+            )
+            .unwrap_err(),
+            "聊天迁移核验失败"
+        );
     }
 
     #[test]
@@ -97,7 +197,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("memory-gate-{}.db", uuid::Uuid::new_v4()));
         let store = crate::chat::ChatStore::open(&path).unwrap();
         let session = store.create_session("Memory gate").unwrap();
-        store.append_message(&session, "user", "private source").unwrap();
+        store
+            .append_message(&session, "user", "private source")
+            .unwrap();
         store.set_memory_enabled(true).unwrap();
         store.delete_session(&session).unwrap();
         let engine = EngineManager::new().unwrap();
@@ -108,15 +210,25 @@ mod tests {
 
     #[test]
     fn pending_item_forget_is_persistent_and_gates_memory_reads_until_acknowledged() {
-        let path = std::env::temp_dir().join(format!("memory-forget-gate-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("memory-forget-gate-{}.db", uuid::Uuid::new_v4()));
         let item_id = uuid::Uuid::new_v4().to_string();
         {
             let store = crate::chat::ChatStore::open(&path).unwrap();
             store.set_memory_enabled(true).unwrap();
             let request_id = store.enqueue_memory_item_forget(&item_id, 3).unwrap();
-            assert_eq!(store.enqueue_memory_item_forget(&item_id, 3).unwrap(), request_id);
-            assert_eq!(store.pending_memory_item_forgets().unwrap(), vec![(item_id.clone(), request_id, 3)]);
-            assert_eq!(store.ensure_memory_reads_allowed().unwrap_err(), "记忆撤销尚未同步，暂时停用记忆读取");
+            assert_eq!(
+                store.enqueue_memory_item_forget(&item_id, 3).unwrap(),
+                request_id
+            );
+            assert_eq!(
+                store.pending_memory_item_forgets().unwrap(),
+                vec![(item_id.clone(), request_id, 3)]
+            );
+            assert_eq!(
+                store.ensure_memory_reads_allowed().unwrap_err(),
+                "记忆撤销尚未同步，暂时停用记忆读取"
+            );
         }
         let store = crate::chat::ChatStore::open(&path).unwrap();
         let pending = store.pending_memory_item_forgets().unwrap();
@@ -129,12 +241,19 @@ mod tests {
 
     #[test]
     fn pending_clear_is_persistent_and_blocks_reads_until_acknowledged() {
-        let path = std::env::temp_dir().join(format!("memory-clear-gate-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("memory-clear-gate-{}.db", uuid::Uuid::new_v4()));
         let store = crate::chat::ChatStore::open(&path).unwrap();
         store.set_memory_enabled(true).unwrap();
         let request_id = store.enqueue_memory_clear("windows-local", 12).unwrap();
-        assert_eq!(store.enqueue_memory_clear("windows-local", 12).unwrap(), request_id);
-        assert_eq!(store.pending_memory_clear().unwrap(), Some(("windows-local".into(), request_id.clone(), 12)));
+        assert_eq!(
+            store.enqueue_memory_clear("windows-local", 12).unwrap(),
+            request_id
+        );
+        assert_eq!(
+            store.pending_memory_clear().unwrap(),
+            Some(("windows-local".into(), request_id.clone(), 12))
+        );
         assert!(store.ensure_memory_reads_allowed().is_err());
         store.acknowledge_memory_clear(&request_id).unwrap();
         assert!(store.ensure_memory_reads_allowed().is_ok());
@@ -143,7 +262,10 @@ mod tests {
 
     #[test]
     fn pending_memory_mutations_block_source_ingestion_until_acknowledged() {
-        let path = std::env::temp_dir().join(format!("memory-mutation-ingestion-gate-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "memory-mutation-ingestion-gate-{}.db",
+            uuid::Uuid::new_v4()
+        ));
         let store = crate::chat::ChatStore::open(&path).unwrap();
         store.set_memory_enabled(true).unwrap();
         assert!(super::memory_ingestion_allowed(&store).unwrap());
@@ -163,6 +285,7 @@ struct Process {
     owner: String,
     client: String,
     memory_enabled: bool,
+    bridge: crate::desktop_bridge::BridgeServer,
 }
 
 pub struct EngineManager {
@@ -239,8 +362,12 @@ pub fn write_task_probe_report(
         return Err("验收报告路径必须是绝对路径".into());
     }
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "无法启动本地 Provider 探针")?;
-    listener.set_nonblocking(true).map_err(|_| "无法配置本地 Provider 探针")?;
-    let provider_address = listener.local_addr().map_err(|_| "无法读取本地 Provider 地址")?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "无法配置本地 Provider 探针")?;
+    let provider_address = listener
+        .local_addr()
+        .map_err(|_| "无法读取本地 Provider 地址")?;
     let provider = std::thread::spawn(move || -> Result<u32, String> {
         let responses = [
             serde_json::json!({"decision":{"protocol_version":1,"type":"ask_user","payload":{
@@ -256,18 +383,29 @@ pub fn write_task_probe_report(
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(value) => break value,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(25))
+                    }
                     Err(_) => return Err("本地 Provider 未收到请求".into()),
                 }
             };
+            stream
+                .set_nonblocking(false)
+                .map_err(|_| "无法配置本地 Provider 连接")?;
             stream.set_read_timeout(Some(Duration::from_secs(20))).ok();
             let mut request = Vec::new();
             let mut chunk = [0_u8; 4096];
             let header_end;
             loop {
-                let count = stream.read(&mut chunk).map_err(|_| "无法读取本地 Provider 请求")?;
-                if count == 0 { return Err("本地 Provider 请求提前结束".into()); }
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取本地 Provider 请求")?;
+                if count == 0 {
+                    return Err("本地 Provider 请求提前结束".into());
+                }
                 request.extend_from_slice(&chunk[..count]);
                 if let Some(index) = request.windows(4).position(|item| item == b"\r\n\r\n") {
                     header_end = index + 4;
@@ -275,19 +413,28 @@ pub fn write_task_probe_report(
                 }
             }
             let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers.lines().find_map(|line| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(0);
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
             while request.len() < header_end + content_length {
-                let count = stream.read(&mut chunk).map_err(|_| "无法读取本地 Provider 请求")?;
-                if count == 0 { return Err("本地 Provider 请求体不完整".into()); }
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取本地 Provider 请求")?;
+                if count == 0 {
+                    return Err("本地 Provider 请求体不完整".into());
+                }
                 request.extend_from_slice(&chunk[..count]);
             }
-            let body: Value = serde_json::from_slice(&request[header_end..header_end + content_length])
-                .map_err(|_| "本地 Provider 请求格式无效")?;
+            let body: Value =
+                serde_json::from_slice(&request[header_end..header_end + content_length])
+                    .map_err(|_| "本地 Provider 请求格式无效")?;
             if body["messages"].as_array().is_none() {
                 return Err("桌面助手 Provider 契约不匹配".into());
             }
-            let response = serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
+            let response =
+                serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(), response).map_err(|_| "无法写入本地 Provider 响应")?;
             stream.flush().map_err(|_| "无法发送本地 Provider 响应")?;
@@ -304,23 +451,47 @@ pub fn write_task_probe_report(
         let session_id = chat.store.create_session("桌面任务验收")?;
         let engine_session = ensure_engine_session(engine, &chat.store, &session_id)?;
         let request_id = uuid::Uuid::new_v4().to_string();
-        chat.store.append_message_with_id(&format!("agent-user-{request_id}"), &session_id,
-            "user", "请运行本地桌面闭环验收")?;
-        let submitted = engine.request("POST", &format!("/api/sessions/{engine_session}/tasks"), Some(
-            serde_json::json!({"kind":"assistant","message":"请运行本地桌面闭环验收",
-                "client_request_id":request_id,"context_messages":[]})))?;
-        let task = submitted.get("body").cloned().ok_or("任务提交没有返回状态")?;
-        let run_id = task.get("run_id").and_then(Value::as_str).ok_or("任务标识缺失")?.to_string();
+        chat.store.append_message_with_id(
+            &format!("agent-user-{request_id}"),
+            &session_id,
+            "user",
+            "请运行本地桌面闭环验收",
+        )?;
+        let submitted = engine.request(
+            "POST",
+            &format!("/api/sessions/{engine_session}/tasks"),
+            Some(
+                serde_json::json!({"kind":"assistant","message":"请运行本地桌面闭环验收",
+                "client_request_id":request_id,"context_messages":[]}),
+            ),
+        )?;
+        let task = submitted
+            .get("body")
+            .cloned()
+            .ok_or("任务提交没有返回状态")?;
+        let run_id = task
+            .get("run_id")
+            .and_then(Value::as_str)
+            .ok_or("任务标识缺失")?
+            .to_string();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut waiting = None;
         while std::time::Instant::now() < deadline {
             let task = task_for_session(engine, &engine_session, &run_id)?;
-            if task["status"] == "waiting" { waiting = Some(task); break; }
-            if task["status"] == "failed" { return Err("助手任务在澄清前失败".into()); }
+            if task["status"] == "waiting" {
+                waiting = Some(task);
+                break;
+            }
+            if task["status"] == "failed" {
+                return Err("助手任务在澄清前失败".into());
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         let waiting = waiting.ok_or("助手任务未进入澄清状态")?;
-        let pending = waiting.get("pending_action").cloned().ok_or("澄清动作缺失")?;
+        let pending = waiting
+            .get("pending_action")
+            .cloned()
+            .ok_or("澄清动作缺失")?;
         let action = engine.request("POST", &format!("/api/tasks/{run_id}/actions"), Some(
             serde_json::json!({"action_id":pending["action_id"],"action":"provide_input",
                 "expected_version":waiting["version"],"client_request_id":uuid::Uuid::new_v4().to_string(),
@@ -331,33 +502,65 @@ pub fn write_task_probe_report(
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let completed = loop {
             let task = task_for_session(engine, &engine_session, &run_id)?;
-            if task["status"] == "completed" { break task; }
-            if matches!(task["status"].as_str(), Some("failed" | "cancelled" | "timed_out")) {
+            if task["status"] == "completed" {
+                break task;
+            }
+            if matches!(
+                task["status"].as_str(),
+                Some("failed" | "cancelled" | "timed_out")
+            ) {
                 return Err("助手任务未能完成".into());
             }
-            if std::time::Instant::now() >= deadline { return Err("助手任务完成超时".into()); }
+            if std::time::Instant::now() >= deadline {
+                return Err("助手任务完成超时".into());
+            }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let answer = completed.pointer("/result/answer").and_then(Value::as_str)
+        let answer = completed
+            .pointer("/result/answer")
+            .and_then(Value::as_str)
             .ok_or("助手任务结果缺少回答")?;
-        chat.store.append_message_with_id(&format!("agent-assistant-{run_id}"), &session_id,
-            "assistant", answer)?;
-        chat.store.append_message_with_id(&format!("agent-assistant-{run_id}"), &session_id,
-            "assistant", answer)?;
-        let events = engine.request("GET", &format!("/api/tasks/{run_id}/events?after=0&limit=30"), None)?;
+        chat.store.append_message_with_id(
+            &format!("agent-assistant-{run_id}"),
+            &session_id,
+            "assistant",
+            answer,
+        )?;
+        chat.store.append_message_with_id(
+            &format!("agent-assistant-{run_id}"),
+            &session_id,
+            "assistant",
+            answer,
+        )?;
+        let events = engine.request(
+            "GET",
+            &format!("/api/tasks/{run_id}/events?after=0&limit=30"),
+            None,
+        )?;
         let history = chat.store.messages(&session_id)?;
-        let events_count = events.pointer("/body/events").and_then(Value::as_array).map_or(0, Vec::len);
+        let events_count = events
+            .pointer("/body/events")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         let passed = completed["session_id"] == engine_session
             && answer == "桌面任务闭环通过"
-            && history.iter().any(|message| message.role == "user" && message.content == "请运行本地桌面闭环验收")
-            && history.iter().any(|message| message.role == "assistant" && message.content == answer)
+            && history.iter().any(|message| {
+                message.role == "user" && message.content == "请运行本地桌面闭环验收"
+            })
+            && history
+                .iter()
+                .any(|message| message.role == "assistant" && message.content == answer)
             && events_count >= 2;
-        Ok(serde_json::json!({"passed":passed,"desktop_session_id":session_id,
+        Ok(
+            serde_json::json!({"passed":passed,"desktop_session_id":session_id,
             "engine_session_id":engine_session,"run_id":run_id,"waiting_action":"provide_input",
             "status":completed["status"],"events":events_count,"history_messages":history.len(),
-            "answer":answer,"provider_requests":2,"result_message_id":format!("agent-assistant-{run_id}")}))
+            "answer":answer,"provider_requests":2,"result_message_id":format!("agent-assistant-{run_id}")}),
+        )
     })();
-    let provider_result = provider.join().map_err(|_| "本地 Provider 探针异常退出".to_string())
+    let provider_result = provider
+        .join()
+        .map_err(|_| "本地 Provider 探针异常退出".to_string())
         .and_then(|result| result);
     let provider_requests = provider_result.as_ref().copied().unwrap_or(0);
     let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
@@ -365,8 +568,12 @@ pub fn write_task_probe_report(
         Ok(mut value) => {
             value["engine_stopped"] = Value::Bool(stopped);
             value["provider_requests"] = Value::from(provider_requests);
-            value["passed"] = Value::Bool(value["passed"] == true && stopped
-                && provider_requests == 2 && provider_result.is_ok());
+            value["passed"] = Value::Bool(
+                value["passed"] == true
+                    && stopped
+                    && provider_requests == 2
+                    && provider_result.is_ok(),
+            );
             value
         }
         Err(error) => serde_json::json!({"passed":false,"error":error,
@@ -375,7 +582,345 @@ pub fn write_task_probe_report(
     };
     let bytes = serde_json::to_vec_pretty(&report).map_err(|_| "无法编码桌面任务验收报告")?;
     std::fs::write(output, bytes).map_err(|_| "无法写入桌面任务验收报告")?;
-    if report["passed"] != true { return Err("桌面任务验收失败".into()); }
+    if report["passed"] != true {
+        return Err("桌面任务验收失败".into());
+    }
+    Ok(())
+}
+
+pub fn write_changeset_probe_report(
+    app: &tauri::AppHandle,
+    engine: &EngineManager,
+    chat: &super::chat::ChatRuntime,
+    output: &Path,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    if !output.is_absolute() {
+        return Err("验收报告路径必须是绝对路径".into());
+    }
+    let project_root =
+        std::env::temp_dir().join(format!("tomato-changeset-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&project_root).map_err(|_| "无法创建修改验收项目")?;
+    let project_file = project_root.join("README.md");
+    let initial_content = "before\n";
+    std::fs::write(&project_file, initial_content).map_err(|_| "无法初始化验收项目文件")?;
+    let mut probe_project_id = None;
+    let mut probe_desktop_session_id = None;
+    let mut probe_engine_session_id = None;
+
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "无法启动本地 Provider 探针")?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "无法配置本地 Provider 探针")?;
+    let provider_address = listener
+        .local_addr()
+        .map_err(|_| "无法读取本地 Provider 地址")?;
+    let old_digest = format!("{:x}", Sha256::digest(initial_content.as_bytes()));
+    let decisions = vec![
+        serde_json::json!({"type":"call_tool","payload":{"name":"read_file",
+            "contract_version":"1","arguments":serde_json::json!({"path":"README.md"}).to_string()}}),
+        serde_json::json!({"type":"call_tool","payload":{"name":"read_file",
+            "contract_version":"1","arguments":serde_json::json!({"path":"README.md"}).to_string()}}),
+        serde_json::json!({"type":"call_tool","payload":{"name":"propose_changeset",
+            "contract_version":"1","arguments":serde_json::json!({"changes":[{
+                "relative_path":"README.md","operation":"modify",
+                "expected_old_sha256":old_digest,"base_content":initial_content,
+                "content":"after\n","summary":"Update project notes"}] }).to_string()}}),
+        serde_json::json!({"type":"finish","payload":{"result":{"answer":"修改提案已获批准并落盘",
+            "citations":[],"artifacts":[],"test_results":[],"validation_status":"not_required"}}}),
+    ];
+    let provider = std::thread::spawn(move || -> Result<u32, String> {
+        for decision in decisions {
+            let deadline = std::time::Instant::now() + Duration::from_secs(45);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(value) => break value,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(25))
+                    }
+                    Err(_) => return Err("本地 Provider 未收到请求".into()),
+                }
+            };
+            stream
+                .set_nonblocking(false)
+                .map_err(|_| "无法配置本地 Provider 连接")?;
+            stream.set_read_timeout(Some(Duration::from_secs(20))).ok();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end;
+            loop {
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取本地 Provider 请求")?;
+                if count == 0 {
+                    return Err("本地 Provider 请求提前结束".into());
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(index) = request.windows(4).position(|item| item == b"\r\n\r\n") {
+                    header_end = index + 4;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取本地 Provider 请求")?;
+                if count == 0 {
+                    return Err("本地 Provider 请求体不完整".into());
+                }
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let body: Value =
+                serde_json::from_slice(&request[header_end..header_end + content_length])
+                    .map_err(|_| "本地 Provider 请求格式无效")?;
+            if body["messages"].as_array().is_none() {
+                return Err("桌面助手 Provider 契约不匹配".into());
+            }
+            let response = serde_json::json!({"choices":[{"message":{"content":
+                serde_json::json!({"protocol_version":1,"decision":decision}).to_string()}}]})
+            .to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response).map_err(|_| "无法写入本地 Provider 响应")?;
+            stream.flush().map_err(|_| "无法发送本地 Provider 响应")?;
+        }
+        Ok(4)
+    });
+
+    let result = (|| -> Result<Value, String> {
+        let config = super::chat::ChatConfig {
+            base_url: format!("http://{provider_address}/v1"),
+            model: "desktop-changeset-probe".into(),
+        };
+        engine.start(app, &config, "desktop-changeset-probe-key")?;
+        let project = chat.store.create_project(
+            project_root.to_str().ok_or("验收项目路径无法编码")?,
+            Some("变更审批验收"),
+        )?;
+        probe_project_id = Some(project.id.clone());
+        let desktop_session_id = chat.store.create_session("变更审批验收")?;
+        probe_desktop_session_id = Some(desktop_session_id.clone());
+        chat.store
+            .set_session_project(&desktop_session_id, Some(&project.id))?;
+        let engine_session_id = ensure_engine_session(engine, &chat.store, &desktop_session_id)?;
+        probe_engine_session_id = Some(engine_session_id.clone());
+        engine.request(
+            "PATCH",
+            &format!("/api/sessions/{engine_session_id}/project"),
+            Some(serde_json::json!({"project_id":project.id})),
+        )?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let submitted = engine.request(
+            "POST",
+            &format!("/api/sessions/{engine_session_id}/tasks"),
+            Some(
+                serde_json::json!({"kind":"assistant","message":"请阅读并修改 README",
+                "client_request_id":request_id,"context_messages":[]}),
+            ),
+        )?;
+        let run_id = submitted
+            .pointer("/body/run_id")
+            .and_then(Value::as_str)
+            .ok_or("任务标识缺失")?
+            .to_string();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let mut authorized = false;
+        let mut pending_approval = None;
+        while std::time::Instant::now() < deadline {
+            let task = task_for_session(engine, &engine_session_id, &run_id)?;
+            if task["status"] == "waiting" {
+                let pending = task.get("pending_action").ok_or("等待动作缺失")?;
+                match pending.get("action_type").and_then(Value::as_str) {
+                    Some("project_read") if !authorized => {
+                        let grant = engine.authorize_project_read(
+                            &engine_session_id,
+                            &run_id,
+                            &project.id,
+                            &project_root,
+                        )?;
+                        let response = engine.request(
+                            "POST",
+                            &format!("/api/tasks/{run_id}/actions"),
+                            Some(serde_json::json!({"action_id":pending["action_id"],
+                                "action":"authorize_project_read","expected_version":task["version"],
+                                "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{"grant":grant}})),
+                        )?;
+                        if response.pointer("/body/status").and_then(Value::as_str)
+                            != Some("queued")
+                        {
+                            return Err("项目授权没有恢复任务".into());
+                        }
+                        authorized = true;
+                    }
+                    Some("changeset_approval") => {
+                        pending_approval = Some(task);
+                        break;
+                    }
+                    _ => return Err("Runtime 返回了非预期的等待动作".into()),
+                }
+            } else if matches!(
+                task["status"].as_str(),
+                Some("failed" | "cancelled" | "timed_out")
+            ) {
+                return Err("助手任务在生成修改提案前失败".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let waiting = pending_approval.ok_or("助手任务未进入修改审批")?;
+        let pending = waiting.get("pending_action").ok_or("修改审批动作缺失")?;
+        let action = bind_changeset_commit_receipt(
+            engine,
+            &chat.store,
+            &desktop_session_id,
+            &engine_session_id,
+            &run_id,
+            &waiting,
+            serde_json::json!({"action_id":pending["action_id"],"action":"approve_action",
+                "expected_version":waiting["version"],"client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{}}),
+        )?;
+        let resumed = engine.request(
+            "POST",
+            &format!("/api/tasks/{run_id}/actions"),
+            Some(action),
+        )?;
+        if resumed.pointer("/body/status").and_then(Value::as_str) != Some("queued")
+            || resumed
+                .pointer("/body/pending_action")
+                .is_some_and(|pending| !pending.is_null())
+        {
+            return Err("Runtime 没有消费宿主提交回执".into());
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let completed = loop {
+            let task = task_for_session(engine, &engine_session_id, &run_id)?;
+            if task["status"] == "completed" {
+                break task;
+            }
+            if matches!(
+                task["status"].as_str(),
+                Some("failed" | "cancelled" | "timed_out")
+            ) {
+                return Err("ChangeSet 批准后 Runtime 未完成".into());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("ChangeSet Runtime 完成超时".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let committed = std::fs::read(&project_file).map_err(|_| "无法读取审批后项目文件")?;
+        let contents = String::from_utf8(committed).map_err(|_| "审批后项目文件不是 UTF-8")?;
+        let answer = completed
+            .pointer("/result/answer")
+            .and_then(Value::as_str)
+            .ok_or("完成结果缺少回答")?;
+        let events = engine.request(
+            "GET",
+            &format!("/api/tasks/{run_id}/events?after=0&limit=50"),
+            None,
+        )?;
+        let event_types = events
+            .pointer("/body/events")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["event_type"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let passed = authorized
+            && contents == "after\n"
+            && answer == "修改提案已获批准并落盘"
+            && event_types.iter().any(|kind| *kind == "changeset.proposed")
+            && event_types.iter().any(|kind| *kind == "assistant.action");
+        Ok(
+            serde_json::json!({"passed":passed,"run_id":run_id,"desktop_session_id":desktop_session_id,
+            "engine_session_id":engine_session_id,"project_id":project.id,"status":completed["status"],
+            "authorized":authorized,"approved_digest":pending.pointer("/display_data/digest"),
+            "committed_file":"README.md","committed_content":contents,"answer":answer,
+            "event_types":event_types,"provider_requests":4}),
+        )
+    })();
+    let provider_result = provider
+        .join()
+        .map_err(|_| "本地 Provider 探针异常退出".to_string())
+        .and_then(|result| result);
+    let cleanup_result = (|| -> Result<(), String> {
+        if let Some(engine_session_id) = probe_engine_session_id.as_deref() {
+            engine.request(
+                "DELETE",
+                &format!("/api/sessions/{engine_session_id}"),
+                None,
+            )?;
+        }
+        match (
+            probe_desktop_session_id.as_deref(),
+            probe_project_id.as_deref(),
+        ) {
+            (Some(session_id), Some(project_id)) => {
+                cleanup_changeset_probe_store(&chat.store, session_id, project_id)?;
+            }
+            (Some(session_id), None) => chat.store.delete_session(session_id)?,
+            (None, Some(project_id)) => chat.store.delete_project(project_id)?,
+            (None, None) => {}
+        }
+        Ok(())
+    })();
+    let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
+    let report = match result {
+        Ok(mut value) => {
+            value["engine_stopped"] = Value::Bool(stopped);
+            value["probe_data_cleaned"] = Value::Bool(cleanup_result.is_ok());
+            value["passed"] = Value::Bool(
+                value["passed"] == true
+                    && stopped
+                    && provider_result.is_ok()
+                    && cleanup_result.is_ok(),
+            );
+            if let Err(error) = provider_result {
+                value["provider_error"] = Value::String(error);
+                value["passed"] = Value::Bool(false);
+            }
+            if let Err(error) = cleanup_result {
+                value["cleanup_error"] = Value::String(error);
+                value["passed"] = Value::Bool(false);
+            }
+            value
+        }
+        Err(error) => serde_json::json!({"passed":false,"error":error,"engine_stopped":stopped,
+            "probe_data_cleaned":cleanup_result.is_ok(),"cleanup_error":cleanup_result.err(),
+            "provider_error":provider_result.err()}),
+    };
+    let bytes = serde_json::to_vec_pretty(&report).map_err(|_| "无法编码变更验收报告")?;
+    std::fs::write(output, bytes).map_err(|_| "无法写入变更验收报告")?;
+    let _ = std::fs::remove_dir_all(project_root);
+    if report["passed"] != true {
+        return Err("桌面 ChangeSet 验收失败".into());
+    }
+    Ok(())
+}
+
+fn cleanup_changeset_probe_store(
+    store: &super::chat::ChatStore,
+    session_id: &str,
+    project_id: &str,
+) -> Result<(), String> {
+    store.delete_session(session_id)?;
+    store.delete_project(project_id)?;
+    if let Some(latest_session) = store.latest_session()? {
+        store.select_session(&latest_session)?;
+    }
     Ok(())
 }
 
@@ -388,30 +933,50 @@ pub fn write_writing_probe_report(
     if !output.is_absolute() {
         return Err("验收报告路径必须是绝对路径".into());
     }
-    if !app.config().identifier.to_ascii_lowercase().contains("probe") {
+    if !app
+        .config()
+        .identifier
+        .to_ascii_lowercase()
+        .contains("probe")
+    {
         return Err("写作验收只允许使用隔离验收应用标识".into());
     }
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "无法启动本地 Provider 探针")?;
-    listener.set_nonblocking(true).map_err(|_| "无法配置本地 Provider 探针")?;
-    let provider_address = listener.local_addr().map_err(|_| "无法读取本地 Provider 地址")?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "无法配置本地 Provider 探针")?;
+    let provider_address = listener
+        .local_addr()
+        .map_err(|_| "无法读取本地 Provider 地址")?;
     let provider = std::thread::spawn(move || -> Result<u32, String> {
         for _ in 0..2 {
             let deadline = std::time::Instant::now() + Duration::from_secs(45);
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(value) => break value,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(25))
+                    }
                     Err(_) => return Err("写作任务未调用本地 Provider".into()),
                 }
             };
+            stream
+                .set_nonblocking(false)
+                .map_err(|_| "无法配置本地 Provider 连接")?;
             stream.set_read_timeout(Some(Duration::from_secs(20))).ok();
             let mut request = Vec::new();
             let mut chunk = [0_u8; 4096];
             let header_end;
             loop {
-                let count = stream.read(&mut chunk).map_err(|_| "无法读取写作 Provider 请求")?;
-                if count == 0 { return Err("写作 Provider 请求提前结束".into()); }
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取写作 Provider 请求")?;
+                if count == 0 {
+                    return Err("写作 Provider 请求提前结束".into());
+                }
                 request.extend_from_slice(&chunk[..count]);
                 if let Some(index) = request.windows(4).position(|item| item == b"\r\n\r\n") {
                     header_end = index + 4;
@@ -419,36 +984,58 @@ pub fn write_writing_probe_report(
                 }
             }
             let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers.lines().find_map(|line| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(0);
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
             while request.len() < header_end + content_length {
-                let count = stream.read(&mut chunk).map_err(|_| "无法读取写作 Provider 请求体")?;
-                if count == 0 { return Err("写作 Provider 请求体不完整".into()); }
+                let count = stream
+                    .read(&mut chunk)
+                    .map_err(|_| "无法读取写作 Provider 请求体")?;
+                if count == 0 {
+                    return Err("写作 Provider 请求体不完整".into());
+                }
                 request.extend_from_slice(&chunk[..count]);
             }
-            let body: Value = serde_json::from_slice(&request[header_end..header_end + content_length])
-                .map_err(|_| "写作 Provider 请求格式无效")?;
-            let messages = body["messages"].as_array().ok_or("写作 Provider 缺少 messages")?;
-            let user_content = messages.iter().find(|item| item["role"] == "user")
-                .and_then(|item| item["content"].as_str()).ok_or("写作 Provider 缺少用户内容")?;
+            let body: Value =
+                serde_json::from_slice(&request[header_end..header_end + content_length])
+                    .map_err(|_| "写作 Provider 请求格式无效")?;
+            let messages = body["messages"]
+                .as_array()
+                .ok_or("写作 Provider 缺少 messages")?;
+            let user_content = messages
+                .iter()
+                .find(|item| item["role"] == "user")
+                .and_then(|item| item["content"].as_str())
+                .ok_or("写作 Provider 缺少用户内容")?;
             let payload: Value = serde_json::from_str(user_content)
                 .map_err(|_| "写作 Provider 用户内容不是 JSON")?;
-            let citation = payload["evidence"].as_array().and_then(|items| items.first())
-                .and_then(|item| item["citation_id"].as_str()).ok_or("写作任务没有检索到引用证据")?;
-            let system = messages.iter().find(|item| item["role"] == "system")
-                .and_then(|item| item["content"].as_str()).unwrap_or("");
+            let citation = payload["evidence"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item["citation_id"].as_str())
+                .ok_or("写作任务没有检索到引用证据")?;
+            let system = messages
+                .iter()
+                .find(|item| item["role"] == "system")
+                .and_then(|item| item["content"].as_str())
+                .unwrap_or("");
             let content = if system.contains("generate a technical writing outline") {
                 serde_json::json!({"title":"Rust 桌面生命周期验收","sections":[{
                     "title":"引擎生命周期","points":["引擎由桌面进程按需启动并在退出时关闭"],
-                    "citation_ids":[citation]}],"gaps":[]}).to_string()
+                    "citation_ids":[citation]}],"gaps":[]})
+                .to_string()
             } else if system.contains("write a technical draft") {
                 serde_json::json!({"title":"Rust 桌面生命周期验收","sections":[{
                     "title":"引擎生命周期","content":"桌面进程按需启动引擎，并在退出时关闭引擎。",
-                    "citation_ids":[citation]}]}).to_string()
+                    "citation_ids":[citation]}]})
+                .to_string()
             } else {
                 return Err("写作 Provider 收到未知的生成阶段".into());
             };
-            let response = serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
+            let response =
+                serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response.len(), response).map_err(|_| "无法写入写作 Provider 响应")?;
             stream.flush().map_err(|_| "无法发送写作 Provider 响应")?;
@@ -462,10 +1049,15 @@ pub fn write_writing_probe_report(
             model: "desktop-writing-probe".into(),
         };
         engine.start(app, &config, "desktop-writing-probe-key")?;
-        let data_dir = app.path().app_data_dir().map_err(|_| "无法定位应用数据目录")?
-            .join("TomatoAgent").join("engine");
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "无法定位应用数据目录")?
+            .join("TomatoAgent")
+            .join("engine");
         let database = data_dir.join("agent.db");
-        let connection = rusqlite::Connection::open(&database).map_err(|_| "无法打开隔离验收知识库")?;
+        let connection =
+            rusqlite::Connection::open(&database).map_err(|_| "无法打开隔离验收知识库")?;
         connection.execute("INSERT OR REPLACE INTO documents(document_id,source_path,source_url,title,content_hash,index_status,index_error) VALUES (?1,?2,NULL,?3,?4,'ready',NULL)",
             rusqlite::params!["desktop-writing-probe-doc", "acceptance/desktop-lifecycle.md", "Desktop assistant engine lifecycle", "desktop-writing-probe-v1"])
             .map_err(|_| "无法写入隔离验收文档")?;
@@ -479,53 +1071,121 @@ pub fn write_writing_probe_report(
         let session_id = chat.store.create_session("桌面写作验收")?;
         let engine_session = ensure_engine_session(engine, &chat.store, &session_id)?;
         let request_id = uuid::Uuid::new_v4().to_string();
-        let topic = "Write about the local assistant engine lifecycle in the Rust desktop application";
-        chat.store.append_message_with_id(&format!("agent-user-{request_id}"), &session_id, "user", topic)?;
+        let topic =
+            "Write about the local assistant engine lifecycle in the Rust desktop application";
+        chat.store.append_message_with_id(
+            &format!("agent-user-{request_id}"),
+            &session_id,
+            "user",
+            topic,
+        )?;
         let submitted = engine.request("POST", &format!("/api/sessions/{engine_session}/tasks"), Some(
             serde_json::json!({"kind":"writing","message":topic,"client_request_id":request_id})))?;
-        let run_id = submitted.pointer("/body/run_id").and_then(Value::as_str)
-            .ok_or("写作任务没有返回 Run 标识")?.to_string();
-        let mut run = wait_for_task(engine, &engine_session, &run_id, "waiting", Duration::from_secs(60))?;
-        if run.pointer("/pending_action/reason").and_then(Value::as_str) != Some("confirm_outline") {
+        let run_id = submitted
+            .pointer("/body/run_id")
+            .and_then(Value::as_str)
+            .ok_or("写作任务没有返回 Run 标识")?
+            .to_string();
+        let mut run = wait_for_task(
+            engine,
+            &engine_session,
+            &run_id,
+            "waiting",
+            Duration::from_secs(60),
+        )?;
+        if run
+            .pointer("/pending_action/reason")
+            .and_then(Value::as_str)
+            != Some("confirm_outline")
+        {
             return Err("写作任务未等待大纲确认".into());
         }
-        let outline = run.pointer("/result/outline").cloned().ok_or("写作结果缺少大纲")?;
-        let action_id = run.pointer("/pending_action/action_id").and_then(Value::as_str)
+        let outline = run
+            .pointer("/result/outline")
+            .cloned()
+            .ok_or("写作结果缺少大纲")?;
+        let action_id = run
+            .pointer("/pending_action/action_id")
+            .and_then(Value::as_str)
             .ok_or("大纲确认动作缺失")?;
-        engine.request("POST", &format!("/api/tasks/{run_id}/actions"), Some(serde_json::json!({
-            "action_id":action_id,"action":"confirm_outline","expected_version":run["version"],
-            "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{"outline":outline}
-        })))?;
-        run = wait_for_task(engine, &engine_session, &run_id, "waiting", Duration::from_secs(60))?;
-        if run.pointer("/pending_action/reason").and_then(Value::as_str) != Some("save_draft") {
+        engine.request(
+            "POST",
+            &format!("/api/tasks/{run_id}/actions"),
+            Some(serde_json::json!({
+                "action_id":action_id,"action":"confirm_outline","expected_version":run["version"],
+                "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{"outline":outline}
+            })),
+        )?;
+        run = wait_for_task(
+            engine,
+            &engine_session,
+            &run_id,
+            "waiting",
+            Duration::from_secs(60),
+        )?;
+        if run
+            .pointer("/pending_action/reason")
+            .and_then(Value::as_str)
+            != Some("save_draft")
+        {
             return Err("写作任务未等待草稿保存确认".into());
         }
-        let draft = run.pointer("/result/draft").and_then(Value::as_str).unwrap_or("");
-        if !draft.contains("桌面进程按需启动引擎") || !draft.contains("desktop-writing-probe-chunk") {
+        let draft = run
+            .pointer("/result/draft")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !draft.contains("桌面进程按需启动引擎") || !draft.contains("desktop-writing-probe-chunk")
+        {
             return Err("写作草稿缺少生成内容或引用".into());
         }
-        let action_id = run.pointer("/pending_action/action_id").and_then(Value::as_str)
+        let action_id = run
+            .pointer("/pending_action/action_id")
+            .and_then(Value::as_str)
             .ok_or("草稿保存动作缺失")?;
-        engine.request("POST", &format!("/api/tasks/{run_id}/actions"), Some(serde_json::json!({
-            "action_id":action_id,"action":"save_draft","expected_version":run["version"],
-            "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{}
-        })))?;
-        let completed = wait_for_task(engine, &engine_session, &run_id, "completed", Duration::from_secs(60))?;
-        let saved_path = completed.pointer("/result/saved_path").and_then(Value::as_str)
+        engine.request(
+            "POST",
+            &format!("/api/tasks/{run_id}/actions"),
+            Some(serde_json::json!({
+                "action_id":action_id,"action":"save_draft","expected_version":run["version"],
+                "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{}
+            })),
+        )?;
+        let completed = wait_for_task(
+            engine,
+            &engine_session,
+            &run_id,
+            "completed",
+            Duration::from_secs(60),
+        )?;
+        let saved_path = completed
+            .pointer("/result/saved_path")
+            .and_then(Value::as_str)
             .ok_or("已完成写作任务没有保存路径")?;
-        let saved_content = std::fs::read_to_string(saved_path).map_err(|_| "验收草稿文件未落盘")?;
-        chat.store.append_message_with_id(&format!("agent-assistant-{run_id}"), &session_id,
-            "assistant", &saved_content)?;
+        let saved_content =
+            std::fs::read_to_string(saved_path).map_err(|_| "验收草稿文件未落盘")?;
+        chat.store.append_message_with_id(
+            &format!("agent-assistant-{run_id}"),
+            &session_id,
+            "assistant",
+            &saved_content,
+        )?;
         let history = chat.store.messages(&session_id)?;
         let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
-        let result_messages = history.iter().filter(|message| message.id == format!("agent-assistant-{run_id}")).count();
-        Ok(serde_json::json!({"passed":saved_content == draft && result_messages == 1 && stopped,
+        let result_messages = history
+            .iter()
+            .filter(|message| message.id == format!("agent-assistant-{run_id}"))
+            .count();
+        Ok(
+            serde_json::json!({"passed":saved_content == draft && result_messages == 1 && stopped,
             "desktop_session_id":session_id,"engine_session_id":engine_session,"run_id":run_id,
             "status":completed["status"],"citations":["desktop-writing-probe-chunk"],
             "saved_path":saved_path,"saved_bytes":saved_content.len(),"result_message_count":result_messages,
-            "history_messages":history.len()}))
+            "history_messages":history.len()}),
+        )
     })();
-    let provider_result = provider.join().map_err(|_| "本地写作 Provider 探针异常退出".to_string())
+    let provider_result = provider
+        .join()
+        .map_err(|_| "本地写作 Provider 探针异常退出".to_string())
         .and_then(|result| result);
     let provider_requests = provider_result.as_ref().copied().unwrap_or(0);
     let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
@@ -535,12 +1195,17 @@ pub fn write_writing_probe_report(
     };
     report["engine_stopped"] = Value::Bool(stopped);
     report["provider_requests"] = Value::from(provider_requests);
-    report["passed"] = Value::Bool(report["passed"] == true && stopped
-        && provider_requests == 2 && provider_result.is_ok());
-    std::fs::write(output, serde_json::to_vec_pretty(&report)
-        .map_err(|_| "无法编码桌面写作验收报告")?)
-        .map_err(|_| "无法写入桌面写作验收报告")?;
-    if report["passed"] != true { return Err("桌面写作验收失败".into()); }
+    report["passed"] = Value::Bool(
+        report["passed"] == true && stopped && provider_requests == 2 && provider_result.is_ok(),
+    );
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&report).map_err(|_| "无法编码桌面写作验收报告")?,
+    )
+    .map_err(|_| "无法写入桌面写作验收报告")?;
+    if report["passed"] != true {
+        return Err("桌面写作验收失败".into());
+    }
     Ok(())
 }
 
@@ -554,16 +1219,33 @@ fn wait_for_task(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let task = task_for_session(engine, engine_session, run_id)?;
-        if task["status"] == expected { return Ok(task); }
-        if matches!(task["status"].as_str(), Some("failed" | "cancelled" | "timed_out")) {
-            return Err(format!("写作 Run 进入终态 {}：{}", task["status"], task["error"]));
+        if task["status"] == expected {
+            return Ok(task);
+        }
+        if matches!(
+            task["status"].as_str(),
+            Some("failed" | "cancelled" | "timed_out")
+        ) {
+            return Err(format!(
+                "写作 Run 进入终态 {}：{}",
+                task["status"], task["error"]
+            ));
         }
         if std::time::Instant::now() >= deadline {
-            let events = engine.request("GET", &format!("/api/tasks/{run_id}/events?after=0&limit=100"), None)
-                .ok().and_then(|value| value.pointer("/body/events").cloned()).unwrap_or(Value::Null);
-            return Err(format!("Run 等待超时，期望={expected}，当前={}，事件={}",
+            let events = engine
+                .request(
+                    "GET",
+                    &format!("/api/tasks/{run_id}/events?after=0&limit=100"),
+                    None,
+                )
+                .ok()
+                .and_then(|value| value.pointer("/body/events").cloned())
+                .unwrap_or(Value::Null);
+            return Err(format!(
+                "Run 等待超时，期望={expected}，当前={}，事件={}",
                 serde_json::to_string(&task).unwrap_or_default(),
-                serde_json::to_string(&events).unwrap_or_default()));
+                serde_json::to_string(&events).unwrap_or_default()
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -578,7 +1260,12 @@ pub fn write_project_isolation_probe_report(
     if !output.is_absolute() {
         return Err("验收报告路径必须是绝对路径".into());
     }
-    if !app.config().identifier.to_ascii_lowercase().contains("probe") {
+    if !app
+        .config()
+        .identifier
+        .to_ascii_lowercase()
+        .contains("probe")
+    {
         return Err("目录隔离验收只允许使用隔离验收应用标识".into());
     }
     let result = (|| -> Result<Value, String> {
@@ -587,46 +1274,71 @@ pub fn write_project_isolation_probe_report(
             model: "desktop-isolation-probe".into(),
         };
         engine.start(app, &config, "desktop-isolation-probe-key")?;
-        let app_data = app.path().app_data_dir().map_err(|_| "无法定位应用数据目录")?
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "无法定位应用数据目录")?
             .join("TomatoAgent");
         let selected_path = app_data.join("desktop-project-probe");
         std::fs::create_dir_all(&selected_path).map_err(|_| "无法创建隔离项目目录")?;
         let selected_path_text = selected_path.to_string_lossy().into_owned();
-        let project = chat.store.create_project(&selected_path_text, Some("隔离项目验收"))?;
+        let project = chat
+            .store
+            .create_project(&selected_path_text, Some("隔离项目验收"))?;
         let before = engine.request("GET", "/api/workspaces", None)?;
-        let before_items = before.pointer("/body/workspaces").and_then(Value::as_array)
+        let before_items = before
+            .pointer("/body/workspaces")
+            .and_then(Value::as_array)
             .ok_or("助手引擎未返回工作区列表")?;
-        let project_was_not_authorized = !before_items.iter().any(|item|
-            item.pointer("/repo_path").and_then(Value::as_str) == Some(selected_path_text.as_str()));
-        let registered = engine.request("POST", "/api/desktop/workspaces", Some(
-            serde_json::json!({"path":selected_path_text})))?;
-        let workspace = registered.get("body").cloned().ok_or("助手引擎未返回显式目录登记")?;
+        let project_was_not_authorized = !before_items.iter().any(|item| {
+            item.pointer("/repo_path").and_then(Value::as_str) == Some(selected_path_text.as_str())
+        });
+        let registered = engine.request(
+            "POST",
+            "/api/desktop/workspaces",
+            Some(serde_json::json!({"path":selected_path_text})),
+        )?;
+        let workspace = registered
+            .get("body")
+            .cloned()
+            .ok_or("助手引擎未返回显式目录登记")?;
         let after = engine.request("GET", "/api/workspaces", None)?;
-        let after_items = after.pointer("/body/workspaces").and_then(Value::as_array)
+        let after_items = after
+            .pointer("/body/workspaces")
+            .and_then(Value::as_array)
             .ok_or("助手引擎未返回登记后工作区列表")?;
-        let registered_workspace = after_items.iter().find(|item|
-            item.get("workspace_id") == workspace.get("workspace_id"));
-        let registered_workspace_visible = registered_workspace.is_some_and(|item|
-            item.get("available").and_then(Value::as_bool) == Some(true));
+        let registered_workspace = after_items
+            .iter()
+            .find(|item| item.get("workspace_id") == workspace.get("workspace_id"));
+        let registered_workspace_visible = registered_workspace
+            .is_some_and(|item| item.get("available").and_then(Value::as_bool) == Some(true));
         let registered_workspace_path_matches = registered_workspace
             .and_then(|item| item.pointer("/repo_path").and_then(Value::as_str))
             .is_some_and(|path| {
                 let registered_path = workspace.pointer("/repo_path").and_then(Value::as_str);
-                let Some(registered_path) = registered_path else { return false; };
+                let Some(registered_path) = registered_path else {
+                    return false;
+                };
                 #[cfg(windows)]
-                { path.eq_ignore_ascii_case(registered_path) }
+                {
+                    path.eq_ignore_ascii_case(registered_path)
+                }
                 #[cfg(not(windows))]
-                { path == registered_path }
+                {
+                    path == registered_path
+                }
             });
         let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
-        Ok(serde_json::json!({"passed":project_was_not_authorized && registered_workspace_visible
+        Ok(
+            serde_json::json!({"passed":project_was_not_authorized && registered_workspace_visible
             && registered_workspace_path_matches && stopped,
             "desktop_project_id":project.id,"project_path":selected_path_text,
             "project_was_not_authorized":project_was_not_authorized,
             "registered_workspace_id":workspace["workspace_id"],
             "registered_workspace_visible":registered_workspace_visible,
             "registered_workspace_path_matches":registered_workspace_path_matches,
-            "engine_stopped":stopped}))
+            "engine_stopped":stopped}),
+        )
     })();
     let mut report = match result {
         Ok(value) => value,
@@ -635,10 +1347,14 @@ pub fn write_project_isolation_probe_report(
     let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
     report["engine_stopped"] = Value::Bool(stopped);
     report["passed"] = Value::Bool(report["passed"] == true && stopped);
-    std::fs::write(output, serde_json::to_vec_pretty(&report)
-        .map_err(|_| "无法编码目录隔离验收报告")?)
-        .map_err(|_| "无法写入目录隔离验收报告")?;
-    if report["passed"] != true { return Err("桌面目录隔离验收失败".into()); }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&report).map_err(|_| "无法编码目录隔离验收报告")?,
+    )
+    .map_err(|_| "无法写入目录隔离验收报告")?;
+    if report["passed"] != true {
+        return Err("桌面目录隔离验收失败".into());
+    }
     Ok(())
 }
 
@@ -651,12 +1367,21 @@ pub fn write_cancel_probe_report(
     if !output.is_absolute() {
         return Err("验收报告路径必须是绝对路径".into());
     }
-    if !app.config().identifier.to_ascii_lowercase().contains("probe") {
+    if !app
+        .config()
+        .identifier
+        .to_ascii_lowercase()
+        .contains("probe")
+    {
         return Err("取消验收只允许使用隔离验收应用标识".into());
     }
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "无法启动本地 Provider 探针")?;
-    listener.set_nonblocking(true).map_err(|_| "无法配置本地 Provider 探针")?;
-    let provider_address = listener.local_addr().map_err(|_| "无法读取本地 Provider 地址")?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "无法配置本地 Provider 探针")?;
+    let provider_address = listener
+        .local_addr()
+        .map_err(|_| "无法读取本地 Provider 地址")?;
     let (received_tx, received_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let provider = std::thread::spawn(move || -> Result<(), String> {
@@ -664,18 +1389,29 @@ pub fn write_cancel_probe_report(
         let (mut stream, _) = loop {
             match listener.accept() {
                 Ok(value) => break value,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-                    && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
                 Err(_) => return Err("取消任务未调用本地 Provider".into()),
             }
         };
+        stream
+            .set_nonblocking(false)
+            .map_err(|_| "无法配置本地 Provider 连接")?;
         stream.set_read_timeout(Some(Duration::from_secs(20))).ok();
         let mut request = Vec::new();
         let mut chunk = [0_u8; 4096];
         let header_end;
         loop {
-            let count = stream.read(&mut chunk).map_err(|_| "无法读取取消 Provider 请求")?;
-            if count == 0 { return Err("取消 Provider 请求提前结束".into()); }
+            let count = stream
+                .read(&mut chunk)
+                .map_err(|_| "无法读取取消 Provider 请求")?;
+            if count == 0 {
+                return Err("取消 Provider 请求提前结束".into());
+            }
             request.extend_from_slice(&chunk[..count]);
             if let Some(index) = request.windows(4).position(|item| item == b"\r\n\r\n") {
                 header_end = index + 4;
@@ -683,11 +1419,18 @@ pub fn write_cancel_probe_report(
             }
         }
         let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-        let content_length = headers.lines().find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(0);
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
         while request.len() < header_end + content_length {
-            let count = stream.read(&mut chunk).map_err(|_| "无法读取取消 Provider 请求体")?;
-            if count == 0 { return Err("取消 Provider 请求体不完整".into()); }
+            let count = stream
+                .read(&mut chunk)
+                .map_err(|_| "无法读取取消 Provider 请求体")?;
+            if count == 0 {
+                return Err("取消 Provider 请求体不完整".into());
+            }
             request.extend_from_slice(&chunk[..count]);
         }
         let body: Value = serde_json::from_slice(&request[header_end..header_end + content_length])
@@ -696,10 +1439,13 @@ pub fn write_cancel_probe_report(
             return Err("取消 Provider 契约不匹配".into());
         }
         received_tx.send(()).map_err(|_| "取消探针已退出")?;
-        release_rx.recv_timeout(Duration::from_secs(30)).map_err(|_| "取消探针未释放 Provider")?;
+        release_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "取消探针未释放 Provider")?;
         let content = serde_json::json!({"decision":{"protocol_version":1,"type":"finish",
             "payload":{"result":{"answer":"不应写回的取消结果","citations":[],"artifacts":[],
-                "test_results":[],"validation_status":"not_required"}}}}).to_string();
+                "test_results":[],"validation_status":"not_required"}}}})
+        .to_string();
         let response = serde_json::json!({"choices":[{"message":{"content":content}}]}).to_string();
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.len(), response).map_err(|_| "无法写入取消 Provider 响应")?;
@@ -717,32 +1463,57 @@ pub fn write_cancel_probe_report(
         let engine_session = ensure_engine_session(engine, &chat.store, &session_id)?;
         let request_id = uuid::Uuid::new_v4().to_string();
         let message = "启动一项可取消的桌面助手任务";
-        chat.store.append_message_with_id(&format!("agent-user-{request_id}"), &session_id,
-            "user", message)?;
+        chat.store.append_message_with_id(
+            &format!("agent-user-{request_id}"),
+            &session_id,
+            "user",
+            message,
+        )?;
         let submitted = engine.request("POST", &format!("/api/sessions/{engine_session}/tasks"), Some(
             serde_json::json!({"kind":"assistant","message":message,"client_request_id":request_id,
                 "context_messages":[]})))?;
-        let run_id = submitted.pointer("/body/run_id").and_then(Value::as_str)
-            .ok_or("取消任务没有返回 Run 标识")?.to_string();
-        received_rx.recv_timeout(Duration::from_secs(45)).map_err(|_| "任务未进入 Provider 等待阶段")?;
+        let run_id = submitted
+            .pointer("/body/run_id")
+            .and_then(Value::as_str)
+            .ok_or("取消任务没有返回 Run 标识")?
+            .to_string();
+        received_rx
+            .recv_timeout(Duration::from_secs(45))
+            .map_err(|_| "任务未进入 Provider 等待阶段")?;
         let running = task_for_session(engine, &engine_session, &run_id)?;
         if running["status"] != "running" {
-            return Err(format!("取消前 Run 状态不是 running：{}", running["status"]));
+            return Err(format!(
+                "取消前 Run 状态不是 running：{}",
+                running["status"]
+            ));
         }
         let cancelled = engine.request("POST", &format!("/api/tasks/{run_id}/actions"), Some(
             serde_json::json!({"action_id":"cancel","action":"cancel","expected_version":running["version"],
                 "client_request_id":uuid::Uuid::new_v4().to_string(),"payload":{}})))?;
         release_tx.send(()).map_err(|_| "无法释放本地 Provider")?;
-        let final_run = wait_for_task(engine, &engine_session, &run_id, "cancelled", Duration::from_secs(20))?;
+        let final_run = wait_for_task(
+            engine,
+            &engine_session,
+            &run_id,
+            "cancelled",
+            Duration::from_secs(20),
+        )?;
         let history = chat.store.messages(&session_id)?;
-        let result_count = history.iter().filter(|item| item.id == format!("agent-assistant-{run_id}")).count();
-        Ok(serde_json::json!({"passed":cancelled.pointer("/body/status").and_then(Value::as_str) == Some("cancelled")
+        let result_count = history
+            .iter()
+            .filter(|item| item.id == format!("agent-assistant-{run_id}"))
+            .count();
+        Ok(
+            serde_json::json!({"passed":cancelled.pointer("/body/status").and_then(Value::as_str) == Some("cancelled")
             && final_run["status"] == "cancelled" && result_count == 0,
             "desktop_session_id":session_id,"engine_session_id":engine_session,"run_id":run_id,
             "status":final_run["status"],"provider_released_after_cancel":true,
-            "result_message_count":result_count,"history_messages":history.len()}))
+            "result_message_count":result_count,"history_messages":history.len()}),
+        )
     })();
-    let provider_result = provider.join().map_err(|_| "本地取消 Provider 探针异常退出".to_string())
+    let provider_result = provider
+        .join()
+        .map_err(|_| "本地取消 Provider 探针异常退出".to_string())
         .and_then(|result| result);
     let stopped = engine.stop().is_ok() && engine.identity()?.is_none();
     let mut report = match result {
@@ -752,10 +1523,14 @@ pub fn write_cancel_probe_report(
     report["engine_stopped"] = Value::Bool(stopped);
     report["provider_completed"] = Value::Bool(provider_result.is_ok());
     report["passed"] = Value::Bool(report["passed"] == true && stopped && provider_result.is_ok());
-    std::fs::write(output, serde_json::to_vec_pretty(&report)
-        .map_err(|_| "无法编码取消验收报告")?)
-        .map_err(|_| "无法写入取消验收报告")?;
-    if report["passed"] != true { return Err("桌面取消验收失败".into()); }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&report).map_err(|_| "无法编码取消验收报告")?,
+    )
+    .map_err(|_| "无法写入取消验收报告")?;
+    if report["passed"] != true {
+        return Err("桌面取消验收失败".into());
+    }
     Ok(())
 }
 
@@ -768,15 +1543,19 @@ pub fn write_task_recovery_probe_report(
     if !output.is_absolute() {
         return Err("验收报告路径必须是绝对路径".into());
     }
-    let original: Value = serde_json::from_slice(
-        &std::fs::read(output).map_err(|_| "缺少首次桌面任务探针报告")?,
-    ).map_err(|_| "首次桌面任务探针报告无效")?;
+    let original: Value =
+        serde_json::from_slice(&std::fs::read(output).map_err(|_| "缺少首次桌面任务探针报告")?)
+            .map_err(|_| "首次桌面任务探针报告无效")?;
     let result = (|| -> Result<Value, String> {
         if original["passed"] != true {
             return Err("首次桌面任务探针未通过".into());
         }
-        let session_id = original["desktop_session_id"].as_str().ok_or("桌面会话标识缺失")?;
-        let engine_session_id = original["engine_session_id"].as_str().ok_or("引擎会话标识缺失")?;
+        let session_id = original["desktop_session_id"]
+            .as_str()
+            .ok_or("桌面会话标识缺失")?;
+        let engine_session_id = original["engine_session_id"]
+            .as_str()
+            .ok_or("引擎会话标识缺失")?;
         let run_id = original["run_id"].as_str().ok_or("任务标识缺失")?;
         let answer = original["answer"].as_str().ok_or("任务结果缺失")?;
         let config = super::chat::ChatConfig {
@@ -784,20 +1563,37 @@ pub fn write_task_recovery_probe_report(
             model: "desktop-recovery-probe".into(),
         };
         engine.start(app, &config, "desktop-recovery-probe-key")?;
-        let mapped_session = chat.store.engine_session(session_id)?
+        let mapped_session = chat
+            .store
+            .engine_session(session_id)?
             .ok_or_else(|| "桌面会话映射未能跨进程恢复".to_string())?;
         let task = task_for_session(engine, &mapped_session, run_id)?;
-        if mapped_session != engine_session_id || task["status"] != "completed"
-            || task.pointer("/result/answer").and_then(Value::as_str) != Some(answer) {
+        if mapped_session != engine_session_id
+            || task["status"] != "completed"
+            || task.pointer("/result/answer").and_then(Value::as_str) != Some(answer)
+        {
             return Err("引擎重启后任务状态或会话映射不一致".into());
         }
-        chat.store.append_message_with_id(&format!("agent-assistant-{run_id}"), session_id,
-            "assistant", answer)?;
+        chat.store.append_message_with_id(
+            &format!("agent-assistant-{run_id}"),
+            session_id,
+            "assistant",
+            answer,
+        )?;
         let history = chat.store.messages(session_id)?;
-        let result_messages = history.iter().filter(|message|
-            message.id == format!("agent-assistant-{run_id}")).count();
-        let events = engine.request("GET", &format!("/api/tasks/{run_id}/events?after=0&limit=30"), None)?;
-        let events_count = events.pointer("/body/events").and_then(Value::as_array).map_or(0, Vec::len);
+        let result_messages = history
+            .iter()
+            .filter(|message| message.id == format!("agent-assistant-{run_id}"))
+            .count();
+        let events = engine.request(
+            "GET",
+            &format!("/api/tasks/{run_id}/events?after=0&limit=30"),
+            None,
+        )?;
+        let events_count = events
+            .pointer("/body/events")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         Ok(serde_json::json!({
             "passed": result_messages == 1 && events_count >= 2,
             "desktop_session_id": session_id,
@@ -816,10 +1612,14 @@ pub fn write_task_recovery_probe_report(
     };
     report["engine_stopped"] = Value::Bool(stopped);
     report["passed"] = Value::Bool(report["passed"] == true && stopped);
-    std::fs::write(output, serde_json::to_vec_pretty(&report)
-        .map_err(|_| "无法编码桌面恢复验收报告")?)
-        .map_err(|_| "无法写入桌面恢复验收报告")?;
-    if report["passed"] != true { return Err("桌面恢复验收失败".into()); }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&report).map_err(|_| "无法编码桌面恢复验收报告")?,
+    )
+    .map_err(|_| "无法写入桌面恢复验收报告")?;
+    if report["passed"] != true {
+        return Err("桌面恢复验收失败".into());
+    }
     Ok(())
 }
 
@@ -868,8 +1668,13 @@ impl EngineManager {
         config: &super::chat::ChatConfig,
         key: &str,
     ) -> Result<EngineIdentity, String> {
-        let memory_enabled = self.process.lock().map_err(|_| "助手引擎状态不可用")?
-            .as_ref().map(|process| process.memory_enabled).unwrap_or(false);
+        let memory_enabled = self
+            .process
+            .lock()
+            .map_err(|_| "助手引擎状态不可用")?
+            .as_ref()
+            .map(|process| process.memory_enabled)
+            .unwrap_or(false);
         self.start_with_memory(app, config, key, memory_enabled)
     }
 
@@ -913,6 +1718,11 @@ impl EngineManager {
             .resource_dir()
             .map_err(|_| "无法定位应用资源目录")?;
         let token = uuid::Uuid::new_v4().simple().to_string().repeat(2);
+        let bridge_token = uuid::Uuid::new_v4().simple().to_string().repeat(2);
+        let bridge = crate::desktop_bridge::BridgeServer::start(
+            bridge_token.clone(),
+            app_data.join("commit-journal"),
+        )?;
         let owner = uuid::Uuid::new_v4().simple().to_string();
         let client_id = uuid::Uuid::new_v4().to_string();
         let mut command = Command::new(executable);
@@ -933,6 +1743,7 @@ impl EngineManager {
             .map_err(|_| "无法启动助手引擎；请检查安装资源")?;
         let input = serde_json::json!({
             "token": token, "owner": owner, "environment_id": "windows-local",
+            "bridge_port": bridge.port(), "bridge_token": bridge_token,
             "data_dir": app_data, "draft_dir": draft_directory, "resource_dir": resource,
             "llm_api_key": key, "llm_base_url": config.base_url, "llm_model": config.model,
             "memory_enabled": memory_enabled,
@@ -972,6 +1783,11 @@ impl EngineManager {
             }
         };
         identity.owned = true;
+        if let Err(error) = bridge.set_instance_id(identity.service_instance_id.clone()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         let endpoint = format!("http://127.0.0.1:{}/api/desktop/connection", identity.port);
         let response = self
             .client
@@ -1013,6 +1829,7 @@ impl EngineManager {
             owner,
             client: client_id,
             memory_enabled,
+            bridge,
         });
         Ok(identity)
     }
@@ -1076,6 +1893,143 @@ impl EngineManager {
         )
     }
 
+    pub fn authorize_project_read(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        project_id: &str,
+        registered_root: &Path,
+    ) -> Result<String, String> {
+        let state = self.process.lock().map_err(|_| "助手引擎状态不可用")?;
+        let process = state.as_ref().ok_or("助手引擎尚未启动")?;
+        process
+            .bridge
+            .authorize_run(session_id, run_id, project_id, registered_root)
+    }
+
+    pub fn restore_project_read_grant(
+        &self,
+        grant: &str,
+        session_id: &str,
+        run_id: &str,
+        project_id: &str,
+        registered_root: &Path,
+    ) -> Result<(), String> {
+        let state = self.process.lock().map_err(|_| "助手引擎状态不可用")?;
+        let process = state.as_ref().ok_or("助手引擎尚未启动")?;
+        process
+            .bridge
+            .restore_run_grant(grant, session_id, run_id, project_id, registered_root)
+    }
+
+    pub fn apply_approved_changeset(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        project_id: &str,
+        registered_root: &Path,
+        changeset: &Value,
+        digest: &str,
+    ) -> Result<Value, String> {
+        let state = self.process.lock().map_err(|_| "助手引擎状态不可用")?;
+        let process = state.as_ref().ok_or("助手引擎尚未启动")?;
+        process.bridge.apply_approved_changeset(
+            session_id,
+            run_id,
+            project_id,
+            registered_root,
+            changeset,
+            digest,
+        )
+    }
+
+    pub fn inspect_changeset_commit(
+        &self,
+        project_id: &str,
+        change_id: &str,
+        digest: &str,
+    ) -> Result<Value, String> {
+        let state = self.process.lock().map_err(|_| "助手引擎状态不可用")?;
+        let process = state.as_ref().ok_or("助手引擎尚未启动")?;
+        process
+            .bridge
+            .inspect_changeset_commit(project_id, change_id, digest)
+    }
+
+    pub fn revoke_project_read(&self, session_id: &str, run_id: &str) {
+        if let Ok(state) = self.process.lock() {
+            if let Some(process) = state.as_ref() {
+                process.bridge.revoke_run(session_id, run_id);
+            }
+        }
+    }
+
+    pub fn migrate_chat_history(&self, store: &super::chat::ChatStore) -> Result<Value, String> {
+        let snapshot = store.history_migration_snapshot()?;
+        let installation_id = snapshot["installation_id"]
+            .as_str()
+            .ok_or("聊天迁移来源身份缺失")?;
+        let expected_digest = snapshot["source_digest"]
+            .as_str()
+            .ok_or("聊天迁移摘要缺失")?;
+        let expected_sessions = snapshot["sessions"]
+            .as_array()
+            .ok_or("聊天迁移会话列表缺失")?
+            .len();
+        let expected_messages = snapshot["messages"]
+            .as_array()
+            .ok_or("聊天迁移消息列表缺失")?
+            .len();
+        let response = self.request(
+            "POST",
+            "/api/desktop/history/import",
+            Some(serde_json::json!({
+                "installation_id": installation_id,
+                "source_digest": expected_digest,
+                "sessions": snapshot["sessions"],
+                "messages": snapshot["messages"],
+            })),
+        )?;
+        let body = response.get("body").ok_or("引擎未返回聊天迁移核验结果")?;
+        validate_history_migration_response(
+            body,
+            installation_id,
+            expected_digest,
+            expected_sessions,
+            expected_messages,
+        )?;
+        Ok(body.clone())
+    }
+
+    pub fn activate_python_chat_history(
+        &self,
+        store: &super::chat::ChatStore,
+    ) -> Result<(), String> {
+        let snapshot = store.history_migration_snapshot()?;
+        let installation_id = snapshot["installation_id"]
+            .as_str()
+            .ok_or("聊天迁移来源身份缺失")?;
+        let digest = snapshot["source_digest"]
+            .as_str()
+            .ok_or("聊天迁移摘要缺失")?;
+        let sessions = snapshot["sessions"]
+            .as_array()
+            .ok_or("聊天迁移会话列表缺失")?
+            .len();
+        let messages = snapshot["messages"]
+            .as_array()
+            .ok_or("聊天迁移消息列表缺失")?
+            .len();
+        let response = self.request(
+            "GET",
+            &format!("/api/desktop/history/import/{installation_id}"),
+            None,
+        )?;
+        let body = response.get("body").ok_or("引擎未返回迁移状态")?;
+        validate_history_migration_response(body, installation_id, digest, sessions, messages)?;
+        store.mark_history_migrated(installation_id, digest)
+    }
+
     pub fn memory_request(
         &self,
         store: &super::chat::ChatStore,
@@ -1083,10 +2037,12 @@ impl EngineManager {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, String> {
-        let is_memory_read = path == "/api/memory/recall" || path.starts_with("/api/memory/recall?")
+        let is_memory_read = path == "/api/memory/recall"
+            || path.starts_with("/api/memory/recall?")
             || path == "/api/layered-memory/context"
             || (method.eq_ignore_ascii_case("GET")
-                && (path == "/api/layered-memory/profile" || path == "/api/layered-memory/episodes"))
+                && (path == "/api/layered-memory/profile"
+                    || path == "/api/layered-memory/episodes"))
             || (method.eq_ignore_ascii_case("GET") && path.starts_with("/api/memory/items/"));
         if is_memory_read {
             store.ensure_memory_reads_allowed()?;
@@ -1139,6 +2095,24 @@ impl EngineManager {
     }
 }
 
+fn validate_history_migration_response(
+    body: &Value,
+    installation_id: &str,
+    digest: &str,
+    sessions: usize,
+    messages: usize,
+) -> Result<(), String> {
+    if body["installation_id"].as_str() != Some(installation_id)
+        || body["digest"].as_str() != Some(digest)
+        || body["sessions"].as_u64() != Some(sessions as u64)
+        || body["messages"].as_u64() != Some(messages as u64)
+        || body["imported"] != true
+    {
+        return Err("聊天迁移核验失败".into());
+    }
+    Ok(())
+}
+
 pub fn flush_memory_source_deletions(
     engine: &EngineManager,
     store: &super::chat::ChatStore,
@@ -1149,7 +2123,10 @@ pub fn flush_memory_source_deletions(
     for deletion in pending {
         let response = engine.request(
             "POST",
-            &format!("/api/memory/sources/delete?request_id={}", deletion.request_id),
+            &format!(
+                "/api/memory/sources/delete?request_id={}",
+                deletion.request_id
+            ),
             Some(serde_json::json!({
                 "source_system": deletion.source_system,
                 "source_installation_id": deletion.source_installation_id,
@@ -1158,7 +2135,11 @@ pub fn flush_memory_source_deletions(
                 "source_revision": deletion.source_revision
             })),
         );
-        if response.is_err() || store.acknowledge_memory_source_deletion(&deletion.request_id).is_err() {
+        if response.is_err()
+            || store
+                .acknowledge_memory_source_deletion(&deletion.request_id)
+                .is_err()
+        {
             break;
         }
     }
@@ -1181,11 +2162,16 @@ pub fn flush_memory_source_ingestions(
             &format!("/api/memory/sources/ingest?request_id={request_id}"),
             Some(payload),
         );
-        if response.is_err() || store.acknowledge_memory_source_ingestion(&request_id).is_err() {
+        if response.is_err()
+            || store
+                .acknowledge_memory_source_ingestion(&request_id)
+                .is_err()
+        {
             break;
         }
     }
-    store.pending_memory_source_ingestions(500)
+    store
+        .pending_memory_source_ingestions(500)
         .map(|items| items.len())
         .unwrap_or(usize::MAX)
 }
@@ -1194,21 +2180,36 @@ pub fn flush_memory_mutations(engine: &EngineManager, store: &super::chat::ChatS
     let mut pending = 0usize;
     if let Ok(items) = store.pending_memory_item_forgets() {
         for (item_id, request_id, expected_version) in items {
-            let Ok(item_id) = uuid::Uuid::parse_str(&item_id) else { pending += 1; continue; };
-            let response = engine.memory_request(store, "POST",
+            let Ok(item_id) = uuid::Uuid::parse_str(&item_id) else {
+                pending += 1;
+                continue;
+            };
+            let response = engine.memory_request(
+                store,
+                "POST",
                 &format!("/api/memory/items/{item_id}/forget?request_id={request_id}"),
-                Some(serde_json::json!({"expected_version": expected_version})));
-            if response.is_ok() { let _ = store.acknowledge_memory_item_forget(&request_id); }
-            else { pending += 1; }
+                Some(serde_json::json!({"expected_version": expected_version})),
+            );
+            if response.is_ok() {
+                let _ = store.acknowledge_memory_item_forget(&request_id);
+            } else {
+                pending += 1;
+            }
         }
     }
     if let Ok(Some((scope_id, request_id, expected_generation))) = store.pending_memory_clear() {
-        let response = engine.memory_request(store, "POST",
+        let response = engine.memory_request(
+            store,
+            "POST",
             &format!("/api/memory/clear?request_id={request_id}"),
             Some(serde_json::json!({"scope":"personal","scope_id":scope_id,
-                "expected_generation":expected_generation})));
-        if response.is_ok() { let _ = store.acknowledge_memory_clear(&request_id); }
-        else { pending += 1; }
+                "expected_generation":expected_generation})),
+        );
+        if response.is_ok() {
+            let _ = store.acknowledge_memory_clear(&request_id);
+        } else {
+            pending += 1;
+        }
     }
     pending
 }
@@ -1218,69 +2219,112 @@ fn memory_ingestion_allowed(store: &super::chat::ChatStore) -> Result<bool, Stri
 }
 
 fn checked_memory_id(value: &str) -> Result<String, String> {
-    uuid::Uuid::parse_str(value).map(|id| id.to_string()).map_err(|_| "记忆标识无效".into())
+    uuid::Uuid::parse_str(value)
+        .map(|id| id.to_string())
+        .map_err(|_| "记忆标识无效".into())
 }
 
-fn ensure_memory_engine(app: &tauri::AppHandle, engine: &EngineManager,
-                        chat: &super::chat::ChatRuntime) -> Result<(), String> {
+fn ensure_memory_engine(
+    app: &tauri::AppHandle,
+    engine: &EngineManager,
+    chat: &super::chat::ChatRuntime,
+) -> Result<(), String> {
     start_for_chat(app, engine, chat)
 }
 
 #[tauri::command]
-pub async fn desktop_memory_items(app: tauri::AppHandle,
+pub async fn desktop_memory_items(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, offset: Option<u32>) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    offset: Option<u32>,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
         let offset = offset.unwrap_or(0).min(100_000);
-        engine.memory_request(&chat.store, "GET",
-            &format!("/api/memory/items?scope=personal&scope_id=windows-local&limit=100&offset={offset}"), None)
-    }).await.map_err(|_| "读取记忆列表失败".to_string())?
+        engine.memory_request(
+            &chat.store,
+            "GET",
+            &format!(
+                "/api/memory/items?scope=personal&scope_id=windows-local&limit=100&offset={offset}"
+            ),
+            None,
+        )
+    })
+    .await
+    .map_err(|_| "读取记忆列表失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_status(app: tauri::AppHandle,
+pub async fn desktop_memory_status(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
         engine.memory_request(&chat.store, "GET", "/api/memory/status", None)
-    }).await.map_err(|_| "读取记忆状态失败".to_string())?
+    })
+    .await
+    .map_err(|_| "读取记忆状态失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_export(app: tauri::AppHandle,
+pub async fn desktop_memory_export(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
         engine.memory_request(&chat.store, "GET", "/api/memory/export", None)
-    }).await.map_err(|_| "导出记忆失败".to_string())?
+    })
+    .await
+    .map_err(|_| "导出记忆失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_chat_memory_contexts(app: tauri::AppHandle,
+pub async fn desktop_chat_memory_contexts(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, session_id: String) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let contexts = chat.store.memory_chat_contexts(&session_id)?;
-        if contexts.is_empty() { return Ok(serde_json::json!({"contexts":[]})); }
+        if contexts.is_empty() {
+            return Ok(serde_json::json!({"contexts":[]}));
+        }
         ensure_memory_engine(&app, &engine, &chat)?;
         let mut rendered = Vec::with_capacity(contexts.len());
         for context in contexts {
             let mut items = Vec::with_capacity(context.items.len());
             let mut unavailable_count = 0usize;
             for reference in &context.items {
-                let detail = engine.memory_request(&chat.store, "GET",
-                    &format!("/api/memory/items/{}/versions/{}", reference.item_id, reference.version), None);
+                let detail = engine.memory_request(
+                    &chat.store,
+                    "GET",
+                    &format!(
+                        "/api/memory/items/{}/versions/{}",
+                        reference.item_id, reference.version
+                    ),
+                    None,
+                );
                 match detail {
                     Ok(value) => {
-                        if let Some(item) = value.get("body") { items.push(item.clone()); }
-                        else { unavailable_count += 1; }
+                        if let Some(item) = value.get("body") {
+                            items.push(item.clone());
+                        } else {
+                            unavailable_count += 1;
+                        }
                     }
                     Err(error) if error == "memory_version_not_found" => unavailable_count += 1,
                     Err(error) => return Err(error),
@@ -1295,41 +2339,66 @@ pub async fn desktop_chat_memory_contexts(app: tauri::AppHandle,
             }));
         }
         Ok(serde_json::json!({"contexts":rendered}))
-    }).await.map_err(|_| "读取本轮记忆来源失败".to_string())?
+    })
+    .await
+    .map_err(|_| "读取本轮记忆来源失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_candidates(app: tauri::AppHandle,
+pub async fn desktop_memory_candidates(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
         engine.memory_request(&chat.store, "GET", "/api/memory/candidates", None)
-    }).await.map_err(|_| "读取记忆候选失败".to_string())?
+    })
+    .await
+    .map_err(|_| "读取记忆候选失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_item(app: tauri::AppHandle,
+pub async fn desktop_memory_item(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryItemIdInput) -> Result<Value, String> {
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    input: MemoryItemIdInput,
+) -> Result<Value, String> {
     let item_id = checked_memory_id(&input.item_id)?;
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
-        engine.memory_request(&chat.store, "GET", &format!("/api/memory/items/{item_id}"), None)
-    }).await.map_err(|_| "读取记忆详情失败".to_string())?
+        engine.memory_request(
+            &chat.store,
+            "GET",
+            &format!("/api/memory/items/{item_id}"),
+            None,
+        )
+    })
+    .await
+    .map_err(|_| "读取记忆详情失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_correct(app: tauri::AppHandle,
+pub async fn desktop_memory_correct(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryCorrectInput) -> Result<Value, String> {
-    if input.content.trim().is_empty() || input.content.chars().count() > 4000 || input.expected_version == 0 {
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    input: MemoryCorrectInput,
+) -> Result<Value, String> {
+    if input.content.trim().is_empty()
+        || input.content.chars().count() > 4000
+        || input.expected_version == 0
+    {
         return Err("记忆内容或版本无效".into());
     }
     let item_id = checked_memory_id(&input.item_id)?;
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
         engine.memory_request(&chat.store, "PATCH",
@@ -1340,10 +2409,13 @@ pub async fn desktop_memory_correct(app: tauri::AppHandle,
 }
 
 #[tauri::command]
-pub async fn desktop_memory_forget(app: tauri::AppHandle,
+pub async fn desktop_memory_forget(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryItemIdInput,
-    expected_version: u32) -> Result<Value, String> {
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    input: MemoryItemIdInput,
+    expected_version: u32,
+) -> Result<Value, String> {
     let item_id = checked_memory_id(&input.item_id)?;
     let chat = chat.inner().clone();
     {
@@ -1351,7 +2423,8 @@ pub async fn desktop_memory_forget(app: tauri::AppHandle,
         if generation.is_some() {
             return Err("请等待当前回复完成后再忘记记忆".into());
         }
-        chat.store.enqueue_memory_item_forget(&item_id, i64::from(expected_version))?;
+        chat.store
+            .enqueue_memory_item_forget(&item_id, i64::from(expected_version))?;
     }
     let engine = engine.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1361,21 +2434,28 @@ pub async fn desktop_memory_forget(app: tauri::AppHandle,
         let pending = flush_memory_mutations(&engine, &chat.store);
         Ok::<_, String>(serde_json::json!({"item_id":item_id,
             "status":if pending == 0 {"forgotten"} else {"pending_sync"}}))
-    }).await.map_err(|_| "忘记记忆失败".to_string())??;
+    })
+    .await
+    .map_err(|_| "忘记记忆失败".to_string())??;
     Ok(result)
 }
 
 #[tauri::command]
-pub async fn desktop_memory_clear(app: tauri::AppHandle,
+pub async fn desktop_memory_clear(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryGenerationInput) -> Result<Value, String> {
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    input: MemoryGenerationInput,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     let _request_id = {
         let generation = chat.generation.lock().map_err(|_| "聊天状态不可用")?;
         if generation.is_some() {
             return Err("请等待当前回复完成后再清空记忆".into());
         }
-        chat.store.enqueue_memory_clear("windows-local", input.expected_generation as i64)?
+        chat.store
+            .enqueue_memory_clear("windows-local", input.expected_generation as i64)?
     };
     tauri::async_runtime::spawn_blocking(move || {
         if ensure_memory_engine(&app, &engine, &chat).is_err() {
@@ -1383,23 +2463,36 @@ pub async fn desktop_memory_clear(app: tauri::AppHandle,
         }
         let pending = flush_memory_mutations(&engine, &chat.store);
         Ok(serde_json::json!({"status":if pending == 0 {"cleared"} else {"pending_sync"}}))
-    }).await.map_err(|_| "清空记忆失败".to_string())?
+    })
+    .await
+    .map_err(|_| "清空记忆失败".to_string())?
 }
 
 #[tauri::command]
-pub async fn desktop_memory_candidate_decision(app: tauri::AppHandle,
+pub async fn desktop_memory_candidate_decision(
+    app: tauri::AppHandle,
     engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
-    chat: tauri::State<'_, super::chat::ChatRuntime>, input: MemoryCandidateIdInput,
-    action: String) -> Result<Value, String> {
-    if !matches!(action.as_str(), "accept" | "reject") { return Err("候选操作无效".into()); }
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    input: MemoryCandidateIdInput,
+    action: String,
+) -> Result<Value, String> {
+    if !matches!(action.as_str(), "accept" | "reject") {
+        return Err("候选操作无效".into());
+    }
     let candidate_id = checked_memory_id(&input.candidate_id)?;
-    let engine = engine.inner().clone(); let chat = chat.inner().clone();
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_memory_engine(&app, &engine, &chat)?;
-        engine.memory_request(&chat.store, "POST",
+        engine.memory_request(
+            &chat.store,
+            "POST",
             &format!("/api/memory/candidates/{candidate_id}/decision"),
-            Some(serde_json::json!({"action":action})))
-    }).await.map_err(|_| "处理记忆候选失败".to_string())?
+            Some(serde_json::json!({"action":action})),
+        )
+    })
+    .await
+    .map_err(|_| "处理记忆候选失败".to_string())?
 }
 
 #[tauri::command]
@@ -1421,14 +2514,22 @@ pub fn desktop_memory_set_enabled(
     chat: tauri::State<'_, super::chat::ChatRuntime>,
     enabled: bool,
 ) -> Result<serde_json::Value, String> {
-    if chat.generation.lock().map_err(|_| "聊天状态不可用")?.is_some() {
+    if chat
+        .generation
+        .lock()
+        .map_err(|_| "聊天状态不可用")?
+        .is_some()
+    {
         return Err("请等待当前回复完成后再修改记忆设置".into());
     }
     let current = chat.store.memory_enabled()?;
     if current != enabled {
         if engine.identity()?.is_some() {
             let status = engine.request("GET", "/api/desktop/connection", None)?;
-            let active_tasks = status.pointer("/body/active_tasks").and_then(Value::as_u64).unwrap_or(0);
+            let active_tasks = status
+                .pointer("/body/active_tasks")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if active_tasks > 0 {
                 return Err("助手任务运行期间不能切换记忆设置".into());
             }
@@ -1444,9 +2545,16 @@ pub(crate) fn start_for_chat(
     engine: &EngineManager,
     chat: &super::chat::ChatRuntime,
 ) -> Result<(), String> {
-    let config = chat.config.lock().map_err(|_| "聊天配置不可用")?.clone()
+    let config = chat
+        .config
+        .lock()
+        .map_err(|_| "聊天配置不可用")?
+        .clone()
         .ok_or("请先配置模型")?;
-    let key = chat.credentials.get()?.filter(|value| !value.is_empty())
+    let key = chat
+        .credentials
+        .get()?
+        .filter(|value| !value.is_empty())
         .ok_or("请先配置 API Key")?;
     engine.start_with_memory(app, &config, &key, chat.store.memory_enabled()?)?;
     let _ = flush_memory_source_deletions(engine, &chat.store);
@@ -1467,18 +2575,33 @@ fn ensure_engine_session(
     }
     let session_id = (|| {
         let listing = engine.request("GET", "/api/sessions?limit=200&offset=0", None)?;
-        if let Some(existing) = listing.pointer("/body/sessions").and_then(Value::as_array)
-            .and_then(|items| items.iter().find(|item|
-                item.pointer("/metadata/desktop_session_id").and_then(Value::as_str)
-                    == Some(desktop_session_id)))
-            .and_then(|item| item.get("id")).and_then(Value::as_str) {
+        if let Some(existing) = listing
+            .pointer("/body/sessions")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.pointer("/metadata/desktop_session_id")
+                        .and_then(Value::as_str)
+                        == Some(desktop_session_id)
+                })
+            })
+            .and_then(|item| item.get("id"))
+            .and_then(Value::as_str)
+        {
             return Ok::<String, String>(existing.to_string());
         }
-        let response = engine.request("POST", "/api/sessions", Some(serde_json::json!({
-            "metadata": {"title": "桌面助手会话", "desktop_session_id": desktop_session_id}
-        })))?;
-        response.pointer("/body/session_id").and_then(Value::as_str)
-            .map(str::to_owned).ok_or_else(|| "助手引擎未返回会话标识".into())
+        let response = engine.request(
+            "POST",
+            "/api/sessions",
+            Some(serde_json::json!({
+                "metadata": {"title": "桌面助手会话", "desktop_session_id": desktop_session_id}
+            })),
+        )?;
+        response
+            .pointer("/body/session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "助手引擎未返回会话标识".into())
     })()?;
     store.bind_engine_session(desktop_session_id, &session_id)?;
     Ok(session_id)
@@ -1510,7 +2633,8 @@ pub async fn desktop_agent_start(
             .get()?
             .filter(|value| !value.is_empty())
             .ok_or("请先配置 API Key")?;
-        let identity = engine.start_with_memory(&app, &config, &key, chat.store.memory_enabled()?)?;
+        let identity =
+            engine.start_with_memory(&app, &config, &key, chat.store.memory_enabled()?)?;
         let _ = flush_memory_source_deletions(&engine, &chat.store);
         if chat.store.memory_enabled()? {
             let _ = flush_memory_source_ingestions(&engine, &chat.store);
@@ -1519,6 +2643,199 @@ pub async fn desktop_agent_start(
     })
     .await
     .map_err(|_| "助手引擎启动异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_chat_migrate_history(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Value, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        engine.migrate_chat_history(&chat.store)
+    })
+    .await
+    .map_err(|_| "聊天历史迁移异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_chat_activate_python_history(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        engine.activate_python_chat_history(&chat.store)
+    })
+    .await
+    .map_err(|_| "聊天数据源切换异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_sessions(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Vec<Value>, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        let response = engine.request("GET", "/api/sessions?limit=200&offset=0", None)?;
+        response
+            .pointer("/body/sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| "引擎未返回会话列表".into())
+    })
+    .await
+    .map_err(|_| "读取引擎会话列表异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_history(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<Vec<Value>, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        let offset = offset.unwrap_or(0);
+        let limit = limit.unwrap_or(500).clamp(1, 500);
+        let response = engine.request(
+            "GET",
+            &format!("/api/sessions/{session_id}/messages?limit={limit}&offset={offset}"),
+            None,
+        )?;
+        response
+            .pointer("/body/messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| "引擎未返回对话消息".into())
+    })
+    .await
+    .map_err(|_| "读取引擎对话消息异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_latest_session(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+) -> Result<Option<String>, String> {
+    let sessions = desktop_runtime_sessions(app, engine, chat).await?;
+    Ok(sessions
+        .last()
+        .and_then(|item| item["id"].as_str())
+        .map(str::to_owned))
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_create_session(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    project_id: Option<String>,
+) -> Result<String, String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        let response = engine.request(
+            "POST",
+            "/api/sessions",
+            Some(serde_json::json!({
+                "metadata": {"title": "新对话"}, "project_id": project_id
+            })),
+        )?;
+        response
+            .pointer("/body/session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "引擎未返回会话标识".into())
+    })
+    .await
+    .map_err(|_| "创建引擎会话异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_rename_session(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+    title: String,
+    expected_version: u32,
+) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        engine.request(
+            "PATCH",
+            &format!("/api/sessions/{session_id}/title"),
+            Some(serde_json::json!({
+                "title": title, "expected_version": expected_version
+            })),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "重命名引擎会话异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_set_session_project(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+    project_id: Option<String>,
+) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        engine.request(
+            "PATCH",
+            &format!("/api/sessions/{session_id}/project"),
+            Some(serde_json::json!({
+                "project_id": project_id
+            })),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "更新引擎会话项目异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_runtime_delete_session(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        engine.request("DELETE", &format!("/api/sessions/{session_id}"), None)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "删除引擎会话异常".to_string())?
 }
 
 #[tauri::command]
@@ -1535,26 +2852,71 @@ pub async fn desktop_agent_submit_task(
     chat: tauri::State<'_, super::chat::ChatRuntime>,
     input: AgentTaskInput,
 ) -> Result<Value, String> {
-    if input.content.trim().is_empty() || input.content.len() > 16_384
-        || input.request_id.trim().is_empty() || input.request_id.len() > 200 {
+    if input.content.trim().is_empty()
+        || input.content.len() > 16_384
+        || input.request_id.trim().is_empty()
+        || input.request_id.len() > 200
+    {
         return Err("任务内容为空、过长或请求标识无效".into());
     }
     let engine = engine.inner().clone();
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
         start_for_chat(&app, &engine, &chat)?;
-        let engine_session = ensure_engine_session(&engine, &chat.store, &input.session_id)?;
-        let history = chat.store.request_context(&input.session_id, 60 * 1024)?;
-        let context_messages = history.into_iter().rev().take(80).collect::<Vec<_>>().into_iter().rev().map(|item| serde_json::json!({
-            "role": item.role, "content": item.content
-        })).collect::<Vec<_>>();
+        let python_history = chat.store.history_source()? == "python";
+        let engine_session = if python_history {
+            input.session_id.clone()
+        } else {
+            ensure_engine_session(&engine, &chat.store, &input.session_id)?
+        };
+        let context_messages = if python_history {
+            let response = engine.request(
+                "GET",
+                &format!("/api/sessions/{engine_session}/messages?limit=500&offset=0"),
+                None,
+            )?;
+            response
+                .pointer("/body/messages")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .filter_map(|item| {
+                    Some(serde_json::json!({"role": item["role"], "content": item["content"]}))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            chat.store
+                .request_context(&input.session_id, 60 * 1024)?
+                .into_iter()
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|item| {
+                    serde_json::json!({
+                        "role": item.role, "content": item.content
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
         if !matches!(input.kind.as_str(), "assistant" | "writing") {
             return Err("桌面任务类型不受支持".into());
         }
-        chat.store.append_message_with_id(
-            &format!("agent-user-{}", input.request_id),
-            &input.session_id, "user", &input.content,
-        )?;
+        if !python_history {
+            chat.store.append_message_with_id(
+                &format!("agent-user-{}", input.request_id),
+                &input.session_id,
+                "user",
+                &input.content,
+            )?;
+        }
         let mut request = serde_json::json!({
             "kind": input.kind, "message": input.content,
             "client_request_id": input.request_id
@@ -1562,14 +2924,22 @@ pub async fn desktop_agent_submit_task(
         if request["kind"] == "assistant" {
             request["context_messages"] = Value::Array(context_messages);
         }
-        let response = engine.request("POST", &format!("/api/sessions/{engine_session}/tasks"),
-            Some(request))?;
-        let body = response.get("body").cloned().ok_or_else(|| "助手引擎未返回任务".to_string())?;
+        let response = engine.request(
+            "POST",
+            &format!("/api/sessions/{engine_session}/tasks"),
+            Some(request),
+        )?;
+        let body = response
+            .get("body")
+            .cloned()
+            .ok_or_else(|| "助手引擎未返回任务".to_string())?;
         if body["session_id"].as_str() != Some(engine_session.as_str()) {
             return Err("助手任务会话不匹配".into());
         }
         Ok(body)
-    }).await.map_err(|_| "助手任务提交异常".to_string())?
+    })
+    .await
+    .map_err(|_| "助手任务提交异常".to_string())?
 }
 
 #[tauri::command]
@@ -1582,14 +2952,21 @@ pub async fn desktop_agent_session_tasks(
     let engine = engine.inner().clone();
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(engine_session) = chat.store.engine_session(&session_id)? else {
-            return Ok(Vec::new());
-        };
         start_for_chat(&app, &engine, &chat)?;
-        let response = engine.request("GET", &format!("/api/sessions/{engine_session}/tasks?limit=50"), None)?;
-        response.pointer("/body/tasks").and_then(Value::as_array).cloned()
+        let engine_session = engine_session_for_chat(&chat.store, &session_id)?;
+        let response = engine.request(
+            "GET",
+            &format!("/api/sessions/{engine_session}/tasks?limit=50"),
+            None,
+        )?;
+        response
+            .pointer("/body/tasks")
+            .and_then(Value::as_array)
+            .cloned()
             .ok_or("助手引擎未返回任务历史".into())
-    }).await.map_err(|_| "助手任务恢复异常".to_string())?
+    })
+    .await
+    .map_err(|_| "助手任务恢复异常".to_string())?
 }
 
 #[tauri::command]
@@ -1603,9 +2980,14 @@ pub async fn desktop_agent_workspaces(
     tauri::async_runtime::spawn_blocking(move || {
         start_for_chat(&app, &engine, &chat)?;
         let response = engine.request("GET", "/api/workspaces", None)?;
-        response.pointer("/body/workspaces").and_then(Value::as_array).cloned()
+        response
+            .pointer("/body/workspaces")
+            .and_then(Value::as_array)
+            .cloned()
             .ok_or("助手引擎未返回可用工作区".into())
-    }).await.map_err(|_| "助手工作区查询异常".to_string())?
+    })
+    .await
+    .map_err(|_| "助手工作区查询异常".to_string())?
 }
 
 #[tauri::command]
@@ -1622,10 +3004,18 @@ pub async fn desktop_agent_register_workspace(
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         start_for_chat(&app, &engine, &chat)?;
-        let response = engine.request("POST", "/api/desktop/workspaces", Some(
-            serde_json::json!({"path":path})))?;
-        response.get("body").cloned().ok_or_else(|| "助手引擎未返回目录授权".into())
-    }).await.map_err(|_| "助手目录授权异常".to_string())?
+        let response = engine.request(
+            "POST",
+            "/api/desktop/workspaces",
+            Some(serde_json::json!({"path":path})),
+        )?;
+        response
+            .get("body")
+            .cloned()
+            .ok_or_else(|| "助手引擎未返回目录授权".into())
+    })
+    .await
+    .map_err(|_| "助手目录授权异常".to_string())?
 }
 
 #[tauri::command]
@@ -1640,19 +3030,36 @@ pub async fn desktop_agent_task_status(
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         start_for_chat(&app, &engine, &chat)?;
-        let engine_session = chat.store.engine_session(&session_id)?
-            .ok_or_else(|| "助手会话映射不存在".to_string())?;
+        let engine_session = engine_session_for_chat(&chat.store, &session_id)?;
         let body = task_for_session(&engine, &engine_session, &run_id)?;
-        if body["status"] == "completed" {
-            let answer = body.pointer("/result/answer").and_then(Value::as_str).unwrap_or("");
+        if chat.store.history_source()? != "python" && body["status"] == "completed" {
+            let answer = body
+                .pointer("/result/answer")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if !answer.is_empty() {
                 chat.store.append_message_with_id(
-                    &format!("agent-assistant-{run_id}"), &session_id, "assistant", answer,
+                    &format!("agent-assistant-{run_id}"),
+                    &session_id,
+                    "assistant",
+                    answer,
                 )?;
             }
         }
+        if matches!(
+            body["status"].as_str(),
+            Some("completed" | "failed" | "cancelled" | "timed_out")
+        ) {
+            let runtime_session = body
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or(&engine_session);
+            engine.revoke_project_read(runtime_session, &run_id);
+        }
         Ok(body)
-    }).await.map_err(|_| "助手任务状态查询异常".to_string())?
+    })
+    .await
+    .map_err(|_| "助手任务状态查询异常".to_string())?
 }
 
 #[tauri::command]
@@ -1669,11 +3076,190 @@ pub async fn desktop_agent_task_action(
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
         start_for_chat(&app, &engine, &chat)?;
-        let engine_session = chat.store.engine_session(&session_id)?
-            .ok_or_else(|| "助手会话映射不存在".to_string())?;
-        task_for_session(&engine, &engine_session, &run_id.to_string())?;
-        engine.request("POST", &format!("/api/tasks/{run_id}/actions"), Some(input))
-    }).await.map_err(|_| "助手任务动作异常".to_string())?
+        let engine_session = engine_session_for_chat(&chat.store, &session_id)?;
+        let task = task_for_session(&engine, &engine_session, &run_id.to_string())?;
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let runtime_session = task
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or("助手任务会话标识缺失")?
+            .to_owned();
+        let mut request = input;
+        let mut issued_grant = false;
+        if action == "authorize_project_read" {
+            let pending = task.get("pending_action").ok_or("项目读取授权请求已失效")?;
+            let action_id = request
+                .get("action_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if task.get("status").and_then(Value::as_str) != Some("waiting")
+                || pending.get("action_type").and_then(Value::as_str) != Some("project_read")
+                || pending.get("action_id").and_then(Value::as_str) != Some(action_id)
+            {
+                return Err("项目读取授权请求已失效".into());
+            }
+            let project_id = pending
+                .pointer("/display_data/project_id")
+                .and_then(Value::as_str)
+                .ok_or("项目身份缺失")?;
+            let session_project = session_project_id_for_chat(&engine, &chat.store, &session_id)?;
+            if session_project.as_deref() != Some(project_id) {
+                return Err("项目与对话不匹配".into());
+            }
+            let project = chat
+                .store
+                .projects()?
+                .into_iter()
+                .find(|project| project.id == project_id && project.available)
+                .ok_or("项目不可用")?;
+            let grant = engine.authorize_project_read(
+                &runtime_session,
+                &run_id.to_string(),
+                project_id,
+                Path::new(&project.root_path),
+            )?;
+            request["payload"] = serde_json::json!({"grant": grant});
+            issued_grant = true;
+        } else if action == "approve_action" {
+            let pending = task.get("pending_action").ok_or("待审批修改请求已失效")?;
+            if pending.get("action_type").and_then(Value::as_str) == Some("changeset_approval") {
+                let grant_response = engine.request(
+                    "GET",
+                    &format!("/api/tasks/{run_id}/desktop-project-read-grant?session_id={engine_session}"),
+                    None,
+                )?;
+                let grant = grant_response
+                    .pointer("/body/grant")
+                    .and_then(Value::as_str)
+                    .ok_or("项目读取授权恢复失败")?;
+                let project_id = pending
+                    .pointer("/display_data/changeset/project_id")
+                    .and_then(Value::as_str)
+                    .ok_or("项目身份缺失")?;
+                let project = chat
+                    .store
+                    .projects()?
+                    .into_iter()
+                    .find(|project| project.id == project_id && project.available)
+                    .ok_or("项目不可用")?;
+                engine.restore_project_read_grant(
+                    grant,
+                    &runtime_session,
+                    &run_id.to_string(),
+                    project_id,
+                    Path::new(&project.root_path),
+                )?;
+            }
+            request = bind_changeset_commit_receipt(
+                &engine,
+                &chat.store,
+                &session_id,
+                &engine_session,
+                &run_id.to_string(),
+                &task,
+                request,
+            )?;
+        }
+        let result = engine.request(
+            "POST",
+            &format!("/api/tasks/{run_id}/actions"),
+            Some(request),
+        );
+        match result {
+            Ok(body) => {
+                if action == "reject_action"
+                    || action == "cancel"
+                    || matches!(
+                        body.pointer("/body/status").and_then(Value::as_str),
+                        Some("completed" | "failed" | "cancelled" | "timed_out")
+                    )
+                {
+                    engine.revoke_project_read(&runtime_session, &run_id.to_string());
+                }
+                Ok(body)
+            }
+            Err(error) => {
+                if issued_grant {
+                    engine.revoke_project_read(&runtime_session, &run_id.to_string());
+                }
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| "助手任务动作异常".to_string())?
+}
+
+#[tauri::command]
+pub async fn desktop_agent_inspect_changeset(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, std::sync::Arc<EngineManager>>,
+    chat: tauri::State<'_, super::chat::ChatRuntime>,
+    session_id: String,
+    run_id: String,
+) -> Result<Value, String> {
+    let run_id = uuid::Uuid::parse_str(&run_id).map_err(|_| "助手任务标识无效")?;
+    let engine = engine.inner().clone();
+    let chat = chat.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        start_for_chat(&app, &engine, &chat)?;
+        let engine_session = engine_session_for_chat(&chat.store, &session_id)?;
+        let task = task_for_session(&engine, &engine_session, &run_id.to_string())?;
+        let pending = task.get("pending_action").ok_or("没有待审批修改")?;
+        if pending.get("action_type").and_then(Value::as_str) != Some("changeset_approval") {
+            return Err("当前任务不是文件修改审批".into());
+        }
+        let changeset = pending
+            .pointer("/display_data/changeset")
+            .ok_or("修改提案缺失")?;
+        let proposed_session = changeset
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or("提案会话身份缺失")?;
+        if proposed_session
+            != task
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            || proposed_session != engine_session
+        {
+            return Err("修改提案身份不匹配".into());
+        }
+        let project_id = changeset
+            .get("project_id")
+            .and_then(Value::as_str)
+            .ok_or("项目身份缺失")?;
+        let change_id = changeset
+            .get("change_id")
+            .and_then(Value::as_str)
+            .ok_or("修改提案标识缺失")?;
+        let digest = pending
+            .pointer("/display_data/digest")
+            .and_then(Value::as_str)
+            .ok_or("修改提案摘要缺失")?;
+        if pending
+            .pointer("/frozen_parameters/change_id")
+            .and_then(Value::as_str)
+            != Some(change_id)
+            || pending
+                .pointer("/frozen_parameters/digest")
+                .and_then(Value::as_str)
+                != Some(digest)
+        {
+            return Err("修改提案摘要校验失败".into());
+        }
+        let session_project = session_project_id_for_chat(&engine, &chat.store, &session_id)?;
+        if session_project.as_deref() != Some(project_id) {
+            return Err("项目与对话不匹配".into());
+        }
+        engine.inspect_changeset_commit(project_id, change_id, digest)
+    })
+    .await
+    .map_err(|_| "提交状态查询异常".to_string())?
 }
 
 #[tauri::command]
@@ -1688,20 +3274,158 @@ pub async fn desktop_agent_task_events(
     let engine = engine.inner().clone();
     let chat = chat.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let engine_session = chat.store.engine_session(&session_id)?
-            .ok_or_else(|| "助手会话映射不存在".to_string())?;
+        let engine_session = engine_session_for_chat(&chat.store, &session_id)?;
         task_for_session(&engine, &engine_session, &run_id.to_string())?;
-        engine.request("GET", &format!("/api/tasks/{run_id}/events?after={after}&limit=30"), None)
-    }).await.map_err(|_| "助手任务事件查询异常".to_string())?
+        engine.request(
+            "GET",
+            &format!("/api/tasks/{run_id}/events?after={after}&limit=30"),
+            None,
+        )
+    })
+    .await
+    .map_err(|_| "助手任务事件查询异常".to_string())?
 }
 
-fn task_for_session(engine: &EngineManager, engine_session: &str, run_id: &str) -> Result<Value, String> {
+fn task_for_session(
+    engine: &EngineManager,
+    engine_session: &str,
+    run_id: &str,
+) -> Result<Value, String> {
     let response = engine.request("GET", &format!("/api/tasks/{run_id}"), None)?;
-    let body = response.get("body").cloned().ok_or_else(|| "助手引擎未返回任务状态".to_string())?;
+    let body = response
+        .get("body")
+        .cloned()
+        .ok_or_else(|| "助手引擎未返回任务状态".to_string())?;
     if body["session_id"].as_str() != Some(engine_session) {
         return Err("助手任务不属于当前会话".into());
     }
     Ok(body)
+}
+
+fn bind_changeset_commit_receipt(
+    engine: &EngineManager,
+    store: &super::chat::ChatStore,
+    desktop_session_id: &str,
+    engine_session_id: &str,
+    run_id: &str,
+    task: &Value,
+    mut action_request: Value,
+) -> Result<Value, String> {
+    let pending = task.get("pending_action").ok_or("待审批修改请求已失效")?;
+    let action_id = action_request
+        .get("action_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if task.get("status").and_then(Value::as_str) != Some("waiting")
+        || pending.get("action_type").and_then(Value::as_str) != Some("changeset_approval")
+        || pending.get("action_id").and_then(Value::as_str) != Some(action_id)
+    {
+        return Err("待审批修改请求已失效".into());
+    }
+    let change_id = pending
+        .pointer("/display_data/changeset/change_id")
+        .and_then(Value::as_str)
+        .ok_or("修改提案缺少标识")?;
+    let changeset = pending
+        .pointer("/display_data/changeset")
+        .cloned()
+        .ok_or("修改提案缺失")?;
+    let digest = pending
+        .pointer("/display_data/digest")
+        .and_then(Value::as_str)
+        .ok_or("修改提案摘要缺失")?;
+    if pending
+        .pointer("/frozen_parameters/change_id")
+        .and_then(Value::as_str)
+        != Some(change_id)
+        || pending
+            .pointer("/frozen_parameters/digest")
+            .and_then(Value::as_str)
+            != Some(digest)
+    {
+        return Err("修改提案摘要校验失败".into());
+    }
+    let project_id = changeset
+        .get("project_id")
+        .and_then(Value::as_str)
+        .ok_or("项目身份缺失")?;
+    if changeset.get("session_id").and_then(Value::as_str) != Some(engine_session_id)
+        || changeset.get("run_id").and_then(Value::as_str) != Some(run_id)
+        || task.get("session_id").and_then(Value::as_str) != Some(engine_session_id)
+    {
+        return Err("修改提案身份不匹配".into());
+    }
+    let session_project = session_project_id_for_chat(engine, store, desktop_session_id)?;
+    if session_project.as_deref() != Some(project_id) {
+        return Err("项目与对话不匹配".into());
+    }
+    let project = store
+        .projects()?
+        .into_iter()
+        .find(|project| project.id == project_id && project.available)
+        .ok_or("项目不可用")?;
+    let receipt = engine.apply_approved_changeset(
+        engine_session_id,
+        run_id,
+        project_id,
+        Path::new(&project.root_path),
+        &changeset,
+        digest,
+    )?;
+    if receipt.get("status").and_then(Value::as_str) != Some("completed") {
+        return Err("修改未能完整应用；提交记录已保留待检查".into());
+    }
+    action_request["payload"] = serde_json::json!({"commit_receipt": receipt});
+    Ok(action_request)
+}
+
+fn engine_session_for_chat(
+    store: &super::chat::ChatStore,
+    desktop_session: &str,
+) -> Result<String, String> {
+    if store.history_source()? == "python" {
+        return Ok(desktop_session.to_owned());
+    }
+    store
+        .engine_session(desktop_session)?
+        .ok_or_else(|| "助手会话映射不存在".into())
+}
+
+fn runtime_session_project_id(
+    sessions: &[Value],
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    sessions
+        .iter()
+        .find(|session| session.get("id").and_then(Value::as_str) == Some(session_id))
+        .map(|session| {
+            session
+                .get("project_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| "对话不存在".into())
+}
+
+fn session_project_id_for_chat(
+    engine: &EngineManager,
+    store: &super::chat::ChatStore,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    if store.history_source()? == "python" {
+        let response = engine.request("GET", "/api/sessions?limit=200&offset=0", None)?;
+        let sessions = response
+            .pointer("/body/sessions")
+            .and_then(Value::as_array)
+            .ok_or("引擎未返回会话列表")?;
+        return runtime_session_project_id(sessions, session_id);
+    }
+    store
+        .sessions()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .map(|session| session.project_id)
+        .ok_or_else(|| "对话不存在".into())
 }
 
 #[tauri::command]

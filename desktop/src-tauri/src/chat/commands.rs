@@ -13,6 +13,13 @@ pub fn desktop_chat_status(runtime: tauri::State<'_, ChatRuntime>) -> ChatStatus
 }
 
 #[tauri::command]
+pub fn desktop_chat_history_source(
+    runtime: tauri::State<'_, ChatRuntime>,
+) -> Result<String, String> {
+    runtime.store.history_source()
+}
+
+#[tauri::command]
 pub async fn desktop_chat_pick_project_directory(
     app: tauri::AppHandle,
 ) -> Result<Option<String>, String> {
@@ -162,8 +169,11 @@ pub async fn desktop_chat_delete_session(
     tauri::async_runtime::spawn_blocking(move || {
         runtime.cancel(Some(&session_id))?;
         if runtime.store.memory_enabled()? && engine.identity()?.is_some() {
-            let _ = engine.request("POST", &format!("/api/layered-memory/session/{session_id}/flush"),
-                Some(serde_json::json!({})));
+            let _ = engine.request(
+                "POST",
+                &format!("/api/layered-memory/session/{session_id}/flush"),
+                Some(serde_json::json!({})),
+            );
         }
         runtime.store.delete_session(&session_id)?;
         let pending = crate::engine::flush_memory_source_deletions(&engine, &runtime.store);
@@ -295,12 +305,25 @@ pub async fn desktop_chat_send(
 
 pub(super) fn is_explicit_memory_intent(content: &str) -> bool {
     let normalized = content.trim().to_lowercase();
-    if normalized.starts_with("不要记住") || normalized.starts_with("别记住")
-        || normalized.starts_with("don't remember") || normalized.starts_with("do not remember") {
+    if normalized.starts_with("不要记住")
+        || normalized.starts_with("别记住")
+        || normalized.starts_with("don't remember")
+        || normalized.starts_with("do not remember")
+    {
         return false;
     }
-    ["记住", "记一下", "请记得", "以后都", "更正我的", "纠正我的", "remember that", "please remember"]
-        .iter().any(|cue| normalized.starts_with(cue))
+    [
+        "记住",
+        "记一下",
+        "请记得",
+        "以后都",
+        "更正我的",
+        "纠正我的",
+        "remember that",
+        "please remember",
+    ]
+    .iter()
+    .any(|cue| normalized.starts_with(cue))
 }
 
 #[tauri::command]

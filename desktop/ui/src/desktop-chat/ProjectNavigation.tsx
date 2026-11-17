@@ -1,6 +1,6 @@
 import { ChevronDown, Folder, MessageSquare, MoreHorizontal, Plus, Settings } from 'lucide-react';
 
-export type ChatSession = { id: string; title: string; created_at: string; project_id: string | null };
+export type ChatSession = { id: string; title: string; created_at: string; project_id: string | null; title_version?: number };
 export type ChatProject = { id: string; name: string; root_path: string; available: boolean; created_at: string; updated_at: string };
 
 type Props = {

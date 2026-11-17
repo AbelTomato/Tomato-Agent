@@ -1,9 +1,10 @@
 param(
-    [ValidateSet("test", "build", "build-release", "run")][string]$Action = "test",
+    [ValidateSet("test", "dev", "build", "build-release", "run")][string]$Action = "test",
     [string]$WslDistro = $env:WSL_DISTRO_NAME,
     [string]$RepoRoot,
     [string]$BundleIdentifier,
-    [string]$BuildRoot
+    [string]$BuildRoot,
+    [switch]$AcceptanceCrashHook
 )
 $ErrorActionPreference = "Stop"
 
@@ -13,10 +14,16 @@ if (($env:PATHEXT -split ';') -notcontains '.EXE') {
     $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;$env:PATHEXT"
 }
 
+$softwareRoot = "D:\Software\TomatoAgent"
+$tempRoot = Join-Path $softwareRoot "temp"
+New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+$env:TEMP = $tempRoot
+$env:TMP = $tempRoot
+
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 $env:Path = (Join-Path $env:USERPROFILE ".cargo\bin") + ";" + $userPath + ";" + $machinePath
-if (!$BuildRoot) { $BuildRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\task1-target" }
+if (!$BuildRoot) { $BuildRoot = Join-Path $softwareRoot "windows-target" }
 $env:CARGO_TARGET_DIR = $BuildRoot
 if (!$RepoRoot) { $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent }
 $repoRoot = (Resolve-Path -LiteralPath $RepoRoot).ProviderPath
@@ -30,9 +37,16 @@ if ($Action -eq "test") {
 }
 
 if ($Action -eq "build") {
-    $cli = Join-Path $env:LOCALAPPDATA "TomatoAgent\task1-tools\node_modules\@tauri-apps\cli\tauri.js"
+    $cli = Join-Path $softwareRoot "task1-tools\node_modules\@tauri-apps\cli\tauri.js"
     if (!(Test-Path -LiteralPath $cli)) { throw "Windows-local Tauri CLI cache not found: $cli" }
     & node.exe $cli build -- --locked
+    exit $LASTEXITCODE
+}
+
+if ($Action -eq "dev") {
+    $cli = Join-Path $softwareRoot "task1-tools\node_modules\@tauri-apps\cli\tauri.js"
+    if (!(Test-Path -LiteralPath $cli)) { throw "Windows-local Tauri CLI cache not found: $cli" }
+    & node.exe $cli dev
     exit $LASTEXITCODE
 }
 
@@ -90,7 +104,7 @@ foreach ($line in $vcEnvironment) {
     }
 }
 
-$cli = Join-Path $env:LOCALAPPDATA "TomatoAgent\task1-tools\node_modules\@tauri-apps\cli\tauri.js"
+$cli = Join-Path $softwareRoot "task1-tools\node_modules\@tauri-apps\cli\tauri.js"
 if (!(Test-Path -LiteralPath $cli)) { throw "Windows-local Tauri CLI cache not found: $cli" }
 $override = Join-Path $env:TEMP "tomato-agent-tauri-chat-build-override.json"
 $overrideConfig = @{ build = @{ beforeBuildCommand = "" } }
@@ -103,7 +117,11 @@ if ($BundleIdentifier) {
 $overrideJson = ConvertTo-Json -InputObject $overrideConfig -Depth 4 -Compress
 [IO.File]::WriteAllText($override, $overrideJson, [Text.UTF8Encoding]::new($false))
 try {
-    & node.exe $cli build -c $override -b nsis -- --locked
+    if ($AcceptanceCrashHook) {
+        & node.exe $cli build -c $override -b nsis -- --locked --features desktop-acceptance-crash-hook
+    } else {
+        & node.exe $cli build -c $override -b nsis -- --locked
+    }
     if ($LASTEXITCODE -ne 0) { throw "Windows chat Release/NSIS build failed with exit code $LASTEXITCODE." }
 } finally {
     Remove-Item -LiteralPath $override -ErrorAction SilentlyContinue
@@ -127,7 +145,7 @@ $gitCommit = (& wsl.exe --distribution $WslDistro --exec git -C $repoRootLinux r
 if ($LASTEXITCODE -ne 0) { throw "Could not determine the source Git commit for the archive manifest." }
 $gitStatus = & wsl.exe --distribution $WslDistro --exec git -C $repoRootLinux status --porcelain
 if ($LASTEXITCODE -ne 0) { throw "Could not determine whether the source worktree is dirty." }
-$archiveRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\installers"
+$archiveRoot = Join-Path $softwareRoot "installers"
 New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
 $archiveTimestamp = Get-Date
 $archiveDirectory = Join-Path $archiveRoot $archiveTimestamp.ToString("yyyyMMdd-HHmmss")

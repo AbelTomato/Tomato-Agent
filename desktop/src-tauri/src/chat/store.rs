@@ -1,4 +1,6 @@
 use super::*;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub struct ChatStore {
     connection: Mutex<Connection>,
@@ -96,10 +98,22 @@ impl ChatStore {
             "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('memory_installation_id',?1)",
             [uuid::Uuid::new_v4().to_string()],
         ).map_err(|_| "无法初始化记忆来源身份".to_string())?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('memory_enabled','0')",
+                [],
+            )
+            .map_err(|_| "无法初始化记忆设置".to_string())?;
         connection.execute(
-            "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('memory_enabled','0')",
-            [],
-        ).map_err(|_| "无法初始化记忆设置".to_string())?;
+            "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('desktop_history_installation_id',?1)",
+            [uuid::Uuid::new_v4().to_string()],
+        ).map_err(|_| "无法初始化聊天历史来源身份".to_string())?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO chat_preferences(key,value) VALUES('history_source','rust')",
+                [],
+            )
+            .map_err(|_| "无法初始化聊天数据源".to_string())?;
         connection
             .execute_batch("COMMIT;")
             .map_err(|_| "无法完成聊天数据库升级".to_string())?;
@@ -188,6 +202,117 @@ impl ChatStore {
             .map_err(|_| "无法读取对话列表".to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| "无法读取对话列表".to_string())
+    }
+
+    pub fn history_migration_snapshot(&self) -> Result<serde_json::Value, String> {
+        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用")?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| "无法读取聊天迁移快照")?;
+        let installation_id: String = transaction
+            .query_row(
+                "SELECT value FROM chat_preferences WHERE key='desktop_history_installation_id'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| "无法读取聊天来源身份")?;
+        let sessions = {
+            let mut statement = transaction
+                .prepare("SELECT id,title,created_at,project_id FROM sessions ORDER BY id")
+                .map_err(|_| "无法读取聊天迁移快照")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "title": row.get::<_, String>(1)?,
+                        "created_at": row.get::<_, String>(2)?,
+                        "project_id": row.get::<_, Option<String>>(3)?,
+                    }))
+                })
+                .map_err(|_| "无法读取聊天迁移快照")?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "无法读取聊天迁移快照")?
+        };
+        let messages = {
+            let mut statement = transaction.prepare(
+                "SELECT id,session_id,role,content,created_at FROM messages ORDER BY session_id,rowid",
+            ).map_err(|_| "无法读取聊天迁移快照")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|_| "无法读取聊天迁移快照")?;
+            let mut sequences = HashMap::<String, u64>::new();
+            rows.map(|item| {
+                let (id, session_id, role, content, created_at) = item?;
+                let sequence = sequences.entry(session_id.clone()).or_default();
+                *sequence += 1;
+                Ok(serde_json::json!({
+                    "id": id,
+                    "session_id": session_id,
+                    "sequence": *sequence,
+                    "role": role,
+                    "content": content,
+                    "created_at": created_at,
+                }))
+            })
+            .collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(|_| "无法读取聊天迁移快照")?
+        };
+        let payload = serde_json::json!({"sessions": sessions, "messages": messages});
+        let digest = canonical_history_digest(&payload)?;
+        transaction.commit().map_err(|_| "无法完成聊天迁移快照")?;
+        Ok(serde_json::json!({
+            "installation_id": installation_id,
+            "sessions": payload["sessions"],
+            "messages": payload["messages"],
+            "source_digest": digest,
+        }))
+    }
+
+    pub fn history_source(&self) -> Result<String, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT value FROM chat_preferences WHERE key='history_source'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| "无法读取聊天数据源".to_string())
+    }
+
+    pub fn mark_history_migrated(&self, installation_id: &str, digest: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
+        let expected: String = connection
+            .query_row(
+                "SELECT value FROM chat_preferences WHERE key='desktop_history_installation_id'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| "无法读取聊天来源身份".to_string())?;
+        if expected != installation_id
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("聊天迁移核验身份不匹配".into());
+        }
+        connection
+            .execute(
+                "UPDATE chat_preferences SET value='python' WHERE key='history_source'",
+                [],
+            )
+            .map_err(|_| "无法切换聊天数据源".to_string())?;
+        Ok(())
     }
 
     pub fn projects(&self) -> Result<Vec<ChatProject>, String> {
@@ -337,17 +462,31 @@ impl ChatStore {
     }
 
     pub fn memory_enabled(&self) -> Result<bool, String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT value FROM chat_preferences WHERE key='memory_enabled'", [], |row| row.get::<_, String>(0))
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT value FROM chat_preferences WHERE key='memory_enabled'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
             .map(|value| value == "1")
             .map_err(|_| "无法读取记忆设置".to_string())
     }
 
     pub fn set_memory_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
-        let transaction = connection.transaction().map_err(|_| "无法保存记忆设置".to_string())?;
-        transaction.execute("UPDATE chat_preferences SET value=?1 WHERE key='memory_enabled'",
-            [if enabled { "1" } else { "0" }])
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| "无法保存记忆设置".to_string())?;
+        transaction
+            .execute(
+                "UPDATE chat_preferences SET value=?1 WHERE key='memory_enabled'",
+                [if enabled { "1" } else { "0" }],
+            )
             .map_err(|_| "无法保存记忆设置".to_string())?;
         if !enabled {
             transaction.execute(
@@ -355,13 +494,21 @@ impl ChatStore {
                 [],
             ).map_err(|_| "无法清除待处理记忆来源".to_string())?;
         }
-        transaction.commit().map_err(|_| "无法保存记忆设置".to_string())?;
+        transaction
+            .commit()
+            .map_err(|_| "无法保存记忆设置".to_string())?;
         Ok(())
     }
 
     pub fn memory_installation_id(&self) -> Result<String, String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT value FROM chat_preferences WHERE key='memory_installation_id'", [], |row| row.get(0))
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT value FROM chat_preferences WHERE key='memory_installation_id'",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|_| "无法读取记忆来源身份".to_string())
     }
 
@@ -371,15 +518,22 @@ impl ChatStore {
         source_system: &str,
         installation_id: &str,
     ) -> Result<(), String> {
-        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
-        let transaction = connection.transaction().map_err(|_| "无法删除对话".to_string())?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| "无法删除对话".to_string())?;
         let messages = {
             let mut statement = transaction
                 .prepare("SELECT id FROM messages WHERE session_id=?1")
                 .map_err(|_| "无法读取待删除来源".to_string())?;
-            let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))
+            let rows = statement
+                .query_map([session_id], |row| row.get::<_, String>(0))
                 .map_err(|_| "无法读取待删除来源".to_string())?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待删除来源".to_string())?
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "无法读取待删除来源".to_string())?
         };
         for message_id in &messages {
             transaction.execute(
@@ -387,16 +541,20 @@ impl ChatStore {
                 params![source_system, installation_id, session_id, message_id],
             ).map_err(|_| "无法清除待同步记忆来源".to_string())?;
         }
-        let changed = transaction.execute("DELETE FROM sessions WHERE id=?1", [session_id])
+        let changed = transaction
+            .execute("DELETE FROM sessions WHERE id=?1", [session_id])
             .map_err(|_| "无法删除对话".to_string())?;
         if changed == 0 {
             return Err("对话不存在".into());
         }
         for message_id in messages {
-            let memory_enabled: bool = transaction.query_row(
-                "SELECT value='1' FROM chat_preferences WHERE key='memory_enabled'",
-                [], |row| row.get(0),
-            ).map_err(|_| "无法读取记忆设置".to_string())?;
+            let memory_enabled: bool = transaction
+                .query_row(
+                    "SELECT value='1' FROM chat_preferences WHERE key='memory_enabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| "无法读取记忆设置".to_string())?;
             let was_ingested: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM memory_source_ingestions WHERE source_system=?1 AND source_installation_id=?2 AND session_id=?3 AND message_id=?4 AND status='synced')",
                 params![source_system, installation_id, session_id, message_id], |row| row.get(0),
@@ -410,40 +568,75 @@ impl ChatStore {
                 params![request_id, source_system, installation_id, session_id, message_id, utc_now()],
             ).map_err(|_| "无法保存记忆来源删除记录".to_string())?;
         }
-        transaction.commit().map_err(|_| "无法完成对话删除".to_string())?;
+        transaction
+            .commit()
+            .map_err(|_| "无法完成对话删除".to_string())?;
         Ok(())
     }
 
-    pub fn pending_memory_source_deletions(&self, limit: u32) -> Result<Vec<MemorySourceDeletion>, String> {
-        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+    pub fn pending_memory_source_deletions(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<MemorySourceDeletion>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
         let mut statement = connection.prepare(
             "SELECT request_id,source_system,source_installation_id,session_id,message_id,source_revision,status FROM memory_source_deletions WHERE status='pending' ORDER BY created_at,request_id LIMIT ?1",
         ).map_err(|_| "无法读取待同步记忆来源".to_string())?;
-        let rows = statement.query_map([limit.clamp(1, 500)], |row| Ok(MemorySourceDeletion {
-            request_id: row.get(0)?, source_system: row.get(1)?, source_installation_id: row.get(2)?,
-            session_id: row.get(3)?, message_id: row.get(4)?, source_revision: row.get(5)?, status: row.get(6)?,
-        })).map_err(|_| "无法读取待同步记忆来源".to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待同步记忆来源".to_string())
+        let rows = statement
+            .query_map([limit.clamp(1, 500)], |row| {
+                Ok(MemorySourceDeletion {
+                    request_id: row.get(0)?,
+                    source_system: row.get(1)?,
+                    source_installation_id: row.get(2)?,
+                    session_id: row.get(3)?,
+                    message_id: row.get(4)?,
+                    source_revision: row.get(5)?,
+                    status: row.get(6)?,
+                })
+            })
+            .map_err(|_| "无法读取待同步记忆来源".to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法读取待同步记忆来源".to_string())
     }
 
     pub fn acknowledge_memory_source_deletion(&self, request_id: &str) -> Result<(), String> {
         let changed = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
             .execute("UPDATE memory_source_deletions SET status='synced' WHERE request_id=?1 AND status='pending'", [request_id])
             .map_err(|_| "无法确认记忆来源删除".to_string())?;
-        if changed == 0 { return Err("待同步记忆来源不存在".into()); }
+        if changed == 0 {
+            return Err("待同步记忆来源不存在".into());
+        }
         Ok(())
     }
 
-    pub fn enqueue_memory_source_ingestion(&self, payload: &serde_json::Value) -> Result<String, String> {
-        let source_system = payload["source_system"].as_str().ok_or("记忆来源系统无效")?;
-        let installation_id = payload["source_installation_id"].as_str().ok_or("记忆安装身份无效")?;
+    pub fn enqueue_memory_source_ingestion(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        let source_system = payload["source_system"]
+            .as_str()
+            .ok_or("记忆来源系统无效")?;
+        let installation_id = payload["source_installation_id"]
+            .as_str()
+            .ok_or("记忆安装身份无效")?;
         let session_id = payload["session_id"].as_str().ok_or("记忆会话标识无效")?;
-        let message = payload["messages"].as_array().and_then(|items| items.first())
+        let message = payload["messages"]
+            .as_array()
+            .and_then(|items| items.first())
             .ok_or("记忆来源消息缺失")?;
-        if message["role"] != "user" || message["content"].as_str().is_none_or(|text| text.chars().count() > 6000) {
+        if message["role"] != "user"
+            || message["content"]
+                .as_str()
+                .is_none_or(|text| text.chars().count() > 6000)
+        {
             return Err("记忆来源消息超出自动提取范围".into());
         }
-        let message_id = message["message_id"].as_str().ok_or("记忆来源消息标识无效")?;
+        let message_id = message["message_id"]
+            .as_str()
+            .ok_or("记忆来源消息标识无效")?;
         let revision = message["revision"].as_i64().unwrap_or(1);
         let request_id = uuid::Uuid::new_v4().to_string();
         let serialized = serde_json::to_string(payload).map_err(|_| "无法编码记忆来源")?;
@@ -458,38 +651,58 @@ impl ChatStore {
         ).map_err(|_| "无法读取记忆来源待处理任务".into())
     }
 
-    pub fn pending_memory_source_ingestions(&self, limit: u32) -> Result<Vec<(String, serde_json::Value)>, String> {
+    pub fn pending_memory_source_ingestions(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(String, serde_json::Value)>, String> {
         let connection = self.connection.lock().map_err(|_| "聊天数据库不可用")?;
         let mut statement = connection.prepare(
             "SELECT request_id,payload_json FROM memory_source_ingestions WHERE status='pending' ORDER BY created_at,request_id LIMIT ?1",
         ).map_err(|_| "无法读取记忆来源待处理任务")?;
-        let rows = statement.query_map([limit.clamp(1, 500)], |row| {
-            let request_id: String = row.get(0)?;
-            let payload: String = row.get(1)?;
-            Ok((request_id, payload))
-        }).map_err(|_| "无法读取记忆来源待处理任务")?;
+        let rows = statement
+            .query_map([limit.clamp(1, 500)], |row| {
+                let request_id: String = row.get(0)?;
+                let payload: String = row.get(1)?;
+                Ok((request_id, payload))
+            })
+            .map_err(|_| "无法读取记忆来源待处理任务")?;
         rows.map(|row| {
             let (request_id, payload) = row.map_err(|_| "无法读取记忆来源待处理任务")?;
             let payload = serde_json::from_str(&payload).map_err(|_| "记忆来源待处理数据损坏")?;
             Ok((request_id, payload))
-        }).collect()
+        })
+        .collect()
     }
 
     pub fn acknowledge_memory_source_ingestion(&self, request_id: &str) -> Result<(), String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用")?
-            .execute("UPDATE memory_source_ingestions SET status='synced' WHERE request_id=?1", [request_id])
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用")?
+            .execute(
+                "UPDATE memory_source_ingestions SET status='synced' WHERE request_id=?1",
+                [request_id],
+            )
             .map_err(|_| "无法确认记忆来源同步")?;
         Ok(())
     }
 
     pub fn has_pending_memory_source_deletions(&self) -> Result<bool, String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT EXISTS(SELECT 1 FROM memory_source_deletions WHERE status='pending')", [], |row| row.get(0))
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_source_deletions WHERE status='pending')",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|_| "无法检查记忆来源同步状态".to_string())
     }
 
     pub fn ensure_memory_reads_allowed(&self) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
         let pending: bool = connection.query_row(
             concat!("SELECT EXISTS(SELECT 1 FROM memory_source_deletions WHERE status='pending') OR ",
                 "EXISTS(SELECT 1 FROM memory_item_tombstones) OR EXISTS(SELECT 1 FROM memory_clear_tombstones)"),
@@ -501,8 +714,14 @@ impl ChatStore {
         Ok(())
     }
 
-    pub fn enqueue_memory_item_forget(&self, item_id: &str, expected_version: i64) -> Result<String, String> {
-        if item_id.is_empty() || expected_version < 1 { return Err("记忆版本无效".into()); }
+    pub fn enqueue_memory_item_forget(
+        &self,
+        item_id: &str,
+        expected_version: i64,
+    ) -> Result<String, String> {
+        if item_id.is_empty() || expected_version < 1 {
+            return Err("记忆版本无效".into());
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
             .execute(concat!("INSERT INTO memory_item_tombstones(item_id,request_id,expected_version,created_at) VALUES(?1,?2,?3,?4) ",
@@ -510,33 +729,63 @@ impl ChatStore {
                 "WHERE memory_item_tombstones.expected_version<>excluded.expected_version"),
                 rusqlite::params![item_id, request_id, expected_version, utc_now()])
             .map_err(|_| "无法保存待同步的记忆撤销".to_string())?;
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .execute(concat!("DELETE FROM memory_chat_contexts WHERE assistant_message_id IN (",
-                "SELECT assistant_message_id FROM memory_chat_context_items WHERE item_id=?1)"), [item_id])
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(
+                concat!(
+                    "DELETE FROM memory_chat_contexts WHERE assistant_message_id IN (",
+                    "SELECT assistant_message_id FROM memory_chat_context_items WHERE item_id=?1)"
+                ),
+                [item_id],
+            )
             .map_err(|_| "无法清理已撤销记忆的使用记录".to_string())?;
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT request_id FROM memory_item_tombstones WHERE item_id=?1", [item_id], |row| row.get(0))
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT request_id FROM memory_item_tombstones WHERE item_id=?1",
+                [item_id],
+                |row| row.get(0),
+            )
             .map_err(|_| "无法读取待同步的记忆撤销".to_string())
     }
 
     pub fn pending_memory_item_forgets(&self) -> Result<Vec<(String, String, i64)>, String> {
-        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
         let mut statement = connection.prepare("SELECT item_id,request_id,expected_version FROM memory_item_tombstones ORDER BY created_at")
             .map_err(|_| "无法读取待同步的记忆撤销".to_string())?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map_err(|_| "无法读取待同步的记忆撤销".to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取待同步的记忆撤销".to_string());
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法读取待同步的记忆撤销".to_string());
         rows
     }
 
     pub fn acknowledge_memory_item_forget(&self, request_id: &str) -> Result<(), String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .execute("DELETE FROM memory_item_tombstones WHERE request_id=?1", [request_id])
-            .map(|_| ()).map_err(|_| "无法确认记忆撤销同步".to_string())
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(
+                "DELETE FROM memory_item_tombstones WHERE request_id=?1",
+                [request_id],
+            )
+            .map(|_| ())
+            .map_err(|_| "无法确认记忆撤销同步".to_string())
     }
 
-    pub fn enqueue_memory_clear(&self, scope_id: &str, expected_generation: i64) -> Result<String, String> {
-        if scope_id.is_empty() || expected_generation < 0 { return Err("记忆空间版本无效".into()); }
+    pub fn enqueue_memory_clear(
+        &self,
+        scope_id: &str,
+        expected_generation: i64,
+    ) -> Result<String, String> {
+        if scope_id.is_empty() || expected_generation < 0 {
+            return Err("记忆空间版本无效".into());
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
             .execute(concat!("INSERT INTO memory_clear_tombstones(scope_id,request_id,expected_generation,created_at) VALUES(?1,?2,?3,?4) ",
@@ -544,11 +793,19 @@ impl ChatStore {
                 "WHERE memory_clear_tombstones.expected_generation<>excluded.expected_generation"),
                 rusqlite::params![scope_id, request_id, expected_generation, utc_now()])
             .map_err(|_| "无法保存待同步的记忆清空".to_string())?;
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
             .execute("DELETE FROM memory_chat_contexts", [])
             .map_err(|_| "无法清理已清空记忆的使用记录".to_string())?;
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT request_id FROM memory_clear_tombstones WHERE scope_id=?1", [scope_id], |row| row.get(0))
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT request_id FROM memory_clear_tombstones WHERE scope_id=?1",
+                [scope_id],
+                |row| row.get(0),
+            )
             .map_err(|_| "无法读取待同步的记忆清空".to_string())
     }
 
@@ -560,9 +817,15 @@ impl ChatStore {
     }
 
     pub fn acknowledge_memory_clear(&self, request_id: &str) -> Result<(), String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .execute("DELETE FROM memory_clear_tombstones WHERE request_id=?1", [request_id])
-            .map(|_| ()).map_err(|_| "无法确认记忆清空同步".to_string())
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .execute(
+                "DELETE FROM memory_clear_tombstones WHERE request_id=?1",
+                [request_id],
+            )
+            .map(|_| ())
+            .map_err(|_| "无法确认记忆清空同步".to_string())
     }
 
     pub fn pending_memory_mutation_count(&self) -> Result<usize, String> {
@@ -573,17 +836,27 @@ impl ChatStore {
     }
 
     pub fn record_memory_chat_context(&self, context: &MemoryChatContext) -> Result<(), String> {
-        if context.assistant_message_id.is_empty() || context.session_id.is_empty()
-            || context.generation > i64::MAX as u64 || context.items.len() > 16
-            || !matches!(context.retrieval_mode.as_str(), "keyword" | "hybrid") {
+        if context.assistant_message_id.is_empty()
+            || context.session_id.is_empty()
+            || context.generation > i64::MAX as u64
+            || context.items.len() > 16
+            || !matches!(context.retrieval_mode.as_str(), "keyword" | "hybrid")
+        {
             return Err("记忆使用引用无效".into());
         }
         for item in &context.items {
             uuid::Uuid::parse_str(&item.item_id).map_err(|_| "记忆使用引用无效")?;
-            if item.version == 0 { return Err("记忆使用引用无效".into()); }
+            if item.version == 0 {
+                return Err("记忆使用引用无效".into());
+            }
         }
-        let mut connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
-        let transaction = connection.transaction().map_err(|_| "无法记录记忆使用引用".to_string())?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|_| "无法记录记忆使用引用".to_string())?;
         transaction.execute(
             "INSERT OR REPLACE INTO memory_chat_contexts(assistant_message_id,session_id,generation,retrieval_mode,created_at) VALUES(?1,?2,?3,?4,?5)",
             rusqlite::params![context.assistant_message_id, context.session_id, context.generation as i64, context.retrieval_mode, utc_now()],
@@ -594,29 +867,53 @@ impl ChatStore {
                 rusqlite::params![context.assistant_message_id, item.item_id, item.version],
             ).map_err(|_| "无法记录记忆使用引用".to_string())?;
         }
-        transaction.commit().map_err(|_| "无法记录记忆使用引用".to_string())
+        transaction
+            .commit()
+            .map_err(|_| "无法记录记忆使用引用".to_string())
     }
 
     pub fn memory_chat_contexts(&self, session_id: &str) -> Result<Vec<MemoryChatContext>, String> {
-        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
         let mut statement = connection.prepare(
             "SELECT assistant_message_id,session_id,generation,retrieval_mode FROM memory_chat_contexts WHERE session_id=?1 ORDER BY created_at"
         ).map_err(|_| "无法读取记忆使用记录".to_string())?;
-        let rows = statement.query_map([session_id], |row| Ok((
-            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?,
-        ))).map_err(|_| "无法读取记忆使用记录".to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取记忆使用记录".to_string())?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|_| "无法读取记忆使用记录".to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "无法读取记忆使用记录".to_string())?;
         let mut result = Vec::with_capacity(rows.len());
         for (assistant_message_id, session_id, generation, retrieval_mode) in rows {
             let mut items_statement = connection.prepare(
                 "SELECT item_id,version FROM memory_chat_context_items WHERE assistant_message_id=?1 ORDER BY item_id,version"
             ).map_err(|_| "无法读取记忆使用记录".to_string())?;
-            let items = items_statement.query_map([&assistant_message_id], |row| Ok(MemoryReference {
-                item_id: row.get(0)?, version: row.get(1)?,
-            })).map_err(|_| "无法读取记忆使用记录".to_string())?
-                .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取记忆使用记录".to_string())?;
-            result.push(MemoryChatContext { assistant_message_id, session_id,
-                generation: generation.max(0) as u64, retrieval_mode, items });
+            let items = items_statement
+                .query_map([&assistant_message_id], |row| {
+                    Ok(MemoryReference {
+                        item_id: row.get(0)?,
+                        version: row.get(1)?,
+                    })
+                })
+                .map_err(|_| "无法读取记忆使用记录".to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "无法读取记忆使用记录".to_string())?;
+            result.push(MemoryChatContext {
+                assistant_message_id,
+                session_id,
+                generation: generation.max(0) as u64,
+                retrieval_mode,
+                items,
+            });
         }
         Ok(result)
     }
@@ -662,19 +959,37 @@ impl ChatStore {
     }
 
     pub fn engine_session(&self, desktop_session_id: &str) -> Result<Option<String>, String> {
-        self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?
-            .query_row("SELECT engine_session_id FROM engine_sessions WHERE desktop_session_id=?1",
-                [desktop_session_id], |row| row.get(0))
-            .optional().map_err(|_| "无法读取助手会话映射".to_string())
+        self.connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?
+            .query_row(
+                "SELECT engine_session_id FROM engine_sessions WHERE desktop_session_id=?1",
+                [desktop_session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "无法读取助手会话映射".to_string())
     }
 
-    pub fn bind_engine_session(&self, desktop_session_id: &str, engine_session_id: &str) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|_| "聊天数据库不可用".to_string())?;
+    pub fn bind_engine_session(
+        &self,
+        desktop_session_id: &str,
+        engine_session_id: &str,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "聊天数据库不可用".to_string())?;
         connection.execute("INSERT OR IGNORE INTO engine_sessions(desktop_session_id,engine_session_id) VALUES(?1,?2)",
             params![desktop_session_id, engine_session_id])
             .map_err(|_| "无法保存助手会话映射".to_string())?;
-        let stored: String = connection.query_row("SELECT engine_session_id FROM engine_sessions WHERE desktop_session_id=?1",
-            [desktop_session_id], |row| row.get(0)).map_err(|_| "无法读取助手会话映射".to_string())?;
+        let stored: String = connection
+            .query_row(
+                "SELECT engine_session_id FROM engine_sessions WHERE desktop_session_id=?1",
+                [desktop_session_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "无法读取助手会话映射".to_string())?;
         if stored != engine_session_id {
             return Err("助手会话映射冲突".into());
         }
@@ -791,6 +1106,11 @@ impl ChatStore {
             .query_row("SELECT id FROM sessions ORDER BY (id=(SELECT value FROM chat_preferences WHERE key='current_session')) IS TRUE DESC,created_at DESC,id DESC LIMIT 1", [], |row| row.get(0))
             .optional().map_err(|_| "无法恢复最近对话".to_string())
     }
+}
+
+pub(super) fn canonical_history_digest(payload: &serde_json::Value) -> Result<String, String> {
+    let bytes = serde_json::to_vec(payload).map_err(|_| "无法编码聊天迁移摘要")?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn normalize_title(title: &str) -> Result<String, String> {

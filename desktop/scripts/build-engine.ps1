@@ -1,5 +1,6 @@
 param(
-    [string]$RepoRoot
+    [string]$RepoRoot,
+    [string]$BuildRoot
 )
 $ErrorActionPreference = "Stop"
 
@@ -8,13 +9,14 @@ $repoRoot = (Resolve-Path -LiteralPath $RepoRoot).ProviderPath
 $python = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
 if (!(Test-Path -LiteralPath $python)) { throw "Bundled-engine build requires Windows Python 3.12: $python" }
 
-$engineBuildRoot = Join-Path $env:LOCALAPPDATA "TomatoAgent\engine-build"
+if (!$BuildRoot) { $BuildRoot = "D:\Software\TomatoAgent\engine-build" }
+$engineBuildRoot = $BuildRoot
 $engineVenv = Join-Path $engineBuildRoot "venv"
 $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
 if (!$uv) { throw "Bundled-engine build requires uv on PATH to install backend/uv.lock." }
 
 New-Item -ItemType Directory -Path $engineBuildRoot -Force | Out-Null
-$uvTemp = Join-Path $engineBuildRoot "uv-temp"
+$uvTemp = Join-Path $engineBuildRoot "temp"
 $uvCache = Join-Path $engineBuildRoot "uv-cache"
 New-Item -ItemType Directory -Path $uvTemp, $uvCache -Force | Out-Null
 $env:TEMP = $uvTemp

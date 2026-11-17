@@ -135,6 +135,30 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
 .desktop-agent-task-action form { display: grid; gap: 8px; }
 .desktop-agent-task-action label { display: grid; gap: 4px; font-size: 13px; }
 .desktop-agent-task-action textarea { resize: vertical; }
+.desktop-agent-project-read-approval { display: grid; gap: 8px; max-width: 72ch; }
+.desktop-agent-project-read-approval p { margin: 0; }
+.desktop-agent-project-read-approval button { justify-self: start; }
+.desktop-agent-changeset { display: grid; gap: 12px; margin-top: 12px; }
+.desktop-agent-changeset > header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.desktop-agent-changeset > header code { max-width: 60%; overflow-wrap: anywhere; font-size: 11px; }
+.desktop-agent-changeset article { border-top: 1px solid #d7e0e2; padding-top: 10px; }
+.desktop-agent-changeset h4 { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+.desktop-agent-change-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.desktop-agent-change-content section { min-width: 0; }
+.desktop-agent-change-content pre { max-height: 420px; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 10px; background: #f1f3f4; border-radius: 4px; }
+.desktop-agent-change-content .desktop-agent-line-diff { grid-column: 1 / -1; }
+.desktop-agent-line-diff pre { padding: 8px 0; }
+.desktop-agent-diff-row { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(max-content, 1fr); min-width: max-content; line-height: 1.45; }
+.desktop-agent-diff-row > span { padding: 0 5px; text-align: right; color: #68777d; user-select: none; }
+.desktop-agent-diff-row > span:nth-child(3) { text-align: center; }
+.desktop-agent-diff-row code { padding: 0 8px; color: #202a2e; }
+.desktop-agent-diff-row.added { background: #e5f4eb; }
+.desktop-agent-diff-row.added > span:nth-child(3) { color: #17643b; }
+.desktop-agent-diff-row.removed { background: #fbe9e7; }
+.desktop-agent-diff-row.removed > span:nth-child(3) { color: #a12622; }
+.desktop-agent-commit-inspection { padding: 8px; border-left: 3px solid #6b777a; background: #f4f6f6; overflow-wrap: anywhere; }
+.desktop-agent-commit-inspection p { margin: 4px 0; }
+@media (max-width: 680px) { .desktop-agent-change-content { grid-template-columns: minmax(0, 1fr); } }
 .desktop-agent-task-error { color: #a12622; }
 .desktop-chat-mode { display: flex; gap: 0; justify-self: start; margin: 0 0 8px; border: 1px solid #c5d1d6; border-radius: 6px; overflow: hidden; }
 .desktop-chat-mode button { border: 0; border-radius: 0; background: #fff; color: #34454d; padding: 6px 12px; }
