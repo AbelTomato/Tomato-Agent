@@ -365,3 +365,22 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
     scroll-behavior: auto !important;
   }
 }
+
+/* Changeset Viewer Styles */
+.changeset-viewer {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  margin: 12px 0;
+}
+
+.changeset-viewer pre {
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Consolas', monospace;
+}
+
+.changeset-viewer table {
+  width: 100%;
+  border-collapse: collapse;
+}

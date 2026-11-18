@@ -7,6 +7,7 @@ import type { ChatProject as Project, ChatSession as Session } from './ProjectNa
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
 import { MessageContent } from '../components/MessageContent';
+import { ChangesetViewer } from '../components/ChangesetViewer';
 import { useTheme } from '../hooks/useTheme';
 import { Toaster } from 'react-hot-toast';
 import { notify } from '../utils/notifications';
@@ -17,7 +18,6 @@ type TaskEvent = { sequence: number; event_type: string; summary?: string; paylo
 type PendingAction = { action_id: string; reason: string; action_type?: string; allowed_actions: string[]; display_data: Record<string, unknown> };
 type ProposedChange = { relative_path: string; operation: 'add' | 'modify'; base_content: string | null; content: string; summary: string };
 type CommitInspection = { status: string; files: { relative_path: string; status: string; error: string | null }[] };
-type DiffRow = { kind: 'same' | 'added' | 'removed'; oldLine: number | null; newLine: number | null; text: string };
 type AgentTask = { run_id: string; session_id: string; kind: string; status: string; phase: string | null; version: number;
   result: { answer?: string; draft?: string; outline?: Record<string, unknown>; citations?: unknown[]; artifacts?: unknown[] } | null; error: { code?: string } | null;
   pending_action: PendingAction | null; capabilities: string[]; events?: TaskEvent[] };
@@ -31,40 +31,6 @@ type MemoryTurnUse = { assistant_message_id: string; generation: number; retriev
 type EditDialog = { kind: 'create-project'; rootPath: string } | { kind: 'rename-project'; project: Project }
   | { kind: 'delete-project'; project: Project } | { kind: 'rename-session'; session: Session }
   | { kind: 'delete-session'; session: Session };
-
-function lineDiff(before: string, after: string): DiffRow[] | null {
-  const oldLines = before.split('\n');
-  const newLines = after.split('\n');
-  if ((oldLines.length + 1) * (newLines.length + 1) > 250_000) return null;
-  const columns = newLines.length + 1;
-  const lengths = new Uint32Array((oldLines.length + 1) * columns);
-  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
-    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
-      const index = oldIndex * columns + newIndex;
-      lengths[index] = oldLines[oldIndex] === newLines[newIndex]
-        ? lengths[(oldIndex + 1) * columns + newIndex + 1] + 1
-        : Math.max(lengths[(oldIndex + 1) * columns + newIndex], lengths[index + 1]);
-    }
-  }
-  const rows: DiffRow[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
-  while (oldIndex < oldLines.length || newIndex < newLines.length) {
-    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
-      rows.push({ kind: 'same', oldLine: oldIndex + 1, newLine: newIndex + 1, text: oldLines[oldIndex] });
-      oldIndex += 1;
-      newIndex += 1;
-    } else if (oldIndex < oldLines.length && (newIndex >= newLines.length
-      || lengths[(oldIndex + 1) * columns + newIndex] >= lengths[oldIndex * columns + newIndex + 1])) {
-      rows.push({ kind: 'removed', oldLine: oldIndex + 1, newLine: null, text: oldLines[oldIndex] });
-      oldIndex += 1;
-    } else {
-      rows.push({ kind: 'added', oldLine: null, newLine: newIndex + 1, text: newLines[newIndex] });
-      newIndex += 1;
-    }
-  }
-  return rows;
-}
 
 export function DesktopChatApp() {
   const [configured, setConfigured] = useState(false);
@@ -794,21 +760,15 @@ export function DesktopChatApp() {
                 {task.pending_action.action_type === 'changeset_approval' && changeset && <section className="desktop-agent-changeset" aria-label="待审批文件修改">
                   <header><strong>待审批修改</strong><code>{changesetDigest ?? ''}</code></header>
                   {(changeset.changes ?? []).map(change => {
-                    const diffRows = change.operation === 'modify'
-                      ? lineDiff(change.base_content ?? '', change.content) : null;
                     return <article key={change.relative_path}>
                     <h4>{change.relative_path} <span>{change.operation === 'add' ? '新增' : '修改'}</span></h4>
                     {change.summary && <p>{change.summary}</p>}
                     {change.operation === 'modify' && <div className="desktop-agent-change-content">
-                      {diffRows ? <section className="desktop-agent-line-diff" aria-label="逐行差异">
-                        <strong>逐行差异</strong>
-                        <pre>{diffRows.map((row, index) => <span className={`desktop-agent-diff-row ${row.kind}`} key={`${row.kind}:${row.oldLine}:${row.newLine}:${index}`}>
-                          <span>{row.oldLine ?? ''}</span><span>{row.newLine ?? ''}</span><span>{row.kind === 'added' ? '+' : row.kind === 'removed' ? '-' : ' '}</span><code>{row.text || ' '}</code>
-                        </span>)}</pre>
-                      </section> : <>
-                        <section><strong>原内容</strong><pre>{change.base_content ?? ''}</pre></section>
-                        <section><strong>新内容</strong><pre>{change.content}</pre></section>
-                      </>}
+                      <ChangesetViewer
+                        oldValue={change.base_content ?? ''}
+                        newValue={change.content}
+                        fileName={change.relative_path}
+                      />
                     </div>}
                     {change.operation === 'add' && <div className="desktop-agent-change-content">
                       <section><strong>新增内容</strong><pre>{change.content}</pre></section>
