@@ -22,7 +22,7 @@ type Props = {
 export function ProjectNavigation(props: Props) {
   function sessionRow(session: ChatSession) {
     return <div className="desktop-chat-session-row" key={session.id}>
-      <button type="button" className="desktop-chat-session" aria-current={session.id === props.sessionId ? 'page' : undefined}
+      <button type="button" className="desktop-chat-session hover-transition" aria-current={session.id === props.sessionId ? 'page' : undefined}
         onClick={() => props.onSelectSession(session.id)} disabled={props.disabled} title={session.title}>
         <MessageSquare size={14} aria-hidden="true" /><span>{session.title}</span>
       </button>
@@ -42,15 +42,15 @@ export function ProjectNavigation(props: Props) {
   }
   const independent = props.sessions.filter(session => !session.project_id || !props.projects.some(project => project.id === session.project_id));
   return <aside className="desktop-chat-sidebar" aria-label="项目与会话">
-    <header><h1>Tomato Agent</h1><button type="button" className="desktop-chat-icon-button" onClick={props.onSettings} aria-label="模型设置"><Settings size={18} /></button></header>
-    <button type="button" className="desktop-chat-new" disabled={props.disabled} onClick={() => props.onNewSession()}><Plus size={17} />新建对话</button>
+    <header><h1>Tomato Agent</h1><button type="button" className="desktop-chat-icon-button hover-transition" onClick={props.onSettings} aria-label="模型设置"><Settings size={18} /></button></header>
+    <button type="button" className="desktop-chat-new hover-transition" disabled={props.disabled} onClick={() => props.onNewSession()}><Plus size={17} />新建对话</button>
     <nav aria-label="项目导航">
-      <div className="desktop-chat-section-heading"><h2>项目</h2><button type="button" className="desktop-chat-icon-button" disabled={props.disabled} onClick={props.onNewProject} aria-label="新建项目"><Plus size={16} /></button></div>
+      <div className="desktop-chat-section-heading"><h2>项目</h2><button type="button" className="desktop-chat-icon-button hover-transition" disabled={props.disabled} onClick={props.onNewProject} aria-label="新建项目"><Plus size={16} /></button></div>
       {props.projects.length === 0 && <p className="desktop-chat-project-empty">添加本地目录，整理相关对话</p>}
       {props.projects.map(project => <section className="desktop-chat-project" key={project.id} aria-label={`项目 ${project.name}`}>
         <div className="desktop-chat-project-heading">
           <Folder size={16} aria-hidden="true" /><strong title={project.root_path}>{project.name}</strong>
-          <button type="button" className="desktop-chat-icon-button" disabled={props.disabled} onClick={() => props.onNewSession(project.id)} aria-label={`在 ${project.name} 新建对话`}><Plus size={15} /></button>
+          <button type="button" className="desktop-chat-icon-button hover-transition" disabled={props.disabled} onClick={() => props.onNewSession(project.id)} aria-label={`在 ${project.name} 新建对话`}><Plus size={15} /></button>
           <details className="desktop-chat-menu"><summary aria-label={`项目操作 ${project.name}`}><MoreHorizontal size={16} /></summary>
             <div className="desktop-chat-menu-panel" onClick={event => { if ((event.target as HTMLElement).closest('button')) event.currentTarget.closest('details')?.removeAttribute('open'); }} onChange={event => event.currentTarget.closest('details')?.removeAttribute('open')}><p className="desktop-chat-project-path">{project.root_path}</p>
               <button type="button" disabled={props.disabled} onClick={() => props.onRenameProject(project)}>重命名项目</button>

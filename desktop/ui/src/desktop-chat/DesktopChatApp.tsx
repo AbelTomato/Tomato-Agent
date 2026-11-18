@@ -7,6 +7,7 @@ import type { ChatProject as Project, ChatSession as Session } from './ProjectNa
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
 import { MessageContent } from '../components/MessageContent';
+import { useTheme } from '../hooks/useTheme';
 
 type Message = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; created_at: string };
 type Delta = { request_id: string; session_id: string; delta: string };
@@ -73,6 +74,7 @@ export function DesktopChatApp() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
   const [commitInspections, setCommitInspections] = useState<Record<string, CommitInspection>>({});
+  const { theme, setTheme } = useTheme();
   const [engineWorkspaces, setEngineWorkspaces] = useState<EngineWorkspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState('');
   const [input, setInput] = useState('');
@@ -706,11 +708,11 @@ export function DesktopChatApp() {
       <section className="desktop-chat-main" aria-label="聊天内容">
         <header className="desktop-chat-context"><span>{projects.find(project => project.id === sessions.find(session => session.id === sessionId)?.project_id)?.name ?? '独立会话'}</span></header>
         <div className="desktop-chat-messages" aria-live="polite">
-          {hasOlder && <button type="button" disabled={busy} onClick={() => void loadOlder()}>加载更早消息</button>}
+          {hasOlder && <button type="button" className="hover-transition button-scale" disabled={busy} onClick={() => void loadOlder()}>加载更早消息</button>}
           {messages.length === 0 && <div className="desktop-chat-empty"><h2>开始一段对话</h2><p>{configured ? '发送消息开始聊天' : '模型尚未配置'}</p></div>}
           {messages.map(message => {
             const memoryUse = memoryContexts[message.id];
-            return <article className={`desktop-chat-message ${message.role}`} key={message.id}>
+            return <article className={`desktop-chat-message ${message.role} message-enter`} key={message.id}>
               <strong>{message.role === 'user' ? '你' : 'Tomato Agent'}</strong>
               <MessageContent content={message.content} />
               {message.role === 'assistant' && memoryUse && <section className="desktop-chat-memory-use" aria-label="本轮使用的长期记忆">
@@ -753,12 +755,12 @@ export function DesktopChatApp() {
                 {clarification && <form onSubmit={event => { event.preventDefault(); if (taskReply.trim()) void actOnTask(task, 'provide_input', { message: taskReply.trim() }); }}>
                   {choices.length > 0 && <label>可选回答<select value={taskReply} onChange={event => setTaskReply(event.target.value)}><option value="">选择一项</option>{choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}</select></label>}
                   <label>补充信息<textarea value={taskReply} onChange={event => setTaskReply(event.target.value)} rows={2} /></label>
-                  <button type="submit" disabled={!taskReply.trim()}>提交回答</button>
+                  <button type="submit" className="hover-transition button-scale" disabled={!taskReply.trim()}>提交回答</button>
                 </form>}
                 {projectRead && <div className="desktop-agent-project-read-approval">
                   <p>允许本次任务读取“{authorizedProjectName}”中的文件吗？范围仅包括列出、搜索和读取，任务结束后失效。</p>
-                  <button type="button" onClick={() => void actOnTask(task, 'authorize_project_read', {})}>允许本次读取</button>
-                  <button type="button" onClick={() => void actOnTask(task, 'reject_action')}>拒绝</button>
+                  <button type="button" className="hover-transition button-scale" onClick={() => void actOnTask(task, 'authorize_project_read', {})}>允许本次读取</button>
+                  <button type="button" className="hover-transition button-scale" onClick={() => void actOnTask(task, 'reject_action')}>拒绝</button>
                 </div>}
                 {task.pending_action.action_type === 'changeset_approval' && changeset && <section className="desktop-agent-changeset" aria-label="待审批文件修改">
                   <header><strong>待审批修改</strong><code>{changesetDigest ?? ''}</code></header>
@@ -785,7 +787,7 @@ export function DesktopChatApp() {
                     </article>;
                   })}
                   <p>完整内容均参与审批摘要；尚未确认写入。</p>
-                  <button type="button" onClick={() => void inspectChangeset(task)}>查看提交状态</button>
+                  <button type="button" className="hover-transition button-scale" onClick={() => void inspectChangeset(task)}>查看提交状态</button>
                   {commitInspection && <div className="desktop-agent-commit-inspection" role="status">
                     <strong>提交状态：{commitInspection.status === 'completed' ? '全部完成' : commitInspection.status === 'partial' ? '部分完成' : commitInspection.status === 'failed' ? '未写入' : commitInspection.status === 'needs_inspection' ? '需要检查' : commitInspection.status === 'not_started' ? '尚未开始' : commitInspection.status}</strong>
                     {commitInspection.status === 'partial' &&
@@ -798,17 +800,17 @@ export function DesktopChatApp() {
                     {commitInspection.status === 'needs_inspection' &&
                       <p>存在无法自动判断的文件；已应用内容不会自动回滚。拒绝将停止剩余修改。</p>}
                   </div>}
-                  <button type="button" disabled={commitInspection?.status === 'needs_inspection' || commitInspection?.status === 'completed'} onClick={() => void actOnTask(task, 'approve_action')}>
+                  <button type="button" className="hover-transition button-scale" disabled={commitInspection?.status === 'needs_inspection' || commitInspection?.status === 'completed'} onClick={() => void actOnTask(task, 'approve_action')}>
                     {commitInspection?.status === 'partial' ? '检查并继续剩余修改' : '批准并写入项目'}
                   </button>
-                  <button type="button" onClick={() => void actOnTask(task, 'reject_action')}>
+                  <button type="button" className="hover-transition button-scale" onClick={() => void actOnTask(task, 'reject_action')}>
                     {commitInspection && commitInspection.status !== 'not_started' ? '停止剩余修改' : '拒绝修改'}
                   </button>
                 </section>}
                 {task.kind === 'writing' && task.pending_action.reason === 'confirm_outline' && writingOutline &&
-                  <button type="button" onClick={() => void actOnTask(task, 'confirm_outline', { outline: writingOutline })}>确认提纲并生成草稿</button>}
+                  <button type="button" className="hover-transition button-scale" onClick={() => void actOnTask(task, 'confirm_outline', { outline: writingOutline })}>确认提纲并生成草稿</button>}
                 {task.kind === 'writing' && task.pending_action.reason === 'save_draft' &&
-                  <button type="button" onClick={() => void actOnTask(task, 'save_draft')}>确认保存草稿</button>}
+                  <button type="button" className="hover-transition button-scale" onClick={() => void actOnTask(task, 'save_draft')}>确认保存草稿</button>}
                 {task.capabilities.includes('bind_workspace') && <form onSubmit={event => {
                   event.preventDefault(); if (selectedWorkspace) void actOnTask(task, 'bind_workspace', { workspace_id: selectedWorkspace });
                 }}>
@@ -816,8 +818,8 @@ export function DesktopChatApp() {
                     <option value="">选择已授权目录</option>{engineWorkspaces.map(workspace => <option key={workspace.workspace_id} value={workspace.workspace_id}>
                       {workspace.repo_path ?? workspace.workspace_id}</option>)}
                   </select></label>
-                  <button type="submit" disabled={!selectedWorkspace}>绑定并继续</button>
-                  <button type="button" onClick={() => void (async () => {
+                  <button type="submit" className="hover-transition button-scale" disabled={!selectedWorkspace}>绑定并继续</button>
+                  <button type="button" className="hover-transition button-scale" onClick={() => void (async () => {
                     try {
                       const path = await invoke<string | null>('desktop_chat_pick_project_directory');
                       if (!path) return;
@@ -840,7 +842,7 @@ export function DesktopChatApp() {
                 })}</div>}
               </div>}
               {task.error?.code && <p className="desktop-agent-task-error">任务未完成（{task.error.code}）</p>}
-              {task.capabilities.includes('cancel') && <button type="button" className="secondary-button" onClick={() => void actOnTask(task, 'cancel')}>取消任务</button>}
+              {task.capabilities.includes('cancel') && <button type="button" className="secondary-button hover-transition button-scale" onClick={() => void actOnTask(task, 'cancel')}>取消任务</button>}
             </article>;
           })}
           {busy && historySource === 'rust' && agentTasks.length === 0 && (
@@ -852,9 +854,9 @@ export function DesktopChatApp() {
         <div className="desktop-chat-feedback">{notice && <p role="status">{notice}</p>}{error && <p className="desktop-chat-error" role="alert">{error}</p>}</div>
         <form className="desktop-chat-composer" onSubmit={send}>
           <textarea ref={inputRef} aria-label="消息" placeholder={!configured ? '请先配置模型' : '输入消息或描述需要完成的工作'} value={input} onChange={event => setInput(event.target.value)} disabled={!configured || !sessionId || busy} />
-          {busy ? <button type="button" onClick={() => historySource === 'python'
+          {busy ? <button type="button" className="hover-transition button-scale" onClick={() => historySource === 'python'
             ? (() => { const task = agentTasks.find(item => ['queued', 'running'].includes(item.status) && item.capabilities.includes('cancel')); if (task) void actOnTask(task, 'cancel'); })()
-            : void invoke('desktop_chat_cancel')}>{historySource === 'python' ? '取消任务' : '停止'}</button> : <button type="submit" disabled={!configured || !sessionId || !input.trim()}>发送</button>}
+            : void invoke('desktop_chat_cancel')}>{historySource === 'python' ? '取消任务' : '停止'}</button> : <button type="submit" className="hover-transition button-scale" disabled={!configured || !sessionId || !input.trim()}>发送</button>}
         </form>
       </section>
       {dialog && <div className="desktop-chat-backdrop"><form className="desktop-chat-settings" role="dialog" aria-modal="true"
@@ -865,51 +867,56 @@ export function DesktopChatApp() {
           : dialog.kind === 'delete-session' ? <p>删除“{dialog.session.title}”及其全部消息？此操作无法撤销。</p>
           : <label>{dialog.kind === 'rename-session' ? '对话名称' : '项目名称'}<input autoFocus required maxLength={120} value={dialogValue} disabled={working} onChange={event => setDialogValue(event.target.value)} /></label>}
         {dialogError && <p role="alert" className="desktop-chat-error">{dialogError}</p>}
-        <footer><button type="button" className="secondary-button" disabled={working} onClick={() => setDialog(null)}>取消</button>
-          <button type="submit" disabled={working || (!dialog.kind.startsWith('delete') && !dialogValue.trim())}>{working ? '正在保存…' : dialog.kind.startsWith('delete') ? '确认删除' : '保存'}</button></footer>
+        <footer><button type="button" className="secondary-button hover-transition button-scale" disabled={working} onClick={() => setDialog(null)}>取消</button>
+          <button type="submit" className="hover-transition button-scale" disabled={working || (!dialog.kind.startsWith('delete') && !dialogValue.trim())}>{working ? '正在保存…' : dialog.kind.startsWith('delete') ? '确认删除' : '保存'}</button></footer>
       </form></div>}
       {settings && <div className="desktop-chat-backdrop" role="presentation"><form className="desktop-chat-settings" onSubmit={saveSettings}>
-        <header><h2>模型设置</h2><button type="button" onClick={() => setSettings(false)} aria-label="关闭">关闭</button></header>
+        <header><h2>模型设置</h2><button className="hover-transition button-scale" type="button" onClick={() => setSettings(false)} aria-label="关闭">关闭</button></header>
         <label>API Base URL<input type="url" required value={baseUrl} onChange={event => setBaseUrl(event.target.value)} /></label>
         <label>模型名称<input required value={model} onChange={event => setModel(event.target.value)} /></label>
         <label>API Key<input type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} /></label>
         <p>API Key 保存在 Windows 凭据库中。</p>
         <label className="desktop-memory-setting"><input type="checkbox" checked={memoryEnabled} disabled={busy}
           onChange={event => void updateMemoryEnabled(event.target.checked)} />启用长期记忆</label>
-        <button type="button" className="secondary-button" onClick={() => void openMemoryManager()}>管理已保存的记忆</button>
+        <button type="button" className="secondary-button hover-transition button-scale" onClick={() => void openMemoryManager()}>管理已保存的记忆</button>
         <p>启用后，新对话内容会提交给当前模型，用于提取可管理的个人记忆。</p>
+        <label>主题<select value={theme} onChange={event => setTheme(event.target.value as any)}>
+          <option value="auto">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select></label>
         {memorySyncPending && <p role="status">有记忆来源删除待同步，完成同步前不会读取相关记忆。</p>}
-        <footer>{testingConnection ? <button type="button" onClick={() => void invoke('desktop_chat_cancel_connection_test')}>取消测试</button> : <button type="button" onClick={() => void testConnection()}>测试连接</button>}<button type="button" onClick={() => void invoke('desktop_chat_delete_credential').then(() => setConfigured(false)).catch(reason => setError(String(reason)))}>删除凭据</button><button type="submit">保存设置</button></footer>
+        <footer>{testingConnection ? <button type="button" className="hover-transition button-scale" onClick={() => void invoke('desktop_chat_cancel_connection_test')}>取消测试</button> : <button type="button" className="hover-transition button-scale" onClick={() => void testConnection()}>测试连接</button>}<button type="button" className="hover-transition button-scale" onClick={() => void invoke('desktop_chat_delete_credential').then(() => setConfigured(false)).catch(reason => setError(String(reason)))}>删除凭据</button><button type="submit" className="hover-transition button-scale">保存设置</button></footer>
       </form></div>}
       {memoryManager && <div className="desktop-chat-backdrop" role="presentation"><section className="desktop-chat-settings desktop-memory-manager" role="dialog" aria-modal="true" aria-labelledby="memory-manager-title">
-        <header><h2 id="memory-manager-title">长期记忆</h2><button type="button" aria-label="关闭记忆管理" onClick={() => { setMemoryManager(false); setMemoryDetail(null); }}>关闭</button></header>
+        <header><h2 id="memory-manager-title">长期记忆</h2><button className="hover-transition button-scale" type="button" aria-label="关闭记忆管理" onClick={() => { setMemoryManager(false); setMemoryDetail(null); }}>关闭</button></header>
         {memorySyncPending && <p className="desktop-memory-pending" role="status">有记忆变更待同步；同步完成前会暂停记忆读取。</p>}
-        <nav className="desktop-memory-tabs" aria-label="记忆视图"><button type="button" aria-pressed={memoryTab === 'items'} onClick={() => { setMemoryTab('items'); setMemoryDetail(null); }}>已保存 · {memoryItems.length}</button><button type="button" aria-pressed={memoryTab === 'candidates'} onClick={() => { setMemoryTab('candidates'); setMemoryDetail(null); }}>待确认 · {memoryCandidates.length}</button></nav>
+        <nav className="desktop-memory-tabs" aria-label="记忆视图"><button type="button" className="hover-transition button-scale" aria-pressed={memoryTab === 'items'} onClick={() => { setMemoryTab('items'); setMemoryDetail(null); }}>已保存 · {memoryItems.length}</button><button type="button" className="hover-transition button-scale" aria-pressed={memoryTab === 'candidates'} onClick={() => { setMemoryTab('candidates'); setMemoryDetail(null); }}>待确认 · {memoryCandidates.length}</button></nav>
         {memoryError && <p role="alert" className="desktop-chat-error">{memoryError}</p>}
         {memoryLoading && <p role="status">正在同步记忆状态…</p>}
         {memoryDetail ? <div className="desktop-memory-detail">
-          <button type="button" className="desktop-memory-back" onClick={() => setMemoryDetail(null)}>返回记忆列表</button>
+          <button type="button" className="desktop-memory-back hover-transition button-scale" onClick={() => setMemoryDetail(null)}>返回记忆列表</button>
           <p className="desktop-memory-meta">{memoryKindLabel(memoryDetail.kind)} · {memoryDetail.topic_key} · 版本 {memoryDetail.version}</p>
           <label>记忆内容<textarea rows={4} maxLength={4000} value={memoryEdit} disabled={memoryLoading} onChange={event => setMemoryEdit(event.target.value)} /></label>
           <section aria-label="记忆来源"><h3>来源</h3>{memoryDetail.sources?.length ? memoryDetail.sources.map(source => <article className="desktop-memory-source" key={`${source.session_id}:${source.message_id}`}>
             <p>{source.message_at ? new Date(source.message_at).toLocaleString() : '时间未记录'} · {source.status === 'active' ? '有效来源' : '来源已失效'}</p><blockquote>{source.excerpt || '未保留原文摘录'}</blockquote><small>会话 {source.session_id} · 消息 {source.message_id}</small>
           </article>) : <p>没有可用来源</p>}</section>
-          <footer><button type="button" className="secondary-button" disabled={memoryLoading || !memoryEdit.trim() || memoryEdit.trim() === memoryDetail.content} onClick={() => void saveMemoryCorrection()}>保存更正</button><button type="button" className="danger-button" disabled={memoryLoading} onClick={() => void forgetMemoryItem()}>忘记这条记忆</button></footer>
+          <footer><button type="button" className="secondary-button hover-transition button-scale" disabled={memoryLoading || !memoryEdit.trim() || memoryEdit.trim() === memoryDetail.content} onClick={() => void saveMemoryCorrection()}>保存更正</button><button type="button" className="danger-button hover-transition button-scale" disabled={memoryLoading} onClick={() => void forgetMemoryItem()}>忘记这条记忆</button></footer>
         </div> : memoryTab === 'items' ? <div className="desktop-memory-list">
-          {memoryItems.length ? memoryItems.map(item => <button type="button" className="desktop-memory-row" key={item.item_id} onClick={() => void openMemoryItem(item)}>
+          {memoryItems.length ? memoryItems.map(item => <button type="button" className="desktop-memory-row hover-transition button-scale" key={item.item_id} onClick={() => void openMemoryItem(item)}>
             <strong>{item.content}</strong><span>{memoryKindLabel(item.kind)} · {item.topic_key} · 更新于 {new Date(item.updated_at).toLocaleDateString()}</span>
           </button>) : !memoryLoading && <p>还没有保存的记忆</p>}
-          <button type="button" className="danger-button" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void clearAllMemory()}>{clearArmed ? '再次点击确认清空全部个人记忆' : '清空全部个人记忆'}</button>
-          {clearArmed && <button type="button" className="secondary-button" onClick={() => setClearArmed(false)}>取消清空</button>}
-          <button type="button" className="secondary-button" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void exportMemory()}>导出个人记忆 JSON</button>
+          <button type="button" className="danger-button hover-transition button-scale" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void clearAllMemory()}>{clearArmed ? '再次点击确认清空全部个人记忆' : '清空全部个人记忆'}</button>
+          {clearArmed && <button type="button" className="secondary-button hover-transition button-scale" onClick={() => setClearArmed(false)}>取消清空</button>}
+          <button type="button" className="secondary-button hover-transition button-scale" disabled={memoryLoading || memoryItems.length === 0} onClick={() => void exportMemory()}>导出个人记忆 JSON</button>
         </div> : <div className="desktop-memory-list">
           {memoryCandidates.length ? memoryCandidates.map(candidate => <article className="desktop-memory-candidate" key={candidate.candidate_id}>
             <p className="desktop-memory-meta">{memoryKindLabel(candidate.kind)} · {candidate.topic_key} · 置信度 {Math.round(candidate.confidence * 100)}%</p><p>{candidate.content}</p>
             {candidate.sources?.map(source => source.excerpt && <blockquote key={`${source.session_id}:${source.message_id}`}>{source.excerpt}</blockquote>)}
-            <footer><button type="button" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'accept')}>接受</button><button type="button" className="secondary-button" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'reject')}>拒绝</button></footer>
+            <footer><button type="button" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'accept')}>接受</button><button type="button" className="secondary-button hover-transition button-scale" disabled={memoryLoading} onClick={() => void decideMemoryCandidate(candidate, 'reject')}>拒绝</button></footer>
           </article>) : !memoryLoading && <p>没有待确认的记忆</p>}
         </div>}
-        <footer><button type="button" className="secondary-button" disabled={memoryLoading} onClick={() => void refreshMemoryManager()}>刷新</button></footer>
+        <footer><button type="button" className="secondary-button hover-transition button-scale" disabled={memoryLoading} onClick={() => void refreshMemoryManager()}>刷新</button></footer>
       </section></div>}
     </main>
   );
