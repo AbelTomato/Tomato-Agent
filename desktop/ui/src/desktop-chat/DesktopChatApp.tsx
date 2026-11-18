@@ -4,6 +4,8 @@ const { invoke, listen } = desktopClient;
 import type { FormEvent } from 'react';
 import { ProjectNavigation } from './ProjectNavigation';
 import type { ChatProject as Project, ChatSession as Session } from './ProjectNavigation';
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
+import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
 
 type Message = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; created_at: string };
 type Delta = { request_id: string; session_id: string; delta: string };
@@ -100,6 +102,7 @@ export function DesktopChatApp() {
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState('');
   const memoryRecallFailed = useRef(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const mutationPending = useRef(false);
   const navigationRevision = useRef(0);
   const historyRevision = useRef(0);
@@ -112,6 +115,31 @@ export function DesktopChatApp() {
   const syncedTaskReplies = useRef(new Set<string>());
   const taskEventCursors = useRef(new Map<string, number>());
   const taskEventHistory = useRef(new Map<string, TaskEvent[]>());
+
+  // 键盘快捷键
+  useKeyboardShortcuts({
+    onNewSession: () => {
+      // 只有在未初始化、未工作、无弹窗时才允许新建会话
+      if (!initializing && !working && !dialog) {
+        void createSession();
+      }
+    },
+    onFocusInput: () => {
+      inputRef.current?.focus();
+    },
+    onEscape: () => {
+      // Esc 优先级：关闭弹窗 > 关闭设置 > 关闭记忆管理
+      if (dialog) {
+        setDialog(null);
+      } else if (settings) {
+        setSettings(false);
+      } else if (memoryManager) {
+        setMemoryManager(false);
+        setMemoryDetail(null);
+      }
+    },
+    // onSearch, onToggleProject, onToggleSidebar 留待阶段三实现
+  });
 
   useEffect(() => {
     const updateViewport = () => {
@@ -813,10 +841,15 @@ export function DesktopChatApp() {
               {task.capabilities.includes('cancel') && <button type="button" className="secondary-button" onClick={() => void actOnTask(task, 'cancel')}>取消任务</button>}
             </article>;
           })}
+          {busy && historySource === 'rust' && agentTasks.length === 0 && (
+            <div className="desktop-chat-message assistant">
+              <LoadingMessage message="正在思考..." />
+            </div>
+          )}
         </div>
         <div className="desktop-chat-feedback">{notice && <p role="status">{notice}</p>}{error && <p className="desktop-chat-error" role="alert">{error}</p>}</div>
         <form className="desktop-chat-composer" onSubmit={send}>
-          <textarea aria-label="消息" placeholder={!configured ? '请先配置模型' : '输入消息或描述需要完成的工作'} value={input} onChange={event => setInput(event.target.value)} disabled={!configured || !sessionId || busy} />
+          <textarea ref={inputRef} aria-label="消息" placeholder={!configured ? '请先配置模型' : '输入消息或描述需要完成的工作'} value={input} onChange={event => setInput(event.target.value)} disabled={!configured || !sessionId || busy} />
           {busy ? <button type="button" onClick={() => historySource === 'python'
             ? (() => { const task = agentTasks.find(item => ['queued', 'running'].includes(item.status) && item.capabilities.includes('cancel')); if (task) void actOnTask(task, 'cancel'); })()
             : void invoke('desktop_chat_cancel')}>{historySource === 'python' ? '取消任务' : '停止'}</button> : <button type="submit" disabled={!configured || !sessionId || !input.trim()}>发送</button>}
