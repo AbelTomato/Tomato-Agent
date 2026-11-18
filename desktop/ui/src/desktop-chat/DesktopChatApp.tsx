@@ -6,6 +6,7 @@ import { ProjectNavigation } from './ProjectNavigation';
 import type { ChatProject as Project, ChatSession as Session } from './ProjectNavigation';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
+import { MessageContent } from '../components/MessageContent';
 
 type Message = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; created_at: string };
 type Delta = { request_id: string; session_id: string; delta: string };
@@ -710,7 +711,8 @@ export function DesktopChatApp() {
           {messages.map(message => {
             const memoryUse = memoryContexts[message.id];
             return <article className={`desktop-chat-message ${message.role}`} key={message.id}>
-              <strong>{message.role === 'user' ? '你' : 'Tomato Agent'}</strong><p>{message.content}</p>
+              <strong>{message.role === 'user' ? '你' : 'Tomato Agent'}</strong>
+              <MessageContent content={message.content} />
               {message.role === 'assistant' && memoryUse && <section className="desktop-chat-memory-use" aria-label="本轮使用的长期记忆">
                 <strong>本轮使用的长期记忆 · {memoryUse.items.length}</strong>
                 {memoryUse.items.map(item => <div className="desktop-chat-memory-use-item" key={`${item.item_id}:${item.version}`}>
