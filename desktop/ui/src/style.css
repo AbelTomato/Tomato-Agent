@@ -384,3 +384,16 @@ header { display: flex; justify-content: space-between; gap: 16px; align-items: 
   width: 100%;
   border-collapse: collapse;
 }
+
+/* 搜索高亮样式 */
+mark.search-highlight {
+  background-color: #fef08a; /* yellow-200 */
+  color: inherit;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.dark mark.search-highlight {
+  background-color: #854d0e; /* yellow-900 */
+  color: #fef08a;
+}

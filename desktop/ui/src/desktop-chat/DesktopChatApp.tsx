@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { desktopClient } from '../desktop/client';
 const { invoke, listen } = desktopClient;
 import type { FormEvent } from 'react';
-import { ProjectNavigation } from './ProjectNavigation';
+import { ProjectNavigation, ProjectNavigationHandle } from './ProjectNavigation';
 import type { ChatProject as Project, ChatSession as Session } from './ProjectNavigation';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
@@ -74,6 +74,7 @@ export function DesktopChatApp() {
   const [notice, setNotice] = useState('');
   const memoryRecallFailed = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const navigationRef = useRef<ProjectNavigationHandle>(null);
   const mutationPending = useRef(false);
   const navigationRevision = useRef(0);
   const historyRevision = useRef(0);
@@ -109,7 +110,10 @@ export function DesktopChatApp() {
         setMemoryDetail(null);
       }
     },
-    // onSearch, onToggleProject, onToggleSidebar 留待阶段三实现
+    onSearch: () => {
+      navigationRef.current?.focusSearch();
+    },
+    // onToggleProject, onToggleSidebar 留待未来实现
   });
 
   useEffect(() => {
@@ -692,7 +696,9 @@ export function DesktopChatApp() {
        success: { duration: 3000, iconTheme: { primary: 'var(--color-success)', secondary: '#fff' } },
        error: { duration: 5000, iconTheme: { primary: 'var(--color-danger)', secondary: '#fff' } },
      }} />
-      <ProjectNavigation sessions={sessions} projects={projects} sessionId={sessionId} disabled={initializing || working || dialog !== null}
+      <ProjectNavigation
+        ref={navigationRef}
+        sessions={sessions} projects={projects} sessionId={sessionId} disabled={initializing || working || dialog !== null}
         onSettings={() => void openSettings()} onNewSession={projectId => void createSession(projectId)}
         onNewProject={() => void createProject()} onSelectSession={id => void selectSession(id)}
         onRenameSession={session => openDialog({ kind: 'rename-session', session }, session.title)}
