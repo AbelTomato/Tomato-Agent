@@ -8,6 +8,8 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';
 import { MessageContent } from '../components/MessageContent';
 import { useTheme } from '../hooks/useTheme';
+import { Toaster } from 'react-hot-toast';
+import { notify } from '../utils/notifications';
 
 type Message = { id: string; session_id: string; role: 'user' | 'assistant'; content: string; created_at: string };
 type Delta = { request_id: string; session_id: string; delta: string };
@@ -334,7 +336,12 @@ export function DesktopChatApp() {
       if (activeSession.current === id && revision === navigationRevision.current) {
         await refreshAgentTasks(id, source);
       }
-    } catch (reason) { if (activeSession.current === id && revision === navigationRevision.current) setError(String(reason)); }
+   } catch (reason) {
+     if (activeSession.current === id && revision === navigationRevision.current) {
+       setError(String(reason));
+     if (activeSession.current === id && revision === navigationRevision.current) notify.error('切换会话失败');
+     }
+   }
   }
 
   async function createSession(projectId?: string) {
@@ -457,6 +464,7 @@ export function DesktopChatApp() {
     } catch (reason) {
       if (activeSession.current === requestSession && activeGeneration.current === requestId) {
         setError(String(reason));
+       notify.error('消息发送失败');
         await refreshHistory(requestSession).catch(() => undefined);
       }
     }
@@ -518,8 +526,15 @@ export function DesktopChatApp() {
       setAgentTasks(current => [response.body, ...current.filter(item => item.run_id !== task.run_id)]);
       setBusy(response.body.status === 'queued' || response.body.status === 'running');
       setTaskReply('');
-    } catch (reason) { setError(String(reason)); setBusy(false); }
-    finally { pendingTaskActions.current.delete(task.run_id); }
+     if (action === 'approve') notify.success('操作已确认');
+     else if (action === 'reject') notify.info('操作已拒绝');
+   } catch (reason) {
+     setError(String(reason)); setBusy(false);
+     notify.error('操作失败');
+   }
+   finally {
+     pendingTaskActions.current.delete(task.run_id);
+   }
   }
 
   async function inspectChangeset(task: AgentTask) {
@@ -552,6 +567,7 @@ export function DesktopChatApp() {
     try {
       await invoke('desktop_chat_configure', { input: { baseUrl, model, apiKey: apiKey || null } });
       setApiKey(''); setConfigured(true); setSettings(false);
+     notify.success('设置已保存');
       if (historySource === 'rust') {
         try {
           await invoke('desktop_chat_migrate_history');
@@ -567,7 +583,10 @@ export function DesktopChatApp() {
           setNotice('历史迁移尚未完成，继续使用本地会话记录');
         }
       }
-    } catch (reason) { setError(String(reason)); }
+   } catch (reason) {
+     setError(String(reason));
+     notify.error('保存设置失败');
+   }
   }
 
   async function openSettings() {
@@ -697,6 +716,16 @@ export function DesktopChatApp() {
 
   return (
     <main className="desktop-chat-shell" aria-label="普通聊天">
+     <Toaster position="top-right" toastOptions={{
+       duration: 4000,
+       style: {
+         background: 'var(--color-surface)',
+         color: 'var(--color-text)',
+         border: '1px solid var(--color-border)',
+       },
+       success: { duration: 3000, iconTheme: { primary: 'var(--color-success)', secondary: '#fff' } },
+       error: { duration: 5000, iconTheme: { primary: 'var(--color-danger)', secondary: '#fff' } },
+     }} />
       <ProjectNavigation sessions={sessions} projects={projects} sessionId={sessionId} disabled={initializing || working || dialog !== null}
         onSettings={() => void openSettings()} onNewSession={projectId => void createSession(projectId)}
         onNewProject={() => void createProject()} onSelectSession={id => void selectSession(id)}

@@ -8,23 +8,24 @@
     "build": "tsc -b && vite build"
   },
   "dependencies": {
+    "@tailwindcss/vite": "latest",
     "@tauri-apps/api": "^2.8.0",
+    "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "tailwindcss": "latest",
-    "@tailwindcss/vite": "latest",
-    "lucide-react": "latest",
+    "react-hot-toast": "^2.6.1",
     "react-markdown": "^9.0.0",
+    "react-syntax-highlighter": "^15.5.0",
     "remark-gfm": "^4.0.0",
-    "react-syntax-highlighter": "^15.5.0"
+    "tailwindcss": "latest"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "@types/react-syntax-highlighter": "^15.5.11"
+    "@types/react-syntax-highlighter": "^15.5.11",
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "packageManager": "pnpm@10.34.5"
 }
