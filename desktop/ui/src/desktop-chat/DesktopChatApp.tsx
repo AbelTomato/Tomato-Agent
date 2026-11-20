@@ -117,24 +117,6 @@ export function DesktopChatApp() {
   });
 
   useEffect(() => {
-    const updateViewport = () => {
-      const scale = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 1;
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      if (typeof document === 'undefined' || typeof width !== 'number' || typeof height !== 'number') return;
-      document.documentElement.style.setProperty('--tauri-viewport-width', `${width / scale}px`);
-      document.documentElement.style.setProperty('--tauri-viewport-height', `${height / scale}px`);
-    };
-    updateViewport();
-    window.addEventListener?.('resize', updateViewport);
-    window.visualViewport?.addEventListener('resize', updateViewport);
-    return () => {
-      window.removeEventListener?.('resize', updateViewport);
-      window.visualViewport?.removeEventListener('resize', updateViewport);
-    };
-  }, []);
-
-  useEffect(() => {
     let active = true;
     void invoke<{ configured: boolean }>('desktop_chat_status').then(value => { if (active) setConfigured(value.configured); })
       .catch(reason => { if (active) setError(String(reason)); });
@@ -689,12 +671,12 @@ export function DesktopChatApp() {
      <Toaster position="top-right" toastOptions={{
        duration: 4000,
        style: {
-         background: 'var(--color-surface)',
-         color: 'var(--color-text)',
-         border: '1px solid var(--color-border)',
+         background: 'var(--color-bg-secondary)',
+         color: 'var(--color-text-primary)',
+         border: '1px solid var(--color-border-primary)',
        },
        success: { duration: 3000, iconTheme: { primary: 'var(--color-success)', secondary: '#fff' } },
-       error: { duration: 5000, iconTheme: { primary: 'var(--color-danger)', secondary: '#fff' } },
+       error: { duration: 5000, iconTheme: { primary: 'var(--color-error)', secondary: '#fff' } },
      }} />
       <ProjectNavigation
         ref={navigationRef}

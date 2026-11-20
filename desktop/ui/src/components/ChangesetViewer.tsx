@@ -13,7 +13,7 @@ export const ChangesetViewer = ({
   newValue, 
   fileName, 
 }: ChangesetViewerProps) => {
-  const { theme } = useTheme();
+  const { resolvedTheme } = useTheme();
   
   return (
     <div className="changeset-viewer">
@@ -26,7 +26,7 @@ export const ChangesetViewer = ({
         oldValue={oldValue}
         newValue={newValue}
         splitView={true}
-        useDarkTheme={theme === 'dark'}
+        useDarkTheme={resolvedTheme === 'dark'}
         compareMethod={DiffMethod.WORDS}
         showDiffOnly={true}
         extraLinesSurroundingDiff={3}

@@ -9,20 +9,26 @@ export function useTheme() {
       ? stored
       : 'auto';
   });
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() => {
+    const stored = localStorage.getItem('theme');
+    const preference = stored === 'light' || stored === 'dark' || stored === 'auto' ? stored : 'auto';
+    return preference === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : preference === 'dark' ? 'dark' : 'light';
+  });
 
   useEffect(() => {
     const root = document.documentElement;
-    
-    if (theme === 'auto') {
-      // Remove explicit theme, let CSS light-dark() handle it
-      root.removeAttribute('data-theme');
-    } else {
-      // Set explicit theme
-      root.setAttribute('data-theme', theme);
-    }
-    
+    const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+    const applyTheme = () => {
+      const resolved = theme === 'auto' ? (systemTheme.matches ? 'dark' : 'light') : theme;
+      setResolvedTheme(resolved);
+      root.setAttribute('data-theme', resolved);
+      root.style.colorScheme = resolved;
+    };
+    applyTheme();
+    systemTheme.addEventListener('change', applyTheme);
     localStorage.setItem('theme', theme);
+    return () => systemTheme.removeEventListener('change', applyTheme);
   }, [theme]);
 
-  return { theme, setTheme };
+  return { theme, resolvedTheme, setTheme };
 }

@@ -1,0 +1,4 @@
+export const __rspack_esm_ids=[203305];export const __webpack_modules__={ac24(t,e,n){n.d(e,{},{J:class{constructor(t=[],e={}){this.content=[],this.indent=0,this.args=t,this.closed=e}indented(t){this.indent+=1;try{t(this)}finally{this.indent-=1}}write(t){if("function"==typeof t){t(this,{execution:"sync"}),t(this,{execution:"async"});return}let e=t.split("\n").filter(t=>t),n=Math.min(...e.map(t=>t.length-t.trimStart().length));for(let t of e.map(t=>t.slice(n)).map(t=>" ".repeat(2*this.indent)+t))this.content.push(t)}compile(){let t=Function,e=this?.content??[""];return new t(...Object.keys(this.closed),`return function (${this.args.join(", ")}) {
+${e.join("\n")}
+};`)(...Object.values(this.closed))}}})}};
+//# sourceMappingURL=203305.36534d55d5.js.map

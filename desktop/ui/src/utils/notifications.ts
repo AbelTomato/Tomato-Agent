@@ -29,7 +29,7 @@ export const notify = {
       style: {
         background: 'var(--color-bg-primary)',
         color: 'var(--color-text-primary)',
-        border: '1px solid var(--color-danger)',
+        border: '1px solid var(--color-error)',
       },
     });
   },
@@ -43,7 +43,7 @@ export const notify = {
       style: {
         background: 'var(--color-bg-primary)',
         color: 'var(--color-text-primary)',
-        border: '1px solid var(--color-border)',
+        border: '1px solid var(--color-border-primary)',
       },
     });
   },

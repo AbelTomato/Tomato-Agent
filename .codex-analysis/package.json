@@ -1,0 +1,381 @@
+{
+  "name": "openai-codex-electron",
+  "productName": "Codex",
+  "author": "OpenAI",
+  "version": "26.1111.21308",
+  "description": "Codex",
+  "main": ".vite/build/early-bootstrap.js",
+  "imports": {
+    "#private-cli/*": {
+      "private-cli": "./src/private-cli/*.ts",
+      "public-cli": "./src/private-cli-contracts/*.ts",
+      "default": "./src/private-cli-contracts/*.ts"
+    }
+  },
+  "scripts": {
+    "compile": "node ./scripts/ensure-owl-electron-types.mjs && node ../cli/run-package-typescript.mjs --build",
+    "tsc": "node ./scripts/ensure-owl-electron-types.mjs && node ../cli/run-package-typescript.mjs",
+    "dev": "pnpm --dir .. run app",
+    "prepare:owl": "pnpm run owl:prepare-runtime && pnpm run desktop:host",
+    "owl": "pnpm run prepare:owl && pnpm run owl:run",
+    "owl:prepare-runtime": "node ./scripts/prepare-dev.mjs --native-modules",
+    "owl:run": "cross-env NODE_ENV=development node ./scripts/owl-shell.mjs run -- --use-mock-keychain",
+    "desktop:host": "cross-env NODE_ENV=development pnpm run build:dev-rspack",
+    "build": "node -e \"require('node:fs').rmSync('out',{force:true,recursive:true})\" && cross-env PNPM_YES=true pnpm run forge:make",
+    "forge:make": "pnpm run rebuild:native-modules && electron-forge make",
+    "forge:make:owl-shell": "electron-forge make",
+    "forge:publish": "pnpm run rebuild:native-modules && electron-forge publish",
+    "owl:ensure": "node ./scripts/owl-shell.mjs ensure",
+    "package": "node ./scripts/package.mjs",
+    "build:release": "node ./scripts/build-release.mjs",
+    "format": "oxfmt --check",
+    "format:fix": "oxfmt --write",
+    "lint": "node ./scripts/ensure-owl-electron-types.mjs && node ../scripts/run-package-oxlint.mjs --include-top-level-ts-scripts",
+    "lint:fix": "node ./scripts/ensure-owl-electron-types.mjs && node ../scripts/run-package-oxlint.mjs --include-top-level-ts-scripts --fix",
+    "metadata-path": "node --input-type=module -e \"import { getMetadataPath } from './scripts/dev-app-status.mts'; console.log(getMetadataPath());\"",
+    "memory:analyze-snapshot": "node ./scripts/analyze-heap-snapshot.mjs",
+    "test": "node ../scripts/run-vitest.mts run",
+    "test:quiet": "node ../scripts/run-vitest.mts \"run --silent --reporter=dot\"",
+    "e2e:computer-use-native-pipe": "node --import tsx ./scripts/computer-use-native-pipe-e2e.mjs",
+    "playwright:agent:repl": "node --import tsx ./scripts/playwright-electron-agent-cdp.mjs",
+    "devtools:reset": "node -e \"const fs=require('node:fs');const os=require('node:os');const path=require('node:path');for(const target of ['extensions/fmkadmapgofadopljbjfkapdkoienihi','Service Worker','Code Cache'])fs.rmSync(path.join(os.homedir(),'Library','Application Support','Codex',target),{force:true,recursive:true})\"",
+    "rebuild:native-modules": "node ./scripts/owl-shell.mjs prepare-native-modules",
+    "build:dev-rspack": "node --import tsx ./scripts/rspack/build.ts"
+  },
+  "dependencies": {
+    "@oai/cua-repl": "workspace:*",
+    "@oai/asb-rpc-client": "file:../../app_server_backend_client",
+    "@oai/sa-server-client": "file:../../../lib/applied/clients/js/oai_js_sa_server_client",
+    "@tanstack/query-core": "catalog:",
+    "@opentelemetry/api": "catalog:",
+    "@opentelemetry/core": "catalog:",
+    "@opentelemetry/otlp-transformer": "catalog:",
+    "@opentelemetry/resources": "catalog:",
+    "@opentelemetry/sdk-trace-base": "catalog:",
+    "@parcel/watcher": "catalog:",
+    "@sentry/core": "catalog:",
+    "@sentry/electron": "catalog:",
+    "@sentry/node": "catalog:",
+    "@worklouder/device-kit-oai": "file:../vendor/oai-js-registry/worklouder/device-kit-oai/0.2.1/package",
+    "@worklouder/wl-device-kit": "file:../vendor/oai-js-registry/worklouder/wl-device-kit/0.2.2/package",
+    "app-server-manager": "workspace:*",
+    "app-server-types": "workspace:*",
+    "better-sqlite3": "catalog:",
+    "browser-api": "file:../../../lib/oai_browser_use/browser-api",
+    "browser-backend-common": "link:../../../lib/oai_browser_use/browser-backend-common",
+    "browser-common": "workspace:*",
+    "bufferutil": "catalog:",
+    "capnweb": "catalog:",
+    "commands": "workspace:*",
+    "electron-context-menu": "catalog:",
+    "electron-dl": "catalog:",
+    "external-agent-migration": "workspace:*",
+    "extract-zip": "catalog:",
+    "git-worker": "workspace:*",
+    "js-yaml": "catalog:",
+    "lodash": "catalog:",
+    "mime-types": "catalog:",
+    "node-pty": "catalog:",
+    "objc-js": "catalog:",
+    "openai": "catalog:",
+    "protocol": "workspace:*",
+    "shared-node": "workspace:*",
+    "shlex": "catalog:",
+    "smol-toml": "catalog:",
+    "ssh-config": "catalog:",
+    "tar": "catalog:",
+    "tldts": "catalog:",
+    "tslib": "catalog:",
+    "utf-8-validate": "catalog:",
+    "vscode-jsonrpc": "catalog:",
+    "vscode-languageserver-protocol": "catalog:",
+    "vscode-uri": "catalog:",
+    "ws": "catalog:",
+    "yaml": "catalog:",
+    "yauzl": "catalog:",
+    "yjs": "catalog:",
+    "zod": "catalog:"
+  },
+  "wireit": {
+    "desktop:prepare": {
+      "dependencies": [
+        "desktop:common",
+        "desktop:plugins",
+        "desktop:native:stage:linux"
+      ]
+    },
+    "desktop:prepare:linux-protected": {
+      "dependencies": [
+        "desktop:prepare",
+        "desktop:linux-environment:start"
+      ]
+    },
+    "desktop:prepare:darwin": {
+      "dependencies": [
+        "desktop:common",
+        "desktop:plugins",
+        "desktop:native:stage:darwin",
+        "desktop:native:sky",
+        "desktop:darwin-helpers"
+      ]
+    },
+    "desktop:prepare:win32": {
+      "dependencies": [
+        "desktop:common",
+        "desktop:plugins:win32",
+        "desktop:native:stage:win32",
+        "desktop:windows-app-icons"
+      ]
+    },
+    "desktop:common": {
+      "dependencies": [
+        "desktop:types",
+        "desktop:blobs",
+        "desktop:host-build",
+        "desktop:dictation-ducking",
+        "desktop:dock-icons",
+        "desktop:tectonic",
+        "desktop:owl-modules",
+        "desktop:third-party-notices",
+        "desktop:owl-types"
+      ]
+    },
+    "desktop:types": {
+      "command": "node ./scripts/desktop-dev/prerequisite.mjs types"
+    },
+    "desktop:blobs": {
+      "command": "node --import tsx ./scripts/desktop-dev/prerequisite.mjs blobs"
+    },
+    "desktop:host-build": {
+      "command": "node --import tsx ./scripts/rspack/build.ts --app-server-types-prepared",
+      "dependencies": [
+        "desktop:types"
+      ],
+      "env": {
+        "NODE_ENV": "development"
+      }
+    },
+    "desktop:resources": {
+      "command": "node ./scripts/desktop-dev/publish-resources.mjs",
+      "dependencies": [
+        "desktop:cli-resources",
+        "desktop:cua-runtime"
+      ]
+    },
+    "desktop:cli-resources": {
+      "command": "node --import tsx ./scripts/desktop-dev/resources.ts"
+    },
+    "desktop:cua-runtime": {
+      "command": "node --import tsx ./scripts/desktop-dev/cua-runtime.ts"
+    },
+    "desktop:dock-icons": {
+      "command": "node --import tsx ./scripts/desktop-dev/dock-icons.ts",
+      "dependencies": [
+        "desktop:blobs"
+      ]
+    },
+    "desktop:tectonic": {
+      "command": "node --use-env-proxy --import tsx ./scripts/desktop-dev/tectonic.ts",
+      "dependencies": [
+        "desktop:cli-resources",
+        "desktop:blobs"
+      ]
+    },
+    "desktop:plugins": {
+      "command": "node --import tsx ./scripts/stage-dev-plugins.ts publish",
+      "dependencies": [
+        "desktop:plugins:prepare",
+        "desktop:resources"
+      ]
+    },
+    "desktop:plugins:prepare": {
+      "command": "node --import tsx ./scripts/stage-dev-plugins.ts prepare",
+      "dependencies": [
+        "desktop:blobs"
+      ]
+    },
+    "desktop:plugins:win32": {
+      "command": "node --import tsx ./scripts/stage-dev-plugins.ts publish",
+      "dependencies": [
+        "desktop:plugins:prepare:win32",
+        "desktop:resources"
+      ]
+    },
+    "desktop:plugins:prepare:win32": {
+      "command": "node --import tsx ./scripts/stage-dev-plugins.ts prepare",
+      "dependencies": [
+        "desktop:cli-resources",
+        "desktop:blobs"
+      ]
+    },
+    "desktop:owl:ensure": {
+      "command": "node ./scripts/owl-shell.mjs ensure"
+    },
+    "desktop:linux-environment:start": {
+      "command": "node ./scripts/desktop-dev/linux-environment/start.mjs",
+      "dependencies": [
+        "desktop:owl:ensure"
+      ]
+    },
+    "desktop:native:hid-topology-watcher": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native hid-topology-watcher --incremental",
+      "dependencies": [
+        "desktop:owl:ensure"
+      ]
+    },
+    "desktop:native:remote-control-device-key": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native remote-control-device-key",
+      "dependencies": [
+        "desktop:native:hid-topology-watcher"
+      ]
+    },
+    "desktop:native:shared-texture": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native shared-texture",
+      "dependencies": [
+        "desktop:native:remote-control-device-key"
+      ]
+    },
+    "desktop:native:browser-use-peer-authorization:if-enabled": {
+      "command": "node ./scripts/desktop-dev/run-conditional-native-build.mjs env:CODEX_BROWSER_USE_PEER_AUTHORIZATION 1 ./scripts/build-browser-use-peer-authorization-native.mjs",
+      "dependencies": [
+        "desktop:owl:ensure"
+      ]
+    },
+    "desktop:native:hid-topology-watcher:darwin": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native hid-topology-watcher --incremental",
+      "dependencies": [
+        "desktop:native:browser-use-peer-authorization:if-enabled"
+      ]
+    },
+    "desktop:native:usb-webauthn": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native usb-webauthn --incremental",
+      "dependencies": [
+        "desktop:native:hid-topology-watcher:darwin"
+      ]
+    },
+    "desktop:native:shared-texture:darwin": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native shared-texture",
+      "dependencies": [
+        "desktop:native:usb-webauthn"
+      ]
+    },
+    "desktop:native:devicecheck:if-required": {
+      "command": "node ./scripts/desktop-dev/run-conditional-native-build.mjs arch arm64 ./scripts/build-devicecheck-native.mjs --dev-cache",
+      "dependencies": [
+        "desktop:native:shared-texture:darwin"
+      ]
+    },
+    "desktop:native:input-monitoring-permission": {
+      "command": "node ./scripts/build-input-monitoring-permission-native.mjs --incremental",
+      "dependencies": [
+        "desktop:native:devicecheck:if-required"
+      ]
+    },
+    "desktop:native:remote-control-device-key:darwin": {
+      "command": "node ./scripts/build-remote-control-device-key-native.mjs",
+      "dependencies": [
+        "desktop:native:input-monitoring-permission"
+      ]
+    },
+    "desktop:native:airpods-mute": {
+      "command": "node ./scripts/build-airpods-mute-native.mjs --incremental",
+      "dependencies": [
+        "desktop:native:remote-control-device-key:darwin"
+      ]
+    },
+    "desktop:native:sky": {
+      "command": "node ./scripts/build-sky-native.mjs",
+      "dependencies": [
+        "desktop:native:airpods-mute",
+        "desktop:blobs"
+      ]
+    },
+    "desktop:native:windows-account": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native windows-account --incremental",
+      "dependencies": [
+        "desktop:native:shared-texture"
+      ]
+    },
+    "desktop:native:computer-use-app-icons": {
+      "command": "node ./scripts/owl-shell.mjs prepare-app-native computer-use-app-icons",
+      "dependencies": [
+        "desktop:owl:ensure"
+      ]
+    },
+    "desktop:native:stage:linux": {
+      "command": "node --import tsx ./scripts/stage-dev-native.ts",
+      "dependencies": [
+        "desktop:native:shared-texture",
+        "desktop:cli-resources"
+      ]
+    },
+    "desktop:native:stage:darwin": {
+      "command": "node --import tsx ./scripts/stage-dev-native.ts",
+      "dependencies": [
+        "desktop:native:airpods-mute",
+        "desktop:cli-resources"
+      ]
+    },
+    "desktop:native:stage:win32": {
+      "command": "node --import tsx ./scripts/stage-dev-native.ts",
+      "dependencies": [
+        "desktop:native:windows-account",
+        "desktop:native:computer-use-app-icons",
+        "desktop:cli-resources"
+      ]
+    },
+    "desktop:owl-modules": {
+      "command": "node ./scripts/owl-shell.mjs prepare-native-modules",
+      "dependencies": [
+        "desktop:owl:ensure"
+      ]
+    },
+    "desktop:darwin-helpers": {
+      "dependencies": [
+        "desktop:launch-services-helper",
+        "desktop:dock-tile-plugin",
+        "desktop:bare-modifier-monitor",
+        "desktop:realtime-voice-wake-word",
+        "desktop:system-audio-spectrum"
+      ]
+    },
+    "desktop:launch-services-helper": {
+      "command": "node ./scripts/build-launch-services-helper.mjs"
+    },
+    "desktop:dock-tile-plugin": {
+      "command": "node ./scripts/build-dock-tile-plugin.mjs"
+    },
+    "desktop:bare-modifier-monitor": {
+      "command": "node ./scripts/build-bare-modifier-monitor.mjs"
+    },
+    "desktop:realtime-voice-wake-word": {
+      "command": "node ./scripts/build-realtime-voice-wake-word.mjs"
+    },
+    "desktop:dictation-ducking": {
+      "command": "node ./scripts/build-dictation-ducking.mjs"
+    },
+    "desktop:system-audio-spectrum": {
+      "command": "node ./scripts/build-system-audio-spectrum.mjs"
+    },
+    "desktop:windows-app-icons": {
+      "command": "node ./scripts/prepare-dev.mjs --platform-helpers",
+      "dependencies": [
+        "desktop:blobs"
+      ]
+    },
+    "desktop:third-party-notices": {
+      "command": "node ./scripts/prepare-dev.mjs --notices",
+      "dependencies": [
+        "desktop:blobs"
+      ]
+    },
+    "desktop:owl-types": {
+      "command": "node ./scripts/ensure-owl-electron-types.mjs"
+    }
+  },
+  "codexBuildFlavor": "prod",
+  "codexBuildNumber": "27194",
+  "codexWindowsPackageIdentity": "OpenAI.Codex",
+  "codexWindowsPackagePublisher": "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B",
+  "codexWindowsAppContainedCore": "1"
+}
