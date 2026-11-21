@@ -19,11 +19,21 @@ async function load(file, replacements) {
 }
 const { ProjectNavigation } = await load('../src/desktop-chat/ProjectNavigation.tsx', [
   [/import \{[^}]+\} from 'lucide-react';/, 'const ChevronDown = () => null, Folder = () => null, MessageSquare = () => null, MoreHorizontal = () => null, Plus = () => null, Settings = () => null;'],
+  ["import { useState, useRef, forwardRef, useImperativeHandle } from 'react';", 'const { useState, useRef } = globalThis.__chatHooks, forwardRef = render => render, useImperativeHandle = () => {};'],
+  ["import { SearchBar, SearchBarHandle } from '../components/SearchBar';", 'const SearchBar = () => null;'],
 ]);
 const { DesktopChatApp } = await load('../src/desktop-chat/DesktopChatApp.tsx', [
   ["import { useEffect, useRef, useState } from 'react';", 'const { useEffect, useRef, useState } = globalThis.__chatHooks;'],
   ["import { desktopClient } from '../desktop/client';", 'const desktopClient = { listen: globalThis.__chatListen, invoke: globalThis.__chatInvoke };'],
-  ["import { ProjectNavigation } from './ProjectNavigation';", 'const ProjectNavigation = () => null;'],
+  [/import \{ ProjectNavigation, ProjectNavigationHandle \} from '\.\/ProjectNavigation';/, 'const ProjectNavigation = () => null;'],
+  ["import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';", 'const useKeyboardShortcuts = () => {};'],
+  ["import { LoadingSpinner, LoadingMessage } from '../components/LoadingState';", 'const LoadingSpinner = () => null, LoadingMessage = () => null;'],
+  ["import { MessageContent } from '../components/MessageContent';", 'const MessageContent = ({ content }) => content;'],
+  ["import { ChangesetViewer } from '../components/ChangesetViewer';", 'const ChangesetViewer = () => null;'],
+  ["import { useTheme } from '../hooks/useTheme';", 'const useTheme = () => ({ theme: "light", resolvedTheme: "light", setTheme() {} });'],
+  ["import { Toaster } from 'react-hot-toast';", 'const Toaster = () => null;'],
+  ["import { notify } from '../utils/notifications';", 'const notify = { error() {}, success() {}, info() {} };'],
+  [/<MessageContent content=\{message\.content\} \/>/, '<div>{message.content}</div>'],
 ]);
 function nodes(tree, match = () => true) {
   if (!tree || typeof tree !== 'object') return [];

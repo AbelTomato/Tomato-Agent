@@ -31,7 +31,7 @@ test('the application has one native desktop UI entry', async () => {
   assert.match(component, /desktop_agent_inspect_changeset/);
   assert.match(component, /停止剩余修改/);
   assert.match(component, /完整内容均参与审批摘要/);
-  assert.match(component, /逐行差异/);
+  assert.match(component, /<ChangesetViewer[\s\S]*?oldValue=\{change\.base_content \?\? ''\}[\s\S]*?newValue=\{change\.content\}/);
   assert.match(component, /部分文件已经写入/);
   assert.match(component, /检查并继续剩余修改/);
   assert.match(component, /commitInspection\?\.status === 'needs_inspection'/);
