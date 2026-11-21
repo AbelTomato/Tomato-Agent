@@ -17,6 +17,7 @@ def install_desktop(app: FastAPI, *, token: str, instance: str,
                     owner: str | None, stop: Callable[[], None]) -> None:
     app.state.desktop_connection_installed = True
     clients: set[str] = set()
+    app.state.desktop_clients = clients
     gate = asyncio.Lock()
     closing = False
     pending_owner_shutdown = False

@@ -5,7 +5,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tauri::Manager;
 
@@ -67,7 +69,9 @@ pub struct EngineIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_draft_directory, AgentTaskInput, EngineIdentity, EngineManager};
+    use super::{
+        local_draft_directory, AgentTaskInput, EngineIdentity, EngineManager, TraceConsumer,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -193,6 +197,81 @@ mod tests {
     }
 
     #[test]
+    fn trace_consumer_authenticates_polls_and_persists_a_runtime_span() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let root = std::env::temp_dir().join(format!("trace-consumer-{}", uuid::Uuid::new_v4()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let runtime_instance_id = uuid::Uuid::new_v4();
+        let event_id = uuid::Uuid::new_v4();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "schema_version":"runtime-trace/v1",
+            "runtime_instance_id":runtime_instance_id,
+            "items":[{
+                "schema_version":"runtime-trace/v1","event_id":event_id,
+                "runtime_instance_id":runtime_instance_id,"sequence":1,
+                "trace_id":uuid::Uuid::new_v4(),"span_id":uuid::Uuid::new_v4(),
+                "parent_span_id":null,"run_id":uuid::Uuid::new_v4(),
+                "operation":"run.execute","started_at":"2026-11-20T00:00:00Z",
+                "duration_ms":2.5,"status":"ok","error_code":null,
+                "error_category":null,"attributes":{}
+            }],
+            "next_cursor":1,"dropped_total":0,"oldest_sequence":1,"gap_count":0
+        }))
+        .unwrap();
+        let response_body = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let count = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+            assert!(request.contains("get /api/desktop/traces?after=0&limit=500"));
+            assert!(request.contains("authorization: bearer trace-token"));
+            assert!(request.contains("x-tomato-instance: service-instance"));
+            assert!(request.contains("x-tomato-client: desktop-client"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .unwrap();
+            stream.write_all(&response_body).unwrap();
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consumer = TraceConsumer::start(
+            root.join("traces"),
+            port,
+            "trace-token".into(),
+            "service-instance".into(),
+            "desktop-client".into(),
+            client,
+        )
+        .unwrap();
+
+        let log = root.join("traces").join("2026-11-20.jsonl");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !log.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        consumer.stop();
+        server.join().unwrap();
+
+        let contents = std::fs::read_to_string(log).unwrap();
+        assert!(contents.contains(&event_id.to_string()));
+        let store = crate::trace_store::TraceStore::open(&root.join("traces")).unwrap();
+        assert_eq!(store.cursor(runtime_instance_id).unwrap(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn pending_source_deletions_gate_memory_recall_before_engine_access() {
         let path = std::env::temp_dir().join(format!("memory-gate-{}.db", uuid::Uuid::new_v4()));
         let store = crate::chat::ChatStore::open(&path).unwrap();
@@ -286,6 +365,145 @@ struct Process {
     client: String,
     memory_enabled: bool,
     bridge: crate::desktop_bridge::BridgeServer,
+    trace_consumer: TraceConsumer,
+}
+
+struct TraceConsumer {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TraceConsumer {
+    fn request_page(
+        client: &Client,
+        port: u16,
+        token: &str,
+        instance: &str,
+        client_id: &str,
+        after: u64,
+    ) -> Result<crate::trace_store::TracePage, &'static str> {
+        let endpoint =
+            format!("http://127.0.0.1:{port}/api/desktop/traces?after={after}&limit=500");
+        let response = client
+            .get(endpoint)
+            .bearer_auth(token)
+            .header("X-Tomato-Instance", instance)
+            .header("X-Tomato-Client", client_id)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .map_err(|_| "trace_poll_failed")?;
+        let bytes = response.bytes().map_err(|_| "trace_response_invalid")?;
+        serde_json::from_slice::<crate::trace_store::TracePage>(&bytes)
+            .map_err(|_| "trace_response_invalid")
+    }
+
+    fn start(
+        root: PathBuf,
+        port: u16,
+        token: String,
+        instance: String,
+        client_id: String,
+        client: Client,
+    ) -> Result<Self, String> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("tomato-agent-trace-consumer".into())
+            .spawn(move || {
+                let mut failure_streak = 0_u32;
+                let mut store = None;
+                while !thread_stop.load(Ordering::Relaxed) {
+                    if store.is_none() {
+                        match crate::trace_store::TraceStore::open(&root) {
+                            Ok(opened) => store = Some(opened),
+                            Err(_) => {
+                                failure_streak = (failure_streak + 1).min(6);
+                                let delay_seconds = (1_u64 << failure_streak).min(60);
+                                for _ in 0..delay_seconds * 10 {
+                                    if thread_stop.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(100));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    let Some(store) = store.as_mut() else {
+                        continue;
+                    };
+                    let active = store.active_runtime_instance().ok().flatten();
+                    let after = active
+                        .and_then(|runtime_instance_id| store.cursor(runtime_instance_id).ok())
+                        .unwrap_or(0);
+                    let mut cycle_ok = false;
+                    let result =
+                        Self::request_page(&client, port, &token, &instance, &client_id, after);
+                    let result = match result {
+                        Ok(page)
+                            if active
+                                .is_some_and(|current| current != page.runtime_instance_id) =>
+                        {
+                            Self::request_page(&client, port, &token, &instance, &client_id, 0)
+                        }
+                        result => result,
+                    };
+                    let mut failure_code = None;
+                    match result {
+                        Ok(page) => {
+                            let cursor = if active
+                                .is_some_and(|current| current != page.runtime_instance_id)
+                            {
+                                0
+                            } else {
+                                after
+                            };
+                            match store.consume_page(page, cursor) {
+                                Ok(_) => cycle_ok = true,
+                                Err(_) => failure_code = Some("trace_store_failed"),
+                            }
+                        }
+                        Err(error_code) => failure_code = Some(error_code),
+                    }
+                    if cycle_ok {
+                        failure_streak = 0;
+                    } else {
+                        let _ = store
+                            .record_consumer_error(failure_code.unwrap_or("trace_store_failed"));
+                        failure_streak = (failure_streak + 1).min(6);
+                    }
+                    let delay_seconds = if failure_streak == 0 {
+                        1
+                    } else {
+                        (1_u64 << failure_streak).min(60)
+                    };
+                    for _ in 0..delay_seconds * 10 {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            })
+            .map_err(|_| "无法启动 Trace 消费器".to_string())?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for TraceConsumer {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 pub struct EngineManager {
@@ -516,6 +734,56 @@ pub fn write_task_probe_report(
             }
             std::thread::sleep(Duration::from_millis(100));
         };
+        let trace_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "无法定位应用数据目录")?
+            .join("TomatoAgent")
+            .join("engine")
+            .join("traces");
+        let trace_records =
+            wait_for_task_trace(trace_root.clone(), &run_id, Duration::from_secs(8))?;
+        let trace_spans = trace_records
+            .iter()
+            .filter(|record| record["record_type"] == "span")
+            .collect::<Vec<_>>();
+        let root_span = trace_spans
+            .iter()
+            .find(|record| record["operation"] == "run.execute")
+            .ok_or("Trace 缺少 Run Span")?;
+        let model_span = trace_spans
+            .iter()
+            .find(|record| record["operation"] == "model.complete")
+            .ok_or("Trace 缺少模型 Span")?;
+        if root_span["trace_id"] != run_id
+            || model_span["trace_id"] != run_id
+            || model_span["parent_span_id"] != root_span["span_id"]
+            || trace_records.iter().any(|record| {
+                let record = record.to_string();
+                record.contains("桌面任务闭环通过") || record.contains("请运行本地桌面闭环验收")
+            })
+        {
+            return Err("Trace Span 关联或隐私验收失败".into());
+        }
+        let runtime_instance_id = root_span["runtime_instance_id"]
+            .as_str()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .ok_or("Trace Runtime 实例标识缺失")?;
+        let expected_cursor = trace_spans
+            .iter()
+            .filter_map(|span| {
+                span["runtime_instance_id"]
+                    .as_str()
+                    .and_then(|_| span["sequence"].as_u64())
+            })
+            .max()
+            .ok_or("Trace Span 序号缺失")?;
+        let trace_store = crate::trace_store::TraceStore::open(&trace_root)?;
+        let persisted_cursor = trace_store.cursor(runtime_instance_id)?;
+        if persisted_cursor < expected_cursor {
+            return Err("Trace 持久化游标未完成".into());
+        }
+        drop(trace_store);
         let answer = completed
             .pointer("/result/answer")
             .and_then(Value::as_str)
@@ -555,7 +823,9 @@ pub fn write_task_probe_report(
             serde_json::json!({"passed":passed,"desktop_session_id":session_id,
             "engine_session_id":engine_session,"run_id":run_id,"waiting_action":"provide_input",
             "status":completed["status"],"events":events_count,"history_messages":history.len(),
-            "answer":answer,"provider_requests":2,"result_message_id":format!("agent-assistant-{run_id}")}),
+            "answer":answer,"provider_requests":2,"trace_spans":trace_spans.len(),
+            "trace_records":trace_records.len(),"trace_cursor":persisted_cursor,
+            "result_message_id":format!("agent-assistant-{run_id}")}),
         )
     })();
     let provider_result = provider
@@ -586,6 +856,51 @@ pub fn write_task_probe_report(
         return Err("桌面任务验收失败".into());
     }
     Ok(())
+}
+
+fn wait_for_task_trace(
+    root: PathBuf,
+    run_id: &str,
+    timeout: Duration,
+) -> Result<Vec<Value>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut records = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !entry.file_type().is_ok_and(|kind| kind.is_file())
+                    || !path
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                {
+                    continue;
+                }
+                let Ok(contents) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                records.extend(
+                    contents
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .filter(|record| record["run_id"].as_str() == Some(run_id)),
+                );
+            }
+        }
+        if records
+            .iter()
+            .any(|record| record["operation"] == "run.execute")
+            && records
+                .iter()
+                .any(|record| record["operation"] == "model.complete")
+        {
+            return Ok(records);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Trace 消费超时或记录不完整".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn write_changeset_probe_report(
@@ -1822,6 +2137,35 @@ impl EngineManager {
             let _ = child.wait();
             return Err("无法连接助手引擎".into());
         }
+        let trace_client = match Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("无法初始化 Trace 连接".into());
+            }
+        };
+        let trace_consumer = match TraceConsumer::start(
+            app_data.join("traces"),
+            identity.port,
+            token.clone(),
+            identity.service_instance_id.clone(),
+            client_id.clone(),
+            trace_client,
+        ) {
+            Ok(consumer) => consumer,
+            Err(_) => {
+                eprintln!("Trace consumer unavailable error_code=trace_consumer_start_failed");
+                TraceConsumer {
+                    stop: Arc::new(AtomicBool::new(true)),
+                    thread: None,
+                }
+            }
+        };
         *state = Some(Process {
             child,
             identity: identity.clone(),
@@ -1830,6 +2174,7 @@ impl EngineManager {
             client: client_id,
             memory_enabled,
             bridge,
+            trace_consumer,
         });
         Ok(identity)
     }
@@ -2064,6 +2409,7 @@ impl EngineManager {
         let Some(mut process) = state.take() else {
             return Ok(());
         };
+        process.trace_consumer.stop();
         let close = self.request_for(
             process.identity.port,
             &process.token,

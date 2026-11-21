@@ -46,6 +46,7 @@ from app.memory.repository import MemoryRepository
 from app.memory.extraction import MemoryExtractor
 from app.memory.worker import MemoryWorker
 from app.layered_memory import LayeredMemoryRepository, LayeredMemoryService, LayeredMemoryWorker
+from app.observability.trace_buffer import RuntimeTraceBuffer
 
 
 class UnconfiguredLLM:
@@ -81,6 +82,7 @@ class AppDependencies:
     layered_memory_repository: LayeredMemoryRepository
     layered_memory_service: LayeredMemoryService
     layered_memory_worker: LayeredMemoryWorker | None
+    trace_buffer: RuntimeTraceBuffer
 
 
 def create_llm_client(config: Settings) -> LLMClient:
@@ -115,6 +117,7 @@ def create_knowledge_service(
 
 
 def build_app_dependencies(config: Settings) -> AppDependencies:
+    trace_buffer = RuntimeTraceBuffer()
     session_repository = SessionRepository(config.database_path)
     memory_repository = MemoryRepository(config.database_path)
     layered_memory_repository = LayeredMemoryRepository(config.database_path)
@@ -273,7 +276,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
             settlement_termination_verifier=settlement_termination_verifier,
             memory_repository=memory_repository, memory_embedding_client=embedding_client,
             layered_memory_service=layered_memory_service, project_service=project_service,
-            execution_backend=execution_backend),
+            execution_backend=execution_backend, trace_buffer=trace_buffer),
         config_digest=canonical_digest({"model": config.llm_model, "base_url": config.llm_base_url,
             "runtime": config.runtime_config.model_dump(mode="json"),
             "writing": {"retrieval_mode": config.writing_retrieval_mode,
@@ -338,6 +341,7 @@ def build_app_dependencies(config: Settings) -> AppDependencies:
         layered_memory_repository=layered_memory_repository,
         layered_memory_service=layered_memory_service,
         layered_memory_worker=layered_memory_worker,
+        trace_buffer=trace_buffer,
     )
 
 

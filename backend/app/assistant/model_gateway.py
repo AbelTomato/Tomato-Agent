@@ -3,12 +3,16 @@
 import asyncio
 import inspect
 import math
+import re
 
 from app.agent.models import LLMResponse
 from app.execution.ports import canonical_digest
 from app.execution.state_machine import StaleExecutionOwner
 
 from app.llm.compatible_client import _REQUEST_CORRELATION
+from app.observability.tracing import runtime_span
+
+_TRACE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 class RunModelGateway:
@@ -74,12 +78,21 @@ class RunModelGateway:
             _REQUEST_CORRELATION.reset(token)
         cancellation = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
         try:
-            async with asyncio.timeout(row["timeout_seconds"]):
-                if cancellation is not None:
-                    done, _ = await asyncio.wait({request, cancellation}, return_when=asyncio.FIRST_COMPLETED)
-                    if cancellation in done:
-                        raise asyncio.CancelledError
-                response = await request
+            model = getattr(self.client, "model", None)
+            if not isinstance(model, str):
+                model = getattr(getattr(self.client, "client", None), "model", None)
+            attributes = (
+                {"model_name": model}
+                if isinstance(model, str) and _TRACE_IDENTIFIER.fullmatch(model)
+                else {}
+            )
+            async with runtime_span("model.complete", attributes=attributes):
+                async with asyncio.timeout(row["timeout_seconds"]):
+                    if cancellation is not None:
+                        done, _ = await asyncio.wait({request, cancellation}, return_when=asyncio.FIRST_COMPLETED)
+                        if cancellation in done:
+                            raise asyncio.CancelledError
+                    response = await request
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
             await self.port.commit_model_call(row["id"], response)

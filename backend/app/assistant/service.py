@@ -12,6 +12,7 @@ from app.execution.models import AssistantExecutionSnapshot
 from app.execution.ports import canonical_digest
 from app.execution.desktop_backend import ExecutionBackend
 from app.desktop.capability_bridge import DesktopBridgeError
+from app.observability.tracing import runtime_span
 from .capabilities import CapabilityRegistry
 from .context import build_assistant_context
 from .execution import AssistantExecutionPort, execute_assistant
@@ -91,7 +92,8 @@ class AssistantService:
     def __init__(self, runs, execution, sessions, workspaces, artifacts, knowledge, llm, config,
                  termination_verifier=None, settlement_termination_verifier=None,
                  memory_repository=None, memory_embedding_client=None, layered_memory_service=None,
-                 project_service=None, execution_backend: ExecutionBackend | None = None):
+                 project_service=None, execution_backend: ExecutionBackend | None = None,
+                 trace_buffer=None):
         self.runs, self.execution, self.sessions = runs, execution, sessions
         self.workspaces, self.llm = workspaces, llm
         self.config = config
@@ -100,6 +102,7 @@ class AssistantService:
         self.layered_memory_service = layered_memory_service
         self.project_service = project_service
         self.execution_backend = execution_backend
+        self.trace_buffer = trace_buffer
         self.termination_verifier = termination_verifier
         self.settlement_termination_verifier = settlement_termination_verifier
         self.registry = CapabilityRegistry()
@@ -165,6 +168,10 @@ class AssistantService:
         return run
 
     async def execute(self, run, lease, worker_port, config_digest):
+        async with runtime_span("run.execute", run_id=run.id, buffer=self.trace_buffer):
+            return await self._execute(run, lease, worker_port, config_digest)
+
+    async def _execute(self, run, lease, worker_port, config_digest):
         snapshot = await self.execution.get_snapshot(run.id)
         if not self.config.assistant_enabled:
             return await worker_port.finish("failed", error={"code": "assistant_disabled"})

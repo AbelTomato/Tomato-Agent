@@ -2,6 +2,7 @@
 
 mod chat;
 mod desktop_bridge;
+mod trace_store;
 
 mod engine;
 

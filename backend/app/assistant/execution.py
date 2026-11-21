@@ -19,12 +19,31 @@ from app.execution.ports import LeaseExecutionPort
 from app.execution.state_machine import StaleExecutionOwner
 from app.execution.recovery import RecoveryConflict
 from app.errors import ToolNotFoundError
+from app.observability.tracing import runtime_span
 from app.runs.models import PendingAction
 from app.tools.base import ToolContext, ToolResult
 from .models import AssistantResult, CapabilityError, CapabilityOutcome
 from .tools.project import ProjectReadAuthorizationRequired
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_tool_operation(tool_name: str) -> str:
+    if tool_name in {"search_memory", "read_memory"}:
+        return "memory.recall"
+    if tool_name in {"search_knowledge", "read_knowledge", "answer_knowledge"}:
+        return "knowledge.search"
+    if tool_name == "run_tests":
+        return "validation.run"
+    return "tool.execute"
+
+
+def _trace_tool_error_category(operation: str) -> str:
+    return {
+        "memory.recall": "memory",
+        "knowledge.search": "knowledge",
+        "validation.run": "validation",
+    }.get(operation, "tool")
 
 
 class AssistantExecutionPort(LeaseExecutionPort):
@@ -154,13 +173,14 @@ class AssistantExecutionPort(LeaseExecutionPort):
                     memory_item_specs = []
                     if self.memory_provider is not None and not skip_memory_for_remainder:
                         try:
-                            recalled = await asyncio.wait_for(
-                                self.memory_provider(
-                                    state.structured_state.get("task", ""), snapshot.session_id,
-                                    state.structured_state.get("memory_lookup_requests", []), snapshot.run_id,
-                                ),
-                                timeout=min(1.5, remaining),
-                            )
+                            async with runtime_span("memory.recall"):
+                                recalled = await asyncio.wait_for(
+                                    self.memory_provider(
+                                        state.structured_state.get("task", ""), snapshot.session_id,
+                                        state.structured_state.get("memory_lookup_requests", []), snapshot.run_id,
+                                    ),
+                                    timeout=min(1.5, remaining),
+                                )
                             selected_memory_generation = recalled.get("generation")
                             memory_item_specs = [
                                 (item, "core_preference") for item in recalled.get("core_preferences", [])
@@ -466,13 +486,26 @@ class AssistantExecutionPort(LeaseExecutionPort):
                             profile=self.profile, lease=self.lease,
                             invocation_id=str(operation.id), step_id=str(step.id),
                             remaining_seconds=timeout, deadline=deadline, cancel_event=self.cancel_event, model_client=client)
-                        request = asyncio.create_task(tools.execute(operation.tool_name, operation.input_payload, context, timeout=timeout))
-                        cancellation = asyncio.create_task(self.cancel_event.wait())
+                        request = None
+                        cancellation = None
+                        trace_operation = _trace_tool_operation(operation.tool_name)
                         try:
-                            done, _ = await asyncio.wait({request, cancellation}, return_when=asyncio.FIRST_COMPLETED)
-                            if cancellation in done:
-                                raise asyncio.CancelledError
-                            tool_result = await request
+                            async with runtime_span(
+                                trace_operation,
+                                attributes={"tool_name": operation.tool_name},
+                            ) as trace_outcome:
+                                request = asyncio.create_task(tools.execute(
+                                    operation.tool_name, operation.input_payload, context, timeout=timeout
+                                ))
+                                cancellation = asyncio.create_task(self.cancel_event.wait())
+                                done, _ = await asyncio.wait(
+                                    {request, cancellation}, return_when=asyncio.FIRST_COMPLETED
+                                )
+                                if cancellation in done:
+                                    raise asyncio.CancelledError
+                                tool_result = await request
+                                if not tool_result.success and trace_outcome is not None:
+                                    trace_outcome.fail("tool_failed", _trace_tool_error_category(trace_operation))
                         except Exception:
                             # No exception text is persisted or sent to the model. Writes may have happened.
                             unknown = descriptor.side_effect != "read_only"
@@ -484,9 +517,10 @@ class AssistantExecutionPort(LeaseExecutionPort):
                                     code="tool_result_unknown" if unknown else "tool_execution_failed"))
                             tool_result = ToolResult(success=False, data=outcome.model_dump(mode="json"))
                         finally:
-                            request.cancel()
-                            cancellation.cancel()
-                            await asyncio.gather(request, cancellation, return_exceptions=True)
+                            pending_tasks = [task for task in (request, cancellation) if task is not None]
+                            for task in pending_tasks:
+                                task.cancel()
+                            await asyncio.gather(*pending_tasks, return_exceptions=True)
                     if operation.tool_name in {"search_memory", "read_memory"} and tool_result.success:
                         reference = {"memory_lookup": operation.tool_name}
                         tool_result = ToolResult(success=True, data=CapabilityOutcome(
